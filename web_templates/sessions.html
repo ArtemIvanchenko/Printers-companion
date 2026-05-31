@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Сессии - Printer Analytics</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
+        .header { background: #1e3a5f; color: white; padding: 20px; }
+        .header h1 { font-size: 24px; }
+        .nav { background: #2d5a87; padding: 10px 20px; display: flex; gap: 20px; }
+        .nav a { color: white; text-decoration: none; padding: 8px 16px; border-radius: 4px; }
+        .nav a:hover { background: #3d7ab5; }
+        .content { padding: 20px; max-width: 1200px; margin: 0 auto; }
+        .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f8f9fa; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📋 Сессии</h1>
+    </div>
+    <nav class="nav">
+        <a href="/ui/">📊 Обзор</a>
+        <a href="/ui/sessions">📋 Сессии</a>
+        <a href="/ui/chat">💬 Чат с ИИ</a>
+        <a href="/ui/quality">✅ Качество</a>
+    </nav>
+    <div class="content">
+        <div class="card">
+            <table id="sessions-table">
+                <thead>
+                    <tr><th>ID</th><th>Дата</th><th>Тип</th><th>Материал</th><th>Длительность</th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+    <script>
+        fetch('http://localhost:8000/sessions/').then(r => r.json()).then(data => {
+            const tbody = document.querySelector('#sessions-table tbody');
+            (data.sessions || []).forEach(s => {
+                tbody.innerHTML += `<tr><td>${s.session_id}</td><td>${s.start_ts || '-'}</td><td>${s.classification || '-'}</td><td>${s.material || '-'}</td><td>${s.duration_sec ? Math.round(s.duration_sec/60) + ' мин' : '-'}</td></tr>`;
+            });
+        });
+    </script>
+</body>
+</html>

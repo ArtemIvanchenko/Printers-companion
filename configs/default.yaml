@@ -1,0 +1,27 @@
+analysis:
+  max_sensor_sample_rows: 5000
+  startup_window_rows: 100
+  max_stateflow_memory_mb: 512
+  layer_anomaly_robust_z_threshold: 3.5
+  min_causal_sample_size_observation: 3
+  min_causal_sample_size_candidate: 10
+historical_reanalysis:
+  window_days: 90
+  max_iterations: 10
+  compute_budget_seconds: 1800
+operator_context:
+  required_for_real_print:
+    - material
+    - powder_batch
+    - gas_cylinder_id
+    - gas_type
+imports:
+  incoming_path: /mnt/raw_logs/incoming
+  watch_mode: filesystem_events
+  require_operator_import_confirmation: true
+  file_stability_seconds: 60
+  file_stability_retry_seconds: 30
+  import_confirmation_timeout_hours: 24
+retention:
+  app_log_days: 90
+  report_artifact_days: 3650

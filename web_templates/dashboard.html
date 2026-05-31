@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Printer Analytics Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f1419; color: #fafafa; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        
+        .header { background: linear-gradient(135deg, #1a1f2e 0%, #2d3748 100%); padding: 25px 40px; border-bottom: 1px solid #2d3748; }
+        .header h1 { font-size: 28px; font-weight: 600; }
+        .header span { color: #60a5fa; }
+        
+        .nav { background: #1a1f2e; padding: 15px 40px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .nav a { 
+            background: #2d3748; color: #e2e8f0; padding: 10px 20px; 
+            text-decoration: none; border-radius: 8px; cursor: pointer;
+            transition: all 0.2s; font-size: 14px;
+        }
+        .nav a:hover { background: #4a5568; }
+        .nav a.active { background: #60a5fa; color: white; }
+        
+        .content { padding: 30px 40px; max-width: 1600px; margin: 0 auto; }
+        
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stat-card {
+            background: linear-gradient(135deg, #1e2433 0%, #2d3748 100%);
+            padding: 25px; border-radius: 16px; text-align: center;
+            border: 1px solid #4a5568;
+            transition: transform 0.2s;
+        }
+        .stat-card:hover { transform: translateY(-2px); }
+        .stat-card .value { font-size: 32px; font-weight: 700; }
+        .stat-card .label { color: #a0aec0; margin-top: 8px; font-size: 13px; }
+        
+        .section { background: #1a1f2e; border-radius: 16px; padding: 25px; margin-bottom: 25px; border: 1px solid #2d3748; }
+        .section h2 { color: #e2e8f0; margin-bottom: 20px; font-size: 18px; font-weight: 600; }
+        
+        .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); gap: 25px; }
+        .chart-container { background: #1a1f2e; border-radius: 12px; padding: 20px; border: 1px solid #2d3748; position: relative; }
+        .chart-container canvas { max-height: 300px; }
+        
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 14px; text-align: left; border-bottom: 1px solid #2d3748; }
+        th { background: #2d3748; color: #a0aec0; font-weight: 600; font-size: 12px; text-transform: uppercase; }
+        td { color: #e2e8f0; font-size: 14px; }
+        tr:hover { background: #2d3748; }
+        
+        .type-badge {
+            padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600;
+        }
+        .type-real { background: #10b981; color: white; }
+        .type-unknown { background: #f59e0b; color: black; }
+        .type-idle { background: #6b7280; color: white; }
+        
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; }
+
+        @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+        /* Live nav pulse */
+        @keyframes live-dot { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
+        #nav-live { position: relative; }
+        #nav-live::before { content:''; display:inline-block; width:7px; height:7px;
+            background:#ef4444; border-radius:50%; margin-right:4px;
+            animation: live-dot 1.4s ease-in-out infinite; }
+
+        /* --- Alarm animation --- */
+        @keyframes alarm-pulse {
+            0%   { box-shadow: 0 0 0 0 rgba(239,68,68,0);  border-color: #ef4444; }
+            40%  { box-shadow: 0 0 0 8px rgba(239,68,68,0.35); border-color: #ef4444; }
+            70%  { box-shadow: 0 0 0 14px rgba(239,68,68,0.1); border-color: #f87171; }
+            100% { box-shadow: 0 0 0 0 rgba(239,68,68,0);  border-color: #ef4444; }
+        }
+        .alarm-active {
+            border: 2px solid #ef4444 !important;
+            animation: alarm-pulse 2.4s ease-in-out infinite;
+            position: relative;
+        }
+        .alarm-badge {
+            position: absolute;
+            top: 10px; right: 14px;
+            background: #ef4444;
+            color: white;
+            font-weight: 900;
+            font-size: 15px;
+            width: 26px; height: 26px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 0 8px rgba(239,68,68,0.7);
+            z-index: 10;
+            animation: alarm-pulse 2.4s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🖨️ <span>Printer Analytics</span> Dashboard</h1>
+        <div style="font-size:13px;color:#a0aec0;margin-top:4px;">{!EXPR0!} &nbsp;·&nbsp; {!EXPR1!}</div>
+    </div>
+    
+    <nav class="nav">
+        <a href="#" onclick="showPage('overview')" id="nav-overview" class="active">📊 Обзор</a>
+        <a href="#" onclick="showPage('live')" id="nav-live">🔴 Live</a>
+        <a href="#" onclick="showPage('telemetry')" id="nav-telemetry">🌡️ Телеметрия</a>
+        <a href="#" onclick="showPage('timeline')" id="nav-timeline">📈 Таймлайн</a>
+        <a href="#" onclick="showPage('quality')" id="nav-quality">✅ Качество</a>
+        <a href="#" onclick="showPage('sessions')" id="nav-sessions">📋 Сессии</a>
+        <a href="#" onclick="showPage('consumption')" id="nav-consumption">⛽ Расход</a>
+        <a href="#" onclick="showPage('powder')" id="nav-powder">🧪 Порошок</a>
+        <a href="#" onclick="showPage('maintenance')" id="nav-maintenance">🔧 ТО</a>
+        <a href="#" onclick="showPage('chat')" id="nav-chat">💬 Чат</a>
+    </nav>
+
+    <div id="import-status-bar" style="background:#1a1f2e;padding:8px 40px;border-bottom:1px solid #2d3748;display:none;">
+        <div style="display:flex;align-items:center;gap:12px;font-size:13px;">
+            <span id="import-icon" style="font-size:16px;">⏳</span>
+            <span id="import-text" style="color:#e2e8f0;">Импорт логов...</span>
+            <div id="import-progress-wrap" style="flex:1;max-width:300px;height:8px;background:#2d3748;border-radius:4px;overflow:hidden;">
+                <div id="import-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#60a5fa,#10b981);border-radius:4px;transition:width 0.5s;"></div>
+            </div>
+            <span id="import-count" style="color:#a0aec0;font-size:12px;"></span>
+        </div>
+    </div>
+    
+    <div class="content">
+        <!-- Overview Page -->
+        <div id="page-overview">
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="value" style="color: #60a5fa;">{!EXPR2!}</div>
+                    <div class="label">Всего сессий</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" style="color: #10b981;">{!EXPR3!}</div>
+                    <div class="label">Печатей</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" style="color: #f59e0b;">{!EXPR4!}</div>
+                    <div class="label">Часов печати</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" style="color: #8b5cf6;">{!EXPR5!}</div>
+                    <div class="label">Строк логов</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" style="color: #ec4899;">{!EXPR6!}</div>
+                    <div class="label">Расход газа (бар)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" style="color: #06b6d4;">{!EXPR7!}</div>
+                    <div class="label">Расход порошка (кг)</div>
+                </div>
+            </div>
+            
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <h2>📊 Типы сессий</h2>
+                    <canvas id="typesChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>🔧 Материалы</h2>
+                    <canvas id="materialsChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>⏱️ Длительность печатей (мин)</h2>
+                    <canvas id="durationChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>📝 Строк логов по сессиям</h2>
+                    <canvas id="linesChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Telemetry Page -->
+        <div id="page-telemetry" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <h2>🌡️ Телеметрия процесса <span style="color:#60a5fa;font-size:14px;">({!EXPR8!})</span></h2>
+                <p style="color:#6b7280;font-size:13px;margin-top:6px;">
+                    Сигналы расшифрованы по словарю M-450-M (мнемосхема LaserStudio): O₂ — окисление,
+                    температуры стола/камеры, давление и влажность инертной атмосферы, время прожига по слоям.
+                </p>
+            </div>
+            {!EXPR9!}
+            {!EXPR10!}
+            <div class="charts-grid">
+                <div class="chart-container{!EXPR11!}">
+                    {!EXPR12!}
+                    <h2>🧪 Кислород O₂ (риск окисления)</h2>
+                    <canvas id="o2Chart"></canvas>
+                </div>
+                <div class="chart-container{!EXPR13!}">
+                    {!EXPR14!}
+                    <h2>🌡️ Температуры стола / камеры (°C)</h2>
+                    <canvas id="tempChart"></canvas>
+                </div>
+                <div class="chart-container{!EXPR15!}">
+                    {!EXPR16!}
+                    <h2>💧 Влажность атмосферы (%)</h2>
+                    <canvas id="humChart"></canvas>
+                </div>
+                <div class="chart-container{!EXPR17!}">
+                    {!EXPR18!}
+                    <h2>📊 Давление камеры</h2>
+                    <canvas id="pressChart"></canvas>
+                </div>
+                <div class="chart-container" style="grid-column: 1 / -1;">
+                    <h2>🔥 Время прожига по слоям (сек)</h2>
+                    <canvas id="burnLayerChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Timeline Page -->
+        <div id="page-timeline" style="display:none;">
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <h2>📈 Длительность по времени</h2>
+                    <canvas id="timelineChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>⏸️ Паузы по сессиям</h2>
+                    <canvas id="pausesChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>🔥 Burn events</h2>
+                    <canvas id="burnChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>📊 Строк на сессию</h2>
+                    <canvas id="sessionLinesChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Quality Page -->
+        <div id="page-quality" style="display:none;">
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <h2>✅ Результаты контроля</h2>
+                    <canvas id="qualityChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>🚫 Типы дефектов</h2>
+                    <canvas id="defectsChart"></canvas>
+                </div>
+            </div>
+            <div class="section" style="margin-top: 25px;">
+                <h2>📋 Последние результаты качества</h2>
+                <table>
+                    <thead>
+                        <tr><th>Дата</th><th>Результат</th><th>Дефект</th><th>Сессия</th></tr>
+                    </thead>
+                    <tbody>
+                        {!EXPR_QUALITY_ROWS!}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Sessions Page -->
+        <div id="page-sessions" style="display:none;">
+            <div class="section">
+                <h2>📋 Все сессии ({!EXPR25!})</h2>
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>Дата</th><th>Тип</th><th>Время</th><th>Длит.</th><th>Строк</th><th>Пауз</th></tr>
+                    </thead>
+                    <tbody>
+                        {!EXPR_SESSION_ROWS!}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Consumption Page -->
+        <div id="page-consumption" style="display:none;">
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <h2>⛽ Расход газа по сессиям</h2>
+                    <canvas id="gasChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h2>🧪 Расход порошка по сессиям</h2>
+                    <canvas id="powderChart"></canvas>
+                </div>
+            </div>
+            <div class="section" style="margin-top: 25px;">
+                <h2>📋 История расхода</h2>
+                <table>
+                    <thead>
+                        <tr><th>Дата</th><th>Газ (бар)</th><th>Порошок (кг)</th></tr>
+                    </thead>
+                    <tbody>
+                        {!EXPR_GAS_ROWS!}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Live Page -->
+        <div id="page-live" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <h2>🔴 Мониторинг в реальном времени
+                    <span id="live-status" style="font-size:13px;color:#6b7280;margin-left:12px;">● подключение...</span>
+                </h2>
+                <p style="color:#6b7280;font-size:13px;margin-top:6px;">
+                    При активной печати — данные из файла логов. Иначе — симуляция реалистичных значений.
+                </p>
+            </div>
+            <div class="stats" id="live-cards">
+                <div class="stat-card" id="live-card-o2">
+                    <div class="value" id="live-o2" style="color:#10b981;">—</div>
+                    <div class="label">O₂ % (предел {!EXPR38!})</div>
+                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
+                        <div id="live-bar-o2" style="height:100%;border-radius:2px;background:#10b981;width:0%;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+                <div class="stat-card" id="live-card-temp">
+                    <div class="value" id="live-temp" style="color:#60a5fa;">—</div>
+                    <div class="label">Стол ST5 °C (предел {!EXPR39!})</div>
+                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
+                        <div id="live-bar-temp" style="height:100%;border-radius:2px;background:#60a5fa;width:0%;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+                <div class="stat-card" id="live-card-press">
+                    <div class="value" id="live-press" style="color:#8b5cf6;">—</div>
+                    <div class="label">Давление SP4 бар (норма {!EXPR40!})</div>
+                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
+                        <div id="live-bar-press" style="height:100%;border-radius:2px;background:#8b5cf6;width:0%;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+                <div class="stat-card" id="live-card-hum">
+                    <div class="value" id="live-hum" style="color:#06b6d4;">—</div>
+                    <div class="label">Влажность % (предел {!EXPR41!})</div>
+                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
+                        <div id="live-bar-hum" style="height:100%;border-radius:2px;background:#06b6d4;width:0%;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="section" style="margin-top:20px;">
+                <h2>📈 Последние 60 точек</h2>
+                <canvas id="liveChart" style="max-height:280px;"></canvas>
+            </div>
+        </div>
+
+        <!-- Powder Page -->
+        <div id="page-powder" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <h2>🧪 Жизненный цикл порошка</h2>
+            </div>
+            <div class="stats" id="powder-cards">
+                <div class="stat-card">
+                    <div class="value" id="pow-remaining" style="color:#10b981;">—</div>
+                    <div class="label">Остаток порошка (кг)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="pow-consumed" style="color:#f59e0b;">—</div>
+                    <div class="label">Израсходовано (кг)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="pow-reuse" style="color:#8b5cf6;">—</div>
+                    <div class="label">Циклов переплавки</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="pow-quality" style="color:#10b981;">—</div>
+                    <div class="label">Качество порошка (%)</div>
+                </div>
+            </div>
+            <div class="section" style="margin-top:20px;">
+                <h2>Активная партия</h2>
+                <div id="powder-detail" style="color:#6b7280;font-size:14px;margin-top:12px;">Загрузка...</div>
+                <div style="margin-top:20px;">
+                    <h3 style="font-size:15px;margin-bottom:12px;color:#e2e8f0;">Добавить партию порошка</h3>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
+                        <input id="pow-material" placeholder="Материал (AlSi10Mg)" style="padding:10px;background:#2d3748;border:1px solid #4a5568;border-radius:8px;color:#fafafa;">
+                        <input id="pow-batch" placeholder="Номер партии" style="padding:10px;background:#2d3748;border:1px solid #4a5568;border-radius:8px;color:#fafafa;">
+                        <input id="pow-kg" type="number" placeholder="Масса (кг)" style="padding:10px;background:#2d3748;border:1px solid #4a5568;border-radius:8px;color:#fafafa;">
+                    </div>
+                    <button onclick="addPowderBatch()" style="padding:10px 24px;background:#10b981;border:none;border-radius:8px;color:white;cursor:pointer;font-size:14px;">+ Добавить партию</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Maintenance Page -->
+        <div id="page-maintenance" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <h2>🔧 Планировщик ТО</h2>
+                <p style="color:#6b7280;font-size:13px;margin-top:6px;">Износ считается по суммарным часам REAL_PRINT сессий с момента последнего ТО.</p>
+            </div>
+            <div id="maintenance-items" style="display:grid;gap:16px;">
+                <div style="color:#6b7280;">Загрузка...</div>
+            </div>
+        </div>
+
+        <!-- Chat Page -->
+        <div id="page-chat" style="display:none;">
+            <div class="section">
+                <h2>💬 Чат с ИИ</h2>
+                <p style="color:#6b7280;margin-bottom:15px;">Задайте вопрос (например: "Сколько аргона ушло?" или "Какая самая длинная печать?")</p>
+                <div id="chat-messages" style="background:#2d3748;height:400px;border-radius:12px;padding:20px;overflow-y:auto;margin-bottom:15px;">
+                    <div style="color:#6b7280;">💬 Задайте вопрос о ваших печатях</div>
+                </div>
+                <div style="display:flex;gap:10px;">
+                    <input type="text" id="question" placeholder="Ваш вопрос..." onkeypress="if(event.key==='Enter')ask()" style="flex:1;padding:15px;border-radius:8px;border:1px solid #4a5568;background:#2d3748;color:#fafafa;font-size:16px;">
+                    <button onclick="ask()" style="padding:15px 30px;background:#60a5fa;color:white;border:none;border-radius:8px;cursor:pointer;font-size:16px;">Отправить</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const THRESHOLDS = {!EXPR42!};
+        const chartColors = {
+            blue: '#60a5fa',
+            green: '#10b981',
+            yellow: '#f59e0b',
+            red: '#ef4444',
+            purple: '#8b5cf6',
+            pink: '#ec4899',
+            cyan: '#06b6d4',
+            orange: '#f97316'
+        };
+        
+        Chart.defaults.color = '#a0aec0';
+        Chart.defaults.borderColor = '#2d3748';
+        
+        // Types chart
+        new Chart(document.getElementById('typesChart'), {
+            type: 'doughnut',
+            data: {
+                labels: {!EXPR43!},
+                datasets: [{
+                    data: {!EXPR44!},
+                    backgroundColor: ['#10b981', '#f59e0b', '#6b7280'],
+                    borderWidth: 0
+                }]
+            },
+            options: { 
+                responsive: true, 
+                plugins: { legend: { position: 'bottom' } },
+                cutout: '60%'
+            }
+        });
+        
+        // Materials chart
+        new Chart(document.getElementById('materialsChart'), {
+            type: 'pie',
+            data: {
+                labels: {!EXPR45!},
+                datasets: [{
+                    data: {!EXPR46!},
+                    backgroundColor: ['#60a5fa', '#8b5cf6', '#ec4899', '#06b6d4'],
+                    borderWidth: 0
+                }]
+            },
+            options: { 
+                responsive: true, 
+                plugins: { legend: { position: 'bottom' } }
+            }
+        });
+        
+        // Duration chart
+        new Chart(document.getElementById('durationChart'), {
+            type: 'bar',
+            data: {
+                labels: {!EXPR47!},
+                datasets: [{
+                    label: 'Минуты',
+                    data: {!EXPR48!},
+                    backgroundColor: {!EXPR49!},
+                    borderRadius: 8
+                }]
+            },
+            options: { 
+                responsive: true,
+                scales: { y: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        
+        // Lines chart
+        new Chart(document.getElementById('linesChart'), {
+            type: 'bar',
+            data: {
+                labels: {!EXPR50!},
+                datasets: [{
+                    label: 'Строк',
+                    data: {!EXPR51!},
+                    backgroundColor: chartColors.purple,
+                    borderRadius: 8
+                }]
+            },
+            options: { 
+                responsive: true,
+                scales: { y: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        
+        // Timeline chart
+        new Chart(document.getElementById('timelineChart'), {
+            type: 'line',
+            data: {
+                labels: {!EXPR52!},
+                datasets: [{
+                    label: 'Часы',
+                    data: {!EXPR53!},
+                    borderColor: chartColors.blue,
+                    backgroundColor: 'rgba(96, 165, 250, 0.1)',
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 6,
+                    pointBackgroundColor: chartColors.blue
+                }]
+            },
+            options: { 
+                responsive: true,
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+        
+        // Pauses chart
+        new Chart(document.getElementById('pausesChart'), {
+            type: 'bar',
+            data: {
+                labels: {!EXPR54!},
+                datasets: [{
+                    label: 'Паузы',
+                    data: {!EXPR55!},
+                    backgroundColor: {!EXPR56!},
+                    borderRadius: 8
+                }]
+            },
+            options: { 
+                responsive: true,
+                scales: { y: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        
+        // Burn chart
+        new Chart(document.getElementById('burnChart'), {
+            type: 'bar',
+            data: {
+                labels: {!EXPR57!},
+                datasets: [{
+                    label: 'Burn events',
+                    data: {!EXPR58!},
+                    backgroundColor: chartColors.red,
+                    borderRadius: 8
+                }]
+            },
+            options: { 
+                responsive: true,
+                scales: { y: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        
+        // Session lines chart
+        new Chart(document.getElementById('sessionLinesChart'), {
+            type: 'line',
+            data: {
+                labels: {!EXPR59!},
+                datasets: [{
+                    label: 'Строк',
+                    data: {!EXPR60!},
+                    borderColor: chartColors.cyan,
+                    backgroundColor: 'rgba(6, 182, 212, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: { responsive: true }
+        });
+        
+        // Quality chart
+        new Chart(document.getElementById('qualityChart'), {
+            type: 'doughnut',
+            data: {
+                labels: {!EXPR61!},
+                datasets: [{
+                    data: {!EXPR62!},
+                    backgroundColor: ['#10b981', '#ef4444', '#f59e0b'],
+                    borderWidth: 0
+                }]
+            },
+            options: { 
+                responsive: true,
+                cutout: '60%',
+                plugins: { legend: { position: 'bottom' } }
+            }
+        });
+        
+        // Defects chart
+        new Chart(document.getElementById('defectsChart'), {
+            type: 'bar',
+            data: {
+                labels: {!EXPR63!},
+                datasets: [{
+                    label: 'Дефектов',
+                    data: {!EXPR64!},
+                    backgroundColor: chartColors.red,
+                    borderRadius: 8
+                }]
+            },
+            options: { 
+                responsive: true,
+                indexAxis: 'y',
+                scales: { x: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        
+        // Gas chart
+        new Chart(document.getElementById('gasChart'), {
+            type: 'bar',
+            data: {
+                labels: {!EXPR65!},
+                datasets: [{
+                    label: 'Бар',
+                    data: {!EXPR66!},
+                    backgroundColor: chartColors.pink,
+                    borderRadius: 8
+                }]
+            },
+            options: { 
+                responsive: true,
+                scales: { y: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        
+        // Powder chart
+        new Chart(document.getElementById('powderChart'), {
+            type: 'bar',
+            data: {
+                labels: {!EXPR67!},
+                datasets: [{
+                    label: 'Кг',
+                    data: {!EXPR68!},
+                    backgroundColor: chartColors.cyan,
+                    borderRadius: 8
+                }]
+            },
+            options: { 
+                responsive: true,
+                scales: { y: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
+        });
+
+        // --- Process telemetry charts (decoded sensor series) ---
+        const telTime = {!EXPR69!};
+        function lineChart(canvasId, datasets, opts) {
+            const el = document.getElementById(canvasId);
+            if (!el) return;
+            new Chart(el, {
+                type: 'line',
+                data: { labels: telTime, datasets: datasets },
+                options: Object.assign({
+                    responsive: true,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: { legend: { position: 'bottom' } },
+                    scales: { x: { ticks: { maxTicksLimit: 8 } } }
+                }, opts || {})
+            });
+        }
+        lineChart('o2Chart', {!EXPR70!});
+        lineChart('tempChart', {!EXPR71!});
+        lineChart('humChart', {!EXPR72!});
+        lineChart('pressChart', {!EXPR73!});
+
+        // Per-layer burn time (bar)
+        const burnEl = document.getElementById('burnLayerChart');
+        if (burnEl) {
+            new Chart(burnEl, {
+                type: 'bar',
+                data: {
+                    labels: {!EXPR74!},
+                    datasets: [{
+                        label: 'Сек/слой',
+                        data: {!EXPR75!},
+                        backgroundColor: '#f97316',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: { y: { beginAtZero: true, title: { display: true, text: 'сек' } },
+                               x: { title: { display: true, text: '№ слоя' }, ticks: { maxTicksLimit: 20 } } },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        // Navigation
+        function showPage(page) {
+            document.querySelectorAll('[id^="page-"]').forEach(el => el.style.display = 'none');
+            document.getElementById('page-' + page).style.display = 'block';
+            document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
+            document.getElementById('nav-' + page).classList.add('active');
+            if (page === 'live') initLive();
+            if (page === 'powder') loadPowder();
+            if (page === 'maintenance') loadMaintenance();
+        }
+
+        // =========================================================
+        // LIVE — WebSocket real-time telemetry
+        // =========================================================
+        let liveWs = null, liveChart = null;
+        const liveO2 = [], liveTemp = [], livePress = [], liveLabels = [];
+        const LIVE_MAX = 60;
+
+        function initLive() {
+            if (liveWs && liveWs.readyState < 2) return; // already open
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            liveWs = new WebSocket(proto + '://' + location.host + '/ws/realtime');
+            liveWs.onopen = () => document.getElementById('live-status').textContent = '● подключено';
+            liveWs.onclose = () => document.getElementById('live-status').textContent = '● отключено';
+            liveWs.onerror = () => document.getElementById('live-status').textContent = '● ошибка';
+            liveWs.onmessage = (e) => {
+                const d = JSON.parse(e.data);
+                const to = THRESHOLDS;
+                updateLiveCard('o2',    d.SO1 ?? d.SO2, d.SO1 > to.oxygen.alarm_high || d.SO2 > to.oxygen.alarm_high, '#ef4444', '#10b981', d.SO1 / to.oxygen.max * 100);
+                updateLiveCard('temp',  d.ST5,           d.ST5 > to.temperature.alarm_high,                            '#ef4444', '#60a5fa', d.ST5 / to.temperature.max * 100);
+                updateLiveCard('press', d.SP4,           d.SP4 > to.pressure.alarm_high || d.SP4 < to.pressure.alarm_low, '#ef4444', '#8b5cf6', (d.SP4 - to.pressure.min) / (to.pressure.max - to.pressure.min) * 100);
+                updateLiveCard('hum',   d.Flow_H,        d.Flow_H > to.humidity.alarm_high,                          '#ef4444', '#06b6d4', d.Flow_H / to.humidity.max * 100);
+                const src = d.source === 'sim' ? '🔵 симуляция' : '🟢 live';
+                document.getElementById('live-status').textContent = src + ' · ' + (d.ts || '');
+
+                // rolling chart
+                liveLabels.push(d.ts || '');
+                liveO2.push(d.SO1 ?? null);
+                liveTemp.push(d.ST5 ?? null);
+                livePress.push(d.SP4 ?? null);
+                if (liveLabels.length > LIVE_MAX) { liveLabels.shift(); liveO2.shift(); liveTemp.shift(); livePress.shift(); }
+                if (liveChart) liveChart.update();
+                else buildLiveChart();
+            };
+        }
+
+        function updateLiveCard(id, val, alarm, alarmColor, okColor, barPct) {
+            if (val == null) return;
+            const fmt = val < 10 ? val.toFixed(2) : val.toFixed(1);
+            document.getElementById('live-' + id).textContent = fmt;
+            const color = alarm ? alarmColor : okColor;
+            document.getElementById('live-' + id).style.color = color;
+            document.getElementById('live-bar-' + id).style.width = Math.min(100, Math.max(1, barPct)) + '%';
+            document.getElementById('live-bar-' + id).style.background = color;
+            const card = document.getElementById('live-card-' + id);
+            if (alarm) { card.classList.add('alarm-active'); if (!card.querySelector('.alarm-badge')) { const b = document.createElement('div'); b.className = 'alarm-badge'; b.textContent = '!'; card.appendChild(b); } }
+            else { card.classList.remove('alarm-active'); const b = card.querySelector('.alarm-badge'); if (b) b.remove(); }
+        }
+
+        function buildLiveChart() {
+            const ctx = document.getElementById('liveChart');
+            if (!ctx) return;
+            liveChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: liveLabels,
+                    datasets: [
+                        { label: 'O₂ %', data: liveO2, borderColor: '#ef4444', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yO2' },
+                        { label: 'Стол °C', data: liveTemp, borderColor: '#60a5fa', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yT' },
+                        { label: 'Давление бар', data: livePress, borderColor: '#8b5cf6', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yP' },
+                    ]
+                },
+                options: {
+                    responsive: true, animation: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: { legend: { position: 'bottom' } },
+                    scales: {
+                        x: { ticks: { maxTicksLimit: 8 } },
+                        yO2: { position: 'left',  title: { display: true, text: 'O₂ %' }, suggestedMax: 3 },
+                        yT:  { position: 'right', title: { display: true, text: '°C' },  grid: { drawOnChartArea: false } },
+                        yP:  { display: false },
+                    }
+                }
+            });
+        }
+
+        // =========================================================
+        // POWDER
+        // =========================================================
+        async function loadPowder() {
+            try {
+                const r = await fetch('/powder/status');
+                const d = await r.json();
+                if (!d.has_batch) {
+                    document.getElementById('powder-detail').innerHTML = '<span style="color:#6b7280;">Нет активных партий. Добавьте первую партию ниже.</span>';
+                    return;
+                }
+                const qColor = d.quality_grade === 'ok' ? '#10b981' : d.quality_grade === 'warning' ? '#f59e0b' : '#ef4444';
+                document.getElementById('pow-remaining').textContent = d.remaining_kg.toFixed(2);
+                document.getElementById('pow-consumed').textContent = d.consumed_kg.toFixed(2);
+                document.getElementById('pow-reuse').textContent = d.reuse_count;
+                document.getElementById('pow-quality').textContent = d.quality_pct;
+                document.getElementById('pow-quality').style.color = qColor;
+                document.getElementById('powder-detail').innerHTML = `
+                    <b style="color:#e2e8f0;">${d.material} ${d.alloy || ''} · ${d.batch_code}</b><br>
+                    Начало: ${d.initial_kg} кг &nbsp;→&nbsp; Остаток: <b>${d.remaining_kg} кг</b>
+                    (${d.remaining_pct}%)
+                    <div style="margin-top:8px;height:6px;background:#2d3748;border-radius:3px;">
+                        <div style="width:${d.remaining_pct}%;height:100%;background:${qColor};border-radius:3px;transition:width 0.5s;"></div>
+                    </div>`;
+            } catch(e) { document.getElementById('powder-detail').textContent = 'Ошибка загрузки'; }
+        }
+
+        async function addPowderBatch() {
+            const material = document.getElementById('pow-material').value.trim();
+            const batch = document.getElementById('pow-batch').value.trim();
+            const kg = parseFloat(document.getElementById('pow-kg').value);
+            if (!material || !batch || isNaN(kg)) { alert('Заполните все поля'); return; }
+            await fetch('/powder/batches', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ material, batch_code: batch, initial_mass_kg: kg })
+            });
+            loadPowder();
+        }
+
+        // =========================================================
+        // MAINTENANCE
+        // =========================================================
+        async function loadMaintenance() {
+            try {
+                const r = await fetch('/maintenance/status');
+                const items = await r.json();
+                const gradeColor = { ok: '#10b981', warning: '#f59e0b', critical: '#ef4444' };
+                document.getElementById('maintenance-items').innerHTML = items.map(item => {
+                    const color = gradeColor[item.grade] || '#6b7280';
+                    const barPct = Math.min(100, item.pct);
+                    const lastSvc = item.last_service ? new Date(item.last_service).toLocaleDateString('ru') : 'не проводилось';
+                    return `<div class="section" style="padding:20px;${item.grade !== 'ok' ? 'border:1px solid ' + color + ';' : ''}">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+                            <span style="font-size:17px;font-weight:600;">${item.icon} ${item.label}</span>
+                            <div style="display:flex;gap:10px;align-items:center;">
+                                <span style="color:${color};font-weight:700;font-size:15px;">${item.used} / ${item.max} ${item.unit}</span>
+                                <button onclick="resetComponent('${item.key}')" style="padding:6px 14px;background:#2d3748;border:1px solid #4a5568;border-radius:6px;color:#e2e8f0;cursor:pointer;font-size:12px;">✅ ТО выполнено</button>
+                            </div>
+                        </div>
+                        <div style="height:8px;background:#2d3748;border-radius:4px;margin-bottom:8px;">
+                            <div style="width:${barPct}%;height:100%;background:${color};border-radius:4px;transition:width 0.5s;"></div>
+                        </div>
+                        <div style="font-size:12px;color:#6b7280;">Осталось: <b style="color:#a0aec0;">${item.remaining} ${item.unit}</b> · Последнее ТО: ${lastSvc} · ${item.note}</div>
+                    </div>`;
+                }).join('');
+            } catch(e) { document.getElementById('maintenance-items').innerHTML = '<div style="color:#ef4444;">Ошибка загрузки</div>'; }
+        }
+
+        async function resetComponent(key) {
+            await fetch('/maintenance/reset/' + key, { method: 'POST' });
+            loadMaintenance();
+        }
+        
+        // Chat
+        async function ask() {
+            const input = document.getElementById('question');
+            const question = input.value.trim();
+            if (!question) return;
+            
+            const chat = document.getElementById('chat-messages');
+            chat.innerHTML += '<div style="background:#60a5fa;color:white;padding:12px 16px;border-radius:12px;margin-bottom:10px;max-width:80%;margin-left:auto;">👤 ' + question + '</div>';
+            input.value = '';
+            
+            try {
+                const resp = await fetch('/chat/ask', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({question})
+                });
+                const data = await resp.json();
+                chat.innerHTML += '<div style="background:#2d3748;padding:12px 16px;border-radius:12px;margin-bottom:10px;max-width:80%;">🤖 ' + (data.answer || 'Нет ответа') + '</div>';
+            } catch(e) {
+                chat.innerHTML += '<div style="background:#ef4444;padding:12px 16px;border-radius:12px;margin-bottom:10px;max-width:80%;">❌ ' + e.message + '</div>';
+            }
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        // Import status bar
+        const statusMap = {
+            'awaiting_operator_confirmation': { label: 'Ожидает подтверждения', pct: 10, icon: '⏳' },
+            'checking_stability': { label: 'Проверка файлов', pct: 25, icon: '🔍' },
+            'pending': { label: 'В очереди', pct: 40, icon: '⏳' },
+            'processing': { label: 'Импорт...', pct: 60, icon: '⚙️' },
+            'completed': { label: 'Готово', pct: 100, icon: '✅' },
+            'failed': { label: 'Ошибка', pct: 0, icon: '❌' },
+            'ignored': { label: 'Пропущен', pct: 0, icon: '⏭️' }
+        };
+        async function updateImportStatus() {
+            try {
+                const resp = await fetch('/imports');
+                const payload = await resp.json();
+                // /imports returns a paginated envelope: {items: [...], total, skip, limit}
+                const jobs = Array.isArray(payload) ? payload : (payload.items || []);
+                const bar = document.getElementById('import-status-bar');
+                const active = jobs.filter(j => !['completed','ignored','failed'].includes(j.status));
+                if (active.length === 0) { bar.style.display = 'none'; return; }
+                bar.style.display = 'block';
+                const info = statusMap[active[0].status] || { label: active[0].status, pct: 50, icon: '⏳' };
+                document.getElementById('import-icon').textContent = info.icon;
+                document.getElementById('import-text').textContent = info.label + ': ' + active[0].source_name;
+                document.getElementById('import-progress-bar').style.width = info.pct + '%';
+                const done = jobs.filter(j => j.status === 'completed').length;
+                const total = jobs.filter(j => !['ignored','failed'].includes(j.status) || j.status === 'completed').length;
+                document.getElementById('import-count').textContent = done + '/' + total;
+            } catch(e) { /* ignore */ }
+        }
+        setInterval(updateImportStatus, 3000);
+        updateImportStatus();
+    </script>
+</body>
+</html>"""

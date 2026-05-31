@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1.7
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=20
+
+RUN groupadd --system app && useradd --system --gid app --uid 10001 app \
+    && mkdir -p /models/stt /tmp/telegram_voice \
+    && chown -R app:app /models /tmp/telegram_voice
+WORKDIR /app
+
+COPY pyproject.toml README.md requirements.base.txt requirements.telegram-runtime.txt /app/
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 -r requirements.base.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 -r requirements.telegram-runtime.txt
+COPY . /app
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 -e .
+USER app

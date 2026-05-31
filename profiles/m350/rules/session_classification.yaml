@@ -1,0 +1,24 @@
+version: m350-session-rules-0.1.0
+rules:
+  real_print:
+    required_any:
+      - burn_log_layers
+      - main_event_print_start
+    supportive:
+      - stateflow_burn_phase
+      - monitor100_laser_activity
+  real_print_with_resume:
+    required_any:
+      - real_print
+    supportive:
+      - restart_attempts
+      - pause_resume_sequence
+  service_session:
+    required_any:
+      - maintenance_operator_event
+      - service_stateflow_states
+    forbidden_only_evidence:
+      - monitor_activity
+  incomplete_or_unknown:
+    fallback: true
+

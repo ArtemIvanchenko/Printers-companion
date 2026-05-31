@@ -1,0 +1,7 @@
+version: m350-mappings-0.1.0
+profile_id: laser-systems-m350
+rules:
+  preserve_unknown_fields: true
+  preserve_unknown_state_codes: true
+  require_human_confirmation_for_signal_semantics: true
+

@@ -1,0 +1,298 @@
+services:
+  api:
+    image: artemivanchenko/printer-log-analytics:api
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    command: uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_net
+      - storage_net
+      - agent_net
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  worker:
+    image: artemivanchenko/printer-log-analytics:worker
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    command: python -m worker.tasks
+    volumes:
+      - type: bind
+        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_net
+      - storage_net
+    restart: unless-stopped
+    tmpfs:
+      - /tmp:size=2g,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8g
+
+  watcher:
+    image: artemivanchenko/printer-log-analytics:watcher
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    command: python -m worker.watcher
+    volumes:
+      - type: bind
+        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
+        read_only: true
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend_net
+    restart: unless-stopped
+    tmpfs:
+      - /tmp:size=2g,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 2g
+
+  scheduler:
+    image: artemivanchenko/printer-log-analytics:scheduler
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    env_file: .env
+    command: python -m scheduler.jobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - backend_net
+      - storage_net
+      - agent_net
+    restart: unless-stopped
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  postgres:
+    image: postgres:16-alpine
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-printer_logs}
+      POSTGRES_USER: ${POSTGRES_USER:-printer_logs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend_net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-printer_logs} -d ${POSTGRES_DB:-printer_logs}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend_net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    command: server /data --console-address ":9001"
+    env_file: .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - storage_net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  telegram-bot:
+    profiles: ["telegram"]
+    image: artemivanchenko/printer-log-analytics:telegram-bot
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram-bot
+    env_file:
+      - .env
+      - .env.secrets
+    environment:
+      HF_HOME: /models/stt/huggingface
+      HF_HUB_CACHE: /models/stt/huggingface/hub
+      HF_XET_CACHE: /models/stt/huggingface/xet
+      XDG_CACHE_HOME: /models/stt/cache
+    command: python -m operator_journal.telegram_bot
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - stt_model_cache:/models/stt
+    networks:
+      - agent_net
+    restart: unless-stopped
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  mcp:
+    profiles: ["mcp"]
+    image: artemivanchenko/printer-log-analytics:mcp
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    env_file: .env
+    ports:
+      - "8100:8100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - backend_net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/sse', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  openclaw:
+    profiles: ["openclaw"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo 'Configure external OpenClaw to call the restricted FastAPI agent endpoints'; sleep infinity"]
+    networks:
+      - agent_net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  backend_net:
+    driver: bridge
+  storage_net:
+    driver: bridge
+  agent_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  stt_model_cache:

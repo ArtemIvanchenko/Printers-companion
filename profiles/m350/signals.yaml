@@ -1,0 +1,334 @@
+version: m350-signals-0.3.0
+profile_id: laser-systems-m350
+machine:
+  model: M-350
+  serial_number: M003-005
+  vendor: АО «Лазерные системы»
+  passport: САЦН.681749.002ПС
+  manufactured: "2023-07"
+notes:
+  - Physical limits sourced from M350 passport (САЦН.681749.002ПС) and peripheral
+    equipment passport (САЦН.681749.014ПС), July 2023.
+  - >-
+    Semantic classes decoded from the LaserStudio M350 SCADA mnemonic panel
+    (ver 2.0.4.15): ST*=temperature, SO*=oxygen, SP*=pressure, SF*=flow.
+  - >-
+    alarm_high / alarm_low are the process-critical thresholds confirmed by the
+    passport and sieve station manual (TSF-400VAD). Values outside these ranges
+    trigger defect risk.
+  - >-
+    nominal_val is the target operating set-point (e.g. gas flow 3 L/min per
+    passport section 2.1).
+signals:
+  # --- Oxygen (SO*) — critical for metal AM: oxidation control ---
+  SO1:
+    canonical_name: chamber_oxygen_1
+    subsystem: atmosphere
+    semantic_class: oxygen
+    unit: percent
+    confidence: 0.7
+    min_val: 0.0
+    max_val: 20.0
+    alarm_high: 2.0        # Passport: O₂ < 2 % required for safe SLM printing
+    nominal_val: 0.5       # Typical steady-state during print
+    active_status: confirmed_class_candidate_channel
+    notes: "Oxygen sensor (panel SO1). Must be < 2% before print starts."
+  SO2:
+    canonical_name: chamber_oxygen_2
+    subsystem: atmosphere
+    semantic_class: oxygen
+    unit: percent
+    confidence: 0.7
+    min_val: 0.0
+    max_val: 20.0
+    alarm_high: 2.0        # Same threshold — second redundant O₂ sensor
+    nominal_val: 0.5
+    active_status: confirmed_class_candidate_channel
+    notes: "Oxygen sensor (panel SO2). ~20.4 on screen = atmospheric (service/purge mode)."
+
+  # --- Temperatures (ST*) ---
+  ST3:
+    canonical_name: chamber_temperature_lower
+    subsystem: thermal
+    semantic_class: temperature
+    unit: degC
+    confidence: 0.6
+    min_val: 0
+    max_val: 250
+    alarm_high: 200        # Passport max platform temperature 200 °C
+    active_status: candidate
+    notes: "Chamber temperature lower zone (panel ST3)."
+  ST4:
+    canonical_name: chamber_temperature_upper
+    subsystem: thermal
+    semantic_class: temperature
+    unit: degC
+    confidence: 0.6
+    min_val: 0
+    max_val: 250
+    alarm_high: 200
+    active_status: candidate
+    notes: "Chamber temperature upper zone (panel ST4); often 0.0 — may be inactive probe."
+  ST5:
+    canonical_name: build_table_temperature
+    subsystem: thermal
+    semantic_class: temperature
+    unit: degC
+    confidence: 0.7
+    min_val: 0
+    max_val: 200
+    alarm_high: 200        # Passport: нагрев колодца камеры построения ≤ 200 °C
+    active_status: confirmed_class_candidate_channel
+    notes: "Build table temperature. Panel: 'Поддержание температуры ростового стола'."
+  "ST1 (flow T)":
+    canonical_name: purge_flow_temperature
+    subsystem: atmosphere
+    semantic_class: temperature
+    unit: degC
+    confidence: 0.7
+    min_val: -10
+    max_val: 80
+    active_status: confirmed_class_candidate_channel
+    notes: "Gas/purge flow temperature (panel ST1 shows T)."
+  "ST1 (flow H)":
+    canonical_name: purge_flow_humidity
+    subsystem: atmosphere
+    semantic_class: humidity
+    unit: percent
+    confidence: 0.7
+    min_val: 0
+    max_val: 100
+    alarm_high: 40         # High humidity degrades powder quality
+    active_status: confirmed_class_candidate_channel
+    notes: "Gas/purge flow humidity (panel ST1 shows %). Moisture drives defects/oxidation."
+  "Flow T":
+    canonical_name: purge_flow_temperature
+    subsystem: atmosphere
+    semantic_class: temperature
+    unit: degC
+    confidence: 0.7
+    min_val: -10
+    max_val: 80
+    active_status: confirmed_class_candidate_channel
+    notes: "Sensors-log alias of ST1 (flow T)."
+  "Flow H":
+    canonical_name: purge_flow_humidity
+    subsystem: atmosphere
+    semantic_class: humidity
+    unit: percent
+    confidence: 0.7
+    min_val: 0
+    max_val: 100
+    alarm_high: 40
+    active_status: confirmed_class_candidate_channel
+    notes: "Sensors-log alias of ST1 (flow H)."
+
+  # --- Pressures (SP*) — locations read off the mnemonic panel ---
+  SP1:
+    canonical_name: forevacuum_receiver_pressure
+    subsystem: vacuum
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.55
+    active_status: candidate
+    notes: "Near receiver B1 / forevacuum pump RP1."
+  SP2:
+    canonical_name: filter_f2_differential_pressure
+    subsystem: recuperator
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.5
+    active_status: candidate
+    notes: "Near recuperator filter F2. Differential trend = filter clogging."
+  SP3:
+    canonical_name: chamber_differential_pressure
+    subsystem: vacuum
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.5
+    active_status: candidate
+    notes: "Near chamber/forevacuum manifold; small values (~0) suggest differential."
+  SP4:
+    canonical_name: chamber_pressure
+    subsystem: atmosphere
+    semantic_class: pressure
+    unit: bar
+    confidence: 0.65
+    min_val: 0.8
+    max_val: 1.3
+    nominal_val: 1.0       # ~1 atm inert atmosphere during printing
+    alarm_high: 1.8        # Sieve station manual: max internal pressure 1.8 bar
+    alarm_low: 0.85        # Significant under-pressure = chamber seal issue
+    active_status: confirmed_class_candidate_channel
+    notes: "Chamber absolute pressure (~1.0 on screen = ~1 atm inert)."
+  SP5:
+    canonical_name: argon_line_pressure
+    subsystem: gas_supply
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.55
+    active_status: candidate
+    notes: "Near Ar (argon) inlet."
+  SP8:
+    canonical_name: pressure_he2_line
+    subsystem: gas_supply
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.4
+    active_status: candidate
+    notes: "Near He2 line (top of panel)."
+  SP9:
+    canonical_name: tank_bt4_pressure
+    subsystem: gas_supply
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.4
+    active_status: candidate
+    notes: "Near tank Bt4."
+  SP11:
+    canonical_name: filter_f2_inlet_pressure
+    subsystem: recuperator
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.45
+    active_status: candidate
+    notes: "Before recuperator filter F2 (pair with SP12 for filter pressure drop)."
+  SP12:
+    canonical_name: filter_f3_pressure
+    subsystem: recuperator
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.45
+    active_status: candidate
+    notes: "At recuperator filter F3."
+  SP13:
+    canonical_name: pressure_heater_line
+    subsystem: thermal
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.3
+    active_status: candidate
+  SP14:
+    canonical_name: pressure_channel_14
+    subsystem: vacuum
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.3
+    active_status: candidate
+  SP15:
+    canonical_name: pressure_channel_15
+    subsystem: vacuum
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.3
+    active_status: candidate
+  SP16:
+    canonical_name: pressure_channel_16
+    subsystem: vacuum
+    semantic_class: pressure
+    unit: bar_or_atm
+    confidence: 0.3
+    active_status: candidate
+
+  # --- Flow (SF*) ---
+  SF1:
+    canonical_name: purge_gas_flow
+    subsystem: atmosphere
+    semantic_class: flow
+    unit: l_per_min
+    confidence: 0.55
+    min_val: 0
+    max_val: 30
+    nominal_val: 3.0       # Passport: расход инертного газа 3 л/мин
+    alarm_low: 1.5         # Below half nominal = insufficient purging
+    active_status: candidate
+    notes: "Gas flow sensor. Passport: 3 L/min inert gas flow during build."
+
+  # --- Mechanics / process geometry ---
+  LIR:
+    canonical_name: build_platform_z_position
+    subsystem: motion
+    semantic_class: position
+    unit: microns_or_steps
+    confidence: 0.5
+    min_val: 0
+    max_val: 390000        # Passport: рабочий ход по Z 390 мм (in µm encoder counts)
+    active_status: candidate
+    notes: "Vertical build platform position (Z). Passport Z-travel = 390 mm."
+  Table:
+    canonical_name: table_position
+    subsystem: motion
+    semantic_class: position
+    unit: steps
+    confidence: 0.5
+    active_status: candidate
+  N:
+    canonical_name: layer_number
+    subsystem: process
+    semantic_class: counter
+    unit: count
+    confidence: 0.75
+    active_status: confirmed_class_candidate_channel
+    notes: "Layer index in burn/time logs."
+  Raquel:
+    canonical_name: recoater_position
+    subsystem: powder
+    semantic_class: position
+    unit: steps
+    confidence: 0.5
+    active_status: candidate
+    notes: "Likely 'Ракель' (recoater/wiper blade) position — recoating quality."
+  Bunker:
+    canonical_name: powder_bunker_level
+    subsystem: powder
+    semantic_class: level
+    unit: arbitrary
+    confidence: 0.5
+    active_status: candidate
+    notes: "Powder hopper/bunker level."
+  "Filled B":
+    canonical_name: powder_bunker_filled
+    subsystem: powder
+    semantic_class: level
+    unit: arbitrary
+    confidence: 0.45
+    active_status: candidate
+
+# Family-level fallback for any channel not explicitly mapped above.
+families:
+  ST:
+    semantic_class: temperature
+    subsystem: thermal
+    mapping_policy: preserve_unknown
+  SO:
+    semantic_class: oxygen
+    subsystem: atmosphere
+    mapping_policy: preserve_unknown
+  SP:
+    semantic_class: pressure
+    subsystem: vacuum
+    mapping_policy: preserve_unknown
+  SF:
+    semantic_class: flow
+    subsystem: atmosphere
+    mapping_policy: preserve_unknown
+  V:
+    semantic_class: valve_state
+    subsystem: gas_supply
+    mapping_policy: preserve_unknown
+  F:
+    semantic_class: filter_or_flag
+    subsystem: recuperator
+    mapping_policy: preserve_unknown
+  BI:
+    semantic_class: binary_input
+    subsystem: interlock
+    mapping_policy: preserve_unknown
+  RP:
+    semantic_class: pump_or_parameter
+    subsystem: vacuum
+    mapping_policy: preserve_unknown
+  SH:
+    semantic_class: shutter_or_status
+    subsystem: laser
+    mapping_policy: preserve_unknown

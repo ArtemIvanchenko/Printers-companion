@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+printer_logs.db
+test_demo.db
+backups/
+.streamlit/
+.env.secrets
+
+# Generated / temp files (use explicit paths, not wildcards)
+import.sql
