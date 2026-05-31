@@ -1,0 +1,31 @@
+version: m350-stateflow-0.1.0
+profile_id: laser-systems-m350
+columns:
+  State:
+    subsystem: automation
+  MotorMove:
+    subsystem: motion
+  Failure:
+    subsystem: failure
+  LockLaser:
+    subsystem: laser_interlock
+  FillBunker:
+    subsystem: powder
+  CheckParameters:
+    subsystem: parameter_check
+  Heating:
+    subsystem: heating
+  Voltage:
+    subsystem: power
+  Chamber:
+    subsystem: chamber
+  ChamberGlove:
+    subsystem: glove
+  ChamberDoor:
+    subsystem: door
+policies:
+  compress_repeated_rows: true
+  store_transitions_only: true
+  preserve_unknown_columns: true
+  never_treat_unknown_code_as_confirmed_fault: true
+

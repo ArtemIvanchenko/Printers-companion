@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Alarm Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #0f1419;
+    color: #fafafa;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 40px;
+}
+h1 { font-size: 22px; color: #a0aec0; margin-bottom: 32px; }
+h1 span { color: #60a5fa; }
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 24px;
+}
+
+.card {
+    background: #1a1f2e;
+    border: 1px solid #2d3748;
+    border-radius: 14px;
+    padding: 24px;
+    position: relative;
+    transition: border-color 0.3s;
+}
+
+.card .title {
+    font-size: 13px;
+    color: #a0aec0;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.card .value {
+    font-size: 42px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.card .unit {
+    font-size: 14px;
+    color: #718096;
+    margin-top: 6px;
+}
+
+.card .bar {
+    margin-top: 16px;
+    height: 4px;
+    background: #2d3748;
+    border-radius: 2px;
+    overflow: hidden;
+}
+.card .bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.6s ease;
+}
+
+/* ---- ALARM ---- */
+@keyframes alarm-pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(239,68,68,0.0); border-color: #ef4444; }
+    40%  { box-shadow: 0 0 0 8px rgba(239,68,68,0.35); border-color: #ef4444; }
+    70%  { box-shadow: 0 0 0 14px rgba(239,68,68,0.10); border-color: #f87171; }
+    100% { box-shadow: 0 0 0 0   rgba(239,68,68,0.0); border-color: #ef4444; }
+}
+
+.alarm-active {
+    border: 2px solid #ef4444 !important;
+    animation: alarm-pulse 2.4s ease-in-out infinite;
+}
+
+.alarm-badge {
+    position: absolute;
+    top: 12px; right: 14px;
+    background: #ef4444;
+    color: white;
+    font-weight: 900;
+    font-size: 14px;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 10px rgba(239,68,68,0.8);
+    animation: alarm-pulse 2.4s ease-in-out infinite;
+}
+
+/* toggle button */
+.controls {
+    margin-bottom: 36px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+button {
+    background: #2d3748;
+    color: #e2e8f0;
+    border: 1px solid #4a5568;
+    padding: 10px 22px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background 0.2s;
+}
+button:hover { background: #4a5568; }
+button.active { background: #ef4444; border-color: #ef4444; color: white; }
+
+.legend {
+    font-size: 13px;
+    color: #6b7280;
+    margin-top: 32px;
+    line-height: 1.8;
+    border-top: 1px solid #2d3748;
+    padding-top: 20px;
+}
+.legend span { color: #a0aec0; }
+</style>
+</head>
+<body>
+
+<h1>🖨️ <span>Alarm</span> Demo — M-350</h1>
+
+<div class="controls">
+    <button id="btn-normal" class="active" onclick="setMode('normal')">✅ Нормальный режим</button>
+    <button id="btn-alarm"  onclick="setMode('alarm')">🚨 Тревога</button>
+    <button id="btn-mixed"  onclick="setMode('mixed')">⚡ Частичная тревога</button>
+</div>
+
+<div class="grid" id="cards">
+
+    <div class="card" id="card-o2">
+        <div class="title">🧪 Кислород O₂</div>
+        <div class="value" id="val-o2" style="color:#10b981;">0.1</div>
+        <div class="unit">% · предел 2.0%</div>
+        <div class="bar"><div class="bar-fill" id="bar-o2" style="width:5%;background:#10b981;"></div></div>
+    </div>
+
+    <div class="card" id="card-temp">
+        <div class="title">🌡️ Температура стола ST5</div>
+        <div class="value" id="val-temp" style="color:#60a5fa;">168</div>
+        <div class="unit">°C · предел 200°C</div>
+        <div class="bar"><div class="bar-fill" id="bar-temp" style="width:84%;background:#60a5fa;"></div></div>
+    </div>
+
+    <div class="card" id="card-press">
+        <div class="title">📊 Давление камеры SP4</div>
+        <div class="value" id="val-press" style="color:#8b5cf6;">1.00</div>
+        <div class="unit">бар · норма 0.85–1.80 бар</div>
+        <div class="bar"><div class="bar-fill" id="bar-press" style="width:56%;background:#8b5cf6;"></div></div>
+    </div>
+
+    <div class="card" id="card-hum">
+        <div class="title">💧 Влажность газа</div>
+        <div class="value" id="val-hum" style="color:#06b6d4;">18</div>
+        <div class="unit">% · предел 40%</div>
+        <div class="bar"><div class="bar-fill" id="bar-hum" style="width:45%;background:#06b6d4;"></div></div>
+    </div>
+
+</div>
+
+<div class="legend">
+    <b>Логика тревоги:</b><br>
+    <span>O₂ > 2%</span> — риск окисления металлического порошка (паспорт М350, САЦН.681749.002ПС)<br>
+    <span>Температура > 200°C</span> — превышение паспортного предела нагрева платформы<br>
+    <span>Давление > 1.8 бар или &lt; 0.85 бар</span> — нарушение герметичности камеры<br>
+    <span>Влажность > 40%</span> — деградация защитной атмосферы
+</div>
+
+<script>
+const modes = {
+    normal: { o2: 0.1,  temp: 168, press: 1.00, hum: 18 },
+    alarm:  { o2: 3.7,  temp: 207, press: 2.1,  hum: 52 },
+    mixed:  { o2: 2.4,  temp: 168, press: 1.00, hum: 18 },
+};
+
+function setMode(mode) {
+    document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
+    document.getElementById('btn-' + mode).classList.add('active');
+
+    const v = modes[mode];
+
+    setCard('o2',    v.o2,    v.o2 > 2,     `${v.o2.toFixed(1)}`,  v.o2 / 20 * 100,   '#ef4444', '#10b981');
+    setCard('temp',  v.temp,  v.temp > 200, `${v.temp}`,           v.temp / 250 * 100, '#ef4444', '#60a5fa');
+    setCard('press', v.press, v.press > 1.8 || v.press < 0.85,
+                                             `${v.press.toFixed(2)}`, (v.press-0.8)/1.1*100, '#ef4444', '#8b5cf6');
+    setCard('hum',   v.hum,  v.hum > 40,   `${v.hum}`,            v.hum / 100 * 100,  '#ef4444', '#06b6d4');
+}
+
+function setCard(id, rawVal, inAlarm, label, barPct, alarmColor, normalColor) {
+    const card = document.getElementById('card-' + id);
+    const valEl = document.getElementById('val-' + id);
+    const barEl = document.getElementById('bar-' + id);
+
+    valEl.textContent = label;
+    barEl.style.width = Math.min(100, Math.max(2, barPct)) + '%';
+
+    if (inAlarm) {
+        card.classList.add('alarm-active');
+        if (!card.querySelector('.alarm-badge')) {
+            const badge = document.createElement('div');
+            badge.className = 'alarm-badge';
+            badge.textContent = '!';
+            card.appendChild(badge);
+        }
+        valEl.style.color = alarmColor;
+        barEl.style.background = alarmColor;
+    } else {
+        card.classList.remove('alarm-active');
+        const badge = card.querySelector('.alarm-badge');
+        if (badge) badge.remove();
+        valEl.style.color = normalColor;
+        barEl.style.background = normalColor;
+    }
+}
+</script>
+</body>
+</html>

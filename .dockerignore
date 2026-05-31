@@ -1,0 +1,16 @@
+.git
+.pytest_cache
+**/__pycache__
+**/*.py[cod]
+.env
+printer_logs.db
+*.db
+*.sqlite
+*.sqlite3
+dist
+build
+*.egg-info
+.venv
+venv
+htmlcov
+.coverage

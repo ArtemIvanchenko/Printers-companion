@@ -1,0 +1,37 @@
+version: m350-phases-0.1.0
+phases:
+  init:
+    event_types: ["start"]
+  parameter_check:
+    stateflow_columns: ["CheckParameters"]
+  chamber_prep:
+    stateflow_columns: ["Chamber", "ChamberDoor", "ChamberGlove"]
+  purge:
+    signals: ["ST1(flow T)", "ST1(flow H)", "SO1", "SO2"]
+  heat_up:
+    stateflow_columns: ["Heating"]
+  powder_prep:
+    stateflow_columns: ["FillBunker"]
+  pour:
+    event_types: ["pour_start", "pour_end"]
+  burn:
+    event_types: ["burn_event", "burn_start", "burn_end"]
+  pause:
+    event_types: ["pause"]
+  long_pause:
+    derived_rule: pause_duration_gt_threshold
+  restart_attempts:
+    event_types: ["restart_attempt", "resume"]
+  unstable_resume:
+    derived_rule: high_state_churn_after_restart
+  stabilized_resume:
+    derived_rule: low_state_churn_after_restart
+  finish:
+    event_types: ["finish"]
+  service_actions:
+    operator_event_categories: ["MAINTENANCE"]
+  idle_waiting:
+    derived_rule: low_activity_no_layers
+  maintenance_window:
+    operator_event_categories: ["MAINTENANCE", "SYSTEM"]
+

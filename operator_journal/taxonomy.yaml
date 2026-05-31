@@ -1,0 +1,45 @@
+version: operator-taxonomy-0.1.0
+categories:
+  MATERIAL:
+    - material_selected
+    - material_changed
+    - powder_batch_changed
+    - powder_reused
+    - powder_sieved
+    - powder_dried
+    - powder_mixed
+    - powder_discarded
+  GAS:
+    - gas_cylinder_replaced
+    - gas_type_changed
+    - gas_pressure_issue
+    - gas_leak_suspected
+  MAINTENANCE:
+    - filter_replaced
+    - seal_replaced
+    - optics_cleaned
+    - chamber_cleaned
+    - recoater_cleaned
+    - recoater_adjusted
+    - sensor_replaced
+    - calibration_performed
+  OPERATION:
+    - manual_pause
+    - manual_resume
+    - manual_override
+    - restart_attempt
+    - operator_observation
+  QUALITY:
+    - visual_defect_found
+    - porosity_detected
+    - dimensional_issue
+    - surface_defect
+    - part_accepted
+    - part_rejected
+    - lab_result_added
+  SYSTEM:
+    - software_update
+    - configuration_changed
+    - recipe_changed
+    - profile_mapping_updated
+

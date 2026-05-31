@@ -1,0 +1,41 @@
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  mcp:
+    profiles: ["mcp"]
+    ports:
+      - "8100:8100"
+    volumes:
+      - .:/app:ro
+
+  api:
+    volumes:
+      - .:/app:ro
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    volumes:
+      - .:/app:ro
+      - type: bind
+        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
+        read_only: true
+
+  watcher:
+    volumes:
+      - .:/app:ro
+      - type: bind
+        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
+        read_only: true
+
+  scheduler:
+    volumes:
+      - .:/app:ro
+
+  telegram-bot:
+    volumes:
+      - .:/app:ro
+      - stt_model_cache:/models/stt
