@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-logger = logging.getLogger(__name__)
-
 from pydantic import BaseModel, Field
 
 from core.config.settings import Settings, get_settings
@@ -26,6 +24,8 @@ from profiles.base.profile import PrinterProfilePlugin
 from reporting.json_report.generator import generate_session_json_report
 from reporting.markdown_report.generator import generate_markdown_report
 from storage.db.session import SessionLocal
+
+logger = logging.getLogger(__name__)
 
 
 class ImportJobRecord(BaseModel):
@@ -302,12 +302,13 @@ def persist_parse_results_to_db(
             
             # Save CanonicalEvents from parse_result (in batches)
             if ingested_file.parse_result and ingested_file.parse_result.events:
-                event_batch_size = 500
                 batch: list[dict] = []
                 for event_draft in ingested_file.parse_result.events:
-                    event_id = f"event_{uuid4().hex}"
+                    # Source location fields live on the nested `source`
+                    # (SourceLocation), not on the event draft itself.
+                    source = getattr(event_draft, 'source', None)
                     batch.append({
-                        "event_id": event_id,
+                        "event_id": f"event_{uuid4().hex}",
                         "session_id": session_id,
                         "source_file_id": source_file_id,
                         "ts": getattr(event_draft, 'ts', None),
@@ -318,39 +319,17 @@ def persist_parse_results_to_db(
                         "severity": getattr(event_draft, 'severity', 'info'),
                         "confidence": getattr(event_draft, 'confidence', 1.0),
                         "layer": getattr(event_draft, 'layer', None),
-                        "source_line": getattr(event_draft, 'source_line', None),
-                        "source_offset": getattr(event_draft, 'source_offset', None),
-                        "raw_excerpt": getattr(event_draft, 'raw_excerpt', None),
+                        "source_line": getattr(source, 'source_line', None),
+                        "source_offset": getattr(source, 'source_offset', None),
+                        "raw_excerpt": getattr(source, 'raw_excerpt', None),
                         "payload": getattr(event_draft, 'payload', {}),
                         "evidence_kind": getattr(event_draft, 'evidence_kind', 'machine_log'),
                         "provenance": [{"source": "parser", "file": file_name}],
                     })
-                    
-                    if len(batch) >= event_batch_size:
-                        for evt in batch:
-                            try:
-                                repo.save_canonical_event(**evt)
-                            except Exception as exc:
-                                logger.error("Failed to save event batch: %s", exc)
-                        try:
-                            repo.commit()
-                        except Exception as exc:
-                            logger.error("Failed to commit event batch: %s", exc)
-                        events_saved += len(batch)
+                    if len(batch) >= _EVENT_BATCH_SIZE:
+                        events_saved += _flush_event_batch(repo, batch)
                         batch = []
-                
-                # Save remaining events
-                if batch:
-                    for evt in batch:
-                        try:
-                            repo.save_canonical_event(**evt)
-                        except Exception as exc:
-                            logger.error("Failed to save event: %s", exc)
-                    try:
-                        repo.commit()
-                    except Exception as exc:
-                        logger.error("Failed to commit remaining events: %s", exc)
-                    events_saved += len(batch)
+                events_saved += _flush_event_batch(repo, batch)
         
         try:
             repo.commit()
@@ -391,7 +370,7 @@ def create_analysis_jobs_for_session(session_id: str, now: datetime | None = Non
             logger.error("Failed to create build job for session %s: %s", session_id, exc)
             try:
                 db.rollback()
-            except:
+            except Exception:
                 pass
     
     return jobs_created
@@ -432,24 +411,10 @@ def execute_confirmed_import(
         job.updated_at = now
         for index, group in enumerate(groups, start=1):
             session_id = f"{job.import_job_id}_session_{index}"
-            
+
             # Create session record in DB first so FK constraints are satisfied
-            from storage.db.session import SessionLocal
-            from domain.models.entities import BuildSession
-            with SessionLocal() as db:
-                existing_session = db.get(BuildSession, session_id)
-                if not existing_session:
-                    session_record = BuildSession(
-                        session_id=session_id,
-                        status="import_processing",
-                        classification="INCOMPLETE_OR_UNKNOWN",
-                        classification_confidence=0.0,
-                        grouping_confidence=float(group.confidence) if group.confidence else 0.0,
-                    )
-                    db.add(session_record)
-                    db.commit()
-                    logger.info("Created session record %s in database", session_id)
-            
+            _ensure_session_record(session_id, float(group.confidence) if group.confidence else 0.0)
+
             # Persist parse results (source files and canonical events) to database
             files_saved, events_saved = persist_parse_results_to_db(session_id, group.files, now=now)
             logger.info(
@@ -549,11 +514,39 @@ def _result(
     )
 
 
-def _remove_large_files(root: Path, max_bytes: int = 100_000_000) -> None:
-    for path in list(root.rglob("*")):
-        if path.is_file() and path.stat().st_size > max_bytes:
-            logger.warning("Removing oversized file %s (%d bytes)", path.name, path.stat().st_size)
-            path.unlink()
+_EVENT_BATCH_SIZE = 500
+
+
+def _flush_event_batch(repo, batch: list[dict]) -> int:
+    """Save and commit a batch of canonical events; returns how many were flushed."""
+    if not batch:
+        return 0
+    for evt in batch:
+        try:
+            repo.save_canonical_event(**evt)
+        except Exception as exc:
+            logger.error("Failed to save event: %s", exc)
+    try:
+        repo.commit()
+    except Exception as exc:
+        logger.error("Failed to commit event batch: %s", exc)
+    return len(batch)
+
+
+def _ensure_session_record(session_id: str, grouping_confidence: float) -> None:
+    """Create the BuildSession row up-front so later FK inserts are satisfied."""
+    from domain.models.entities import BuildSession
+    with SessionLocal() as db:
+        if db.get(BuildSession, session_id) is None:
+            db.add(BuildSession(
+                session_id=session_id,
+                status="import_processing",
+                classification="INCOMPLETE_OR_UNKNOWN",
+                classification_confidence=0.0,
+                grouping_confidence=grouping_confidence,
+            ))
+            db.commit()
+            logger.info("Created session record %s in database", session_id)
 
 
 def _audit(action: str, actor: str, at: datetime, details: dict[str, Any] | None = None) -> dict[str, Any]:
