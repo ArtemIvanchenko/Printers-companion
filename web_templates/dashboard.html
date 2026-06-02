@@ -109,7 +109,9 @@
         <a href="#" onclick="showPage('consumption')" id="nav-consumption">⛽ Расход</a>
         <a href="#" onclick="showPage('powder')" id="nav-powder">🧪 Порошок</a>
         <a href="#" onclick="showPage('maintenance')" id="nav-maintenance">🔧 ТО</a>
+        <a href="#" onclick="showPage('patterns')" id="nav-patterns">🔍 Анализ</a>
         <a href="#" onclick="showPage('chat')" id="nav-chat">💬 Чат</a>
+        <a href="#" onclick="showPage('update')" id="nav-update">⬆️ Обновление</a>
     </nav>
 
     <div id="import-status-bar" style="background:#1a1f2e;padding:8px 40px;border-bottom:1px solid #2d3748;display:none;">
@@ -391,6 +393,100 @@
             </div>
             <div id="maintenance-items" style="display:grid;gap:16px;">
                 <div style="color:#6b7280;">Загрузка...</div>
+            </div>
+        </div>
+
+        <!-- Patterns / Cross-session Analysis Page -->
+        <div id="page-patterns" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                    <h2 style="margin:0;">🔍 Кросс-сессионный анализ паттернов</h2>
+                    <button onclick="loadPatterns(true)" style="background:#2d3748;border:1px solid #4a5568;color:#e2e8f0;padding:8px 18px;border-radius:8px;cursor:pointer;font-size:13px;">
+                        🔄 Пересчитать
+                    </button>
+                </div>
+                <p style="color:#6b7280;margin-top:8px;font-size:13px;">
+                    Числовой анализ телеметрии по всем сессиям: тренды, аномалии, влияние техобслуживания.
+                    ИИ используется только для объяснения — числа считает Python.
+                </p>
+            </div>
+
+            <!-- Summary bar -->
+            <div id="patterns-summary" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:16px 20px;margin-bottom:20px;font-size:14px;color:#a0aec0;">
+                Загрузка...
+            </div>
+
+            <!-- 3 finding panels -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;margin-bottom:24px;">
+
+                <!-- Trends -->
+                <div class="section" style="margin:0;">
+                    <h2 style="font-size:16px;margin-bottom:16px;">📈 Тренды сигналов</h2>
+                    <div id="patterns-trends">
+                        <div style="color:#4a5568;font-size:13px;">Загрузка...</div>
+                    </div>
+                </div>
+
+                <!-- Session anomalies -->
+                <div class="section" style="margin:0;">
+                    <h2 style="font-size:16px;margin-bottom:16px;">⚡ Аномальные сессии</h2>
+                    <div id="patterns-anomalies">
+                        <div style="color:#4a5568;font-size:13px;">Загрузка...</div>
+                    </div>
+                </div>
+
+                <!-- Before/after events -->
+                <div class="section" style="margin:0;">
+                    <h2 style="font-size:16px;margin-bottom:16px;">🔧 Влияние ТО на сигналы</h2>
+                    <div id="patterns-before-after">
+                        <div style="color:#4a5568;font-size:13px;">Загрузка...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Per-session signal table -->
+            <div class="section">
+                <h2 style="font-size:16px;">📋 Сводка по сессиям (ключевые сигналы)</h2>
+                <div id="patterns-sessions-table" style="overflow-x:auto;">
+                    <div style="color:#4a5568;font-size:13px;">Загрузка...</div>
+                </div>
+            </div>
+
+            <!-- LLM narrative -->
+            <div class="section" id="patterns-narrative-section" style="display:none;">
+                <h2 style="font-size:16px;margin-bottom:12px;">🤖 Интерпретация ИИ</h2>
+                <div id="patterns-narrative" style="color:#e2e8f0;line-height:1.7;white-space:pre-wrap;font-size:14px;"></div>
+            </div>
+        </div>
+
+        <!-- Update Page -->
+        <div id="page-update" style="display:none;">
+            <div class="section" style="max-width:560px;margin:0 auto;">
+                <h2 style="margin-bottom:20px;">⬆️ Обновление системы</h2>
+                <p style="color:#a0aec0;font-size:14px;margin-bottom:24px;line-height:1.6;">
+                    Загружает последние версии образов с Docker Hub и перезапускает сервисы.
+                    После нажатия страница может временно стать недоступной (30–90 сек) — это нормально.
+                    Когда обновление завершится, страница перезагрузится автоматически.
+                </p>
+
+                <div id="update-status-box" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:20px;">
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <span id="update-wt-dot" style="width:10px;height:10px;border-radius:50%;background:#6b7280;display:inline-block;"></span>
+                        <span id="update-wt-label" style="color:#a0aec0;font-size:14px;">Проверка Watchtower...</span>
+                    </div>
+                </div>
+
+                <button id="btn-update"
+                    onclick="triggerUpdate()"
+                    style="width:100%;padding:16px;font-size:16px;font-weight:600;
+                           background:#3b82f6;color:white;border:none;border-radius:10px;
+                           cursor:pointer;transition:background 0.2s;">
+                    🚀 Обновить сейчас
+                </button>
+
+                <div id="update-log" style="margin-top:20px;font-family:monospace;font-size:13px;
+                     color:#a0aec0;background:#0f1419;border-radius:8px;padding:16px;
+                     min-height:60px;display:none;"></div>
             </div>
         </div>
 
@@ -705,6 +801,8 @@
             if (page === 'live') initLive();
             if (page === 'powder') loadPowder();
             if (page === 'maintenance') loadMaintenance();
+            if (page === 'patterns') loadPatterns();
+            if (page === 'update') checkWatchtower();
         }
 
         // =========================================================
@@ -911,6 +1009,241 @@
         }
         setInterval(updateImportStatus, 3000);
         updateImportStatus();
+
+        // =========================================================
+        // UPDATE — Watchtower on-demand update
+        // =========================================================
+        async function checkWatchtower() {
+            try {
+                const r = await fetch('/admin/update/status');
+                const d = await r.json();
+                const dot   = document.getElementById('update-wt-dot');
+                const label = document.getElementById('update-wt-label');
+                const btn   = document.getElementById('btn-update');
+                if (d.watchtower === 'online') {
+                    dot.style.background   = '#10b981';
+                    label.textContent      = '✅ Watchtower готов — обновление доступно';
+                    btn.disabled           = false;
+                    btn.style.background   = '#3b82f6';
+                } else {
+                    dot.style.background   = '#ef4444';
+                    label.textContent      = '❌ Watchtower недоступен — запустите: docker compose up watchtower';
+                    btn.disabled           = true;
+                    btn.style.background   = '#4a5568';
+                }
+            } catch(e) {
+                document.getElementById('update-wt-label').textContent = '⚠️ Не удалось проверить статус';
+            }
+        }
+
+        async function triggerUpdate() {
+            const btn = document.getElementById('btn-update');
+            const log = document.getElementById('update-log');
+            btn.disabled = true;
+            btn.textContent = '⏳ Запуск обновления...';
+            log.style.display = 'block';
+            log.textContent = '[' + new Date().toLocaleTimeString() + '] Отправка команды Watchtower...\n';
+
+            try {
+                const r = await fetch('/admin/update', { method: 'POST' });
+                const d = await r.json();
+                if (d.ok) {
+                    log.textContent += '[' + new Date().toLocaleTimeString() + '] ' + d.message + '\n';
+                    log.textContent += 'Ожидание перезапуска сервисов...\n';
+                    btn.textContent = '🔄 Обновление в процессе...';
+                    // Poll /health until API comes back after restart
+                    await pollUntilBack(log);
+                } else {
+                    log.textContent += '❌ Ошибка: ' + JSON.stringify(d);
+                    btn.disabled = false;
+                    btn.textContent = '🚀 Обновить сейчас';
+                }
+            } catch(e) {
+                // API may have restarted — start polling
+                log.textContent += 'API перезапускается, ожидаем...\n';
+                await pollUntilBack(log);
+            }
+        }
+
+        async function pollUntilBack(log) {
+            const start = Date.now();
+            while (Date.now() - start < 180_000) {
+                await new Promise(r => setTimeout(r, 3000));
+                try {
+                    const r = await fetch('/health');
+                    if (r.ok) {
+                        log.textContent += '✅ Система обновлена и готова к работе!\n';
+                        log.textContent += 'Перезагрузка страницы через 3 секунды...';
+                        await new Promise(r => setTimeout(r, 3000));
+                        location.reload();
+                        return;
+                    }
+                } catch(e) { /* still restarting */ }
+                log.textContent += '.';
+            }
+            log.textContent += '\n⚠️ Таймаут. Обновите страницу вручную.';
+        }
+
+        // =========================================================
+        // PATTERNS — cross-session intelligence
+        // =========================================================
+        const _signalLabel = {
+            SO1:'O₂ (SO1)', SO2:'O₂ (SO2)', ST3:'Темп ST3', ST4:'Темп ST4',
+            ST5:'Темп стола (ST5)', SP4:'Давление (SP4)', SF1:'Поток SF1',
+            'Flow H':'Влажность', 'Flow T':'Темп газа',
+        };
+        const _groupColor = {
+            oxygen:'#ef4444', temperature:'#f59e0b',
+            pressure:'#8b5cf6', humidity:'#06b6d4',
+        };
+
+        function sigLabel(s)  { return _signalLabel[s] || s; }
+        function grpColor(g)  { return _groupColor[g] || '#60a5fa'; }
+
+        function _confBadge(c) {
+            const pct = Math.round(c * 100);
+            const col = c >= 0.7 ? '#10b981' : c >= 0.5 ? '#f59e0b' : '#6b7280';
+            return `<span style="background:${col};color:white;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:600;">${pct}%</span>`;
+        }
+
+        function _dirArrow(dir) {
+            return dir === 'increasing'
+                ? '<span style="color:#ef4444;">▲</span>'
+                : '<span style="color:#10b981;">▼</span>';
+        }
+
+        function renderTrends(trends) {
+            const el = document.getElementById('patterns-trends');
+            if (!trends.length) {
+                el.innerHTML = '<div style="color:#6b7280;font-size:13px;">Недостаточно данных. Нужно ≥ 3 сессий с телеметрией.</div>';
+                return;
+            }
+            el.innerHTML = trends.map(t => `
+                <div style="border:1px solid #2d3748;border-radius:10px;padding:14px;margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                        <span style="color:${grpColor(t.group)};font-weight:600;">${sigLabel(t.signal)}</span>
+                        ${_confBadge(t.confidence)}
+                    </div>
+                    <div style="font-size:20px;font-weight:700;margin-bottom:4px;">
+                        ${_dirArrow(t.direction)} ${t.slope_pct_of_mean}% / сессию
+                    </div>
+                    <div style="color:#a0aec0;font-size:12px;">
+                        Среднее: ${t.mean_overall} · ${t.n_sessions} сессий
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderAnomalies(anomalies) {
+            const el = document.getElementById('patterns-anomalies');
+            if (!anomalies.length) {
+                el.innerHTML = '<div style="color:#6b7280;font-size:13px;">Аномалий не обнаружено.</div>';
+                return;
+            }
+            // Group by session
+            const bySession = {};
+            anomalies.forEach(a => { (bySession[a.session_id] = bySession[a.session_id] || []).push(a); });
+            el.innerHTML = Object.entries(bySession).map(([sid, anoms]) => `
+                <div style="border:1px solid #2d3748;border-radius:10px;padding:14px;margin-bottom:12px;">
+                    <div style="font-weight:600;margin-bottom:8px;font-size:13px;color:#a0aec0;">${sid}</div>
+                    ${anoms.map(a => `
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                            <span style="color:${grpColor(a.group)};font-size:13px;">${sigLabel(a.signal)}</span>
+                            <span style="color:${a.direction==='high'?'#ef4444':'#60a5fa'};font-weight:600;">
+                                ${a.value} (z=${a.z_score})
+                            </span>
+                        </div>
+                    `).join('')}
+                </div>
+            `).join('');
+        }
+
+        function renderBeforeAfter(items) {
+            const el = document.getElementById('patterns-before-after');
+            if (!items.length) {
+                el.innerHTML = '<div style="color:#6b7280;font-size:13px;">Нет данных о техобслуживании или недостаточно сессий до/после.</div>';
+                return;
+            }
+            el.innerHTML = items.map(b => `
+                <div style="border:1px solid #2d3748;border-radius:10px;padding:14px;margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <span style="font-weight:600;font-size:13px;">${b.event_type.replace(/_/g,' ')}</span>
+                        ${_confBadge(b.confidence)}
+                    </div>
+                    <div style="color:${grpColor(b.group)};margin-bottom:6px;">${sigLabel(b.signal)}</div>
+                    <div style="display:flex;gap:20px;font-size:13px;">
+                        <div><div style="color:#6b7280;font-size:11px;">ДО</div><b>${b.before_mean}</b></div>
+                        <div style="align-self:center;">→</div>
+                        <div><div style="color:#6b7280;font-size:11px;">ПОСЛЕ</div><b>${b.after_mean}</b></div>
+                        <div style="align-self:center;color:${b.delta_pct<0?'#10b981':'#ef4444'};font-weight:700;">
+                            ${b.delta_pct > 0 ? '+' : ''}${b.delta_pct}%
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderSessionsTable(sessions) {
+            const el = document.getElementById('patterns-sessions-table');
+            if (!sessions.length) {
+                el.innerHTML = '<div style="color:#6b7280;font-size:13px;">Нет сессий с телеметрией.</div>';
+                return;
+            }
+            // Collect all signal names across sessions
+            const allSigs = new Set();
+            sessions.forEach(s => Object.keys(s.signal_stats || {}).forEach(k => allSigs.add(k)));
+            const sigs = [...allSigs].sort();
+
+            const header = ['Сессия', 'Дата', 'Качество', ...sigs.map(sigLabel)].map(h =>
+                `<th>${h}</th>`).join('');
+            const rows = sessions.map(s => {
+                const stats = s.signal_stats || {};
+                const date = s.start_ts ? s.start_ts.slice(0,10) : '—';
+                const readiness = s.health?.readiness_score;
+                const readCol = readiness >= 80 ? '#10b981' : readiness >= 50 ? '#f59e0b' : '#ef4444';
+                const readStr = readiness != null ? `<span style="color:${readCol};font-weight:600;">${readiness}</span>` : '—';
+                const sigCells = sigs.map(sig => {
+                    const st = stats[sig];
+                    if (!st) return '<td style="color:#4a5568;">—</td>';
+                    const col = grpColor(st.group);
+                    return `<td style="color:${col};">${st.mean.toFixed(3)}<span style="color:#4a5568;font-size:11px;"> ±${st.std.toFixed(3)}</span></td>`;
+                }).join('');
+                return `<tr><td style="font-size:12px;color:#a0aec0;">${s.session_id}</td><td>${date}</td><td>${readStr}</td>${sigCells}</tr>`;
+            }).join('');
+
+            el.innerHTML = `<table><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table>`;
+        }
+
+        let _patternsLoaded = false;
+        async function loadPatterns(force = false) {
+            if (_patternsLoaded && !force) return;
+            document.getElementById('patterns-summary').textContent = 'Анализ...';
+
+            try {
+                const url = force ? '/analysis/patterns?force=true' : '/analysis/patterns';
+                const r = await fetch(url);
+                const data = await r.json();
+
+                if (data.error) {
+                    document.getElementById('patterns-summary').innerHTML =
+                        `<span style="color:#ef4444;">Ошибка: ${data.error}</span>`;
+                    return;
+                }
+
+                document.getElementById('patterns-summary').innerHTML =
+                    `<b>${data.summary}</b>&nbsp;&nbsp;<span style="color:#4a5568;font-size:12px;">` +
+                    `обновлено ${(data.computed_at||'').slice(11,19)}</span>`;
+
+                renderTrends(data.trends || []);
+                renderAnomalies(data.anomalies || []);
+                renderBeforeAfter(data.before_after || []);
+                renderSessionsTable(data.sessions_detail || []);
+                _patternsLoaded = true;
+            } catch(e) {
+                document.getElementById('patterns-summary').innerHTML =
+                    `<span style="color:#ef4444;">Ошибка загрузки: ${e}</span>`;
+            }
+        }
     </script>
 </body>
 </html>"""

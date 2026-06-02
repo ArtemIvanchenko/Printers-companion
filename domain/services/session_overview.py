@@ -10,8 +10,10 @@ Kept intentionally light (single pass over parsed output, no event deduplication
 so it is cheap enough to run inline during API ingest. Storage-agnostic — the
 result is a plain JSON-serializable dict persisted by the runtime repository.
 """
+import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from domain.enums.common import SourceFileFamily
@@ -19,6 +21,8 @@ from domain.services.ingestion import IngestedFile
 from domain.services.session_classification import SessionClassificationResult, classify_session
 from analytics.features.extraction import extract_session_features
 from analytics.process_health import build_process_health
+
+logger = logging.getLogger(__name__)
 
 # Raw column -> chart series, grouped by physical meaning (see profiles/m350/signals.yaml).
 _OXYGEN_COLUMNS = ["SO1", "SO2"]
@@ -82,13 +86,24 @@ def _best_telemetry_table(files: list[IngestedFile]):
 
 
 def _series(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list]:
-    """Extract the first present column from `columns` as a numeric series."""
+    """Extract the first present column from `columns` as a numeric series.
+
+    Non-finite values (NaN, Inf) are replaced with None so the series
+    can be safely serialised to JSON and stored in PostgreSQL jsonb.
+    """
+    import math
     out: dict[str, list] = {}
     for col in columns:
         if col in rows[0]:
             values = [r.get(col) for r in rows]
             if any(isinstance(v, (int, float)) for v in values):
-                out[col] = [v if isinstance(v, (int, float)) else None for v in values]
+                cleaned = []
+                for v in values:
+                    if isinstance(v, (int, float)) and math.isfinite(v):
+                        cleaned.append(v)
+                    else:
+                        cleaned.append(None)
+                out[col] = cleaned
     return out
 
 
@@ -226,6 +241,9 @@ def build_group_overview(
     features["atmosphere_readiness"] = (health.get("readiness") or {}).get("score")
     features["process_anomaly_count"] = len(health.get("anomalies", []))
 
+    # Full-resolution signal stats from the complete sensors.log (all rows, not just 150).
+    signal_stats = _compute_full_signal_stats(files)
+
     return {
         "group_id": group_id,
         "classification": classification.classification.value,
@@ -234,4 +252,58 @@ def build_group_overview(
         "features": features,
         "telemetry": telemetry,
         "health": health,
+        "signal_stats": signal_stats,
     }
+
+
+def _compute_full_signal_stats(files: list[IngestedFile]) -> dict[str, Any]:
+    """Parse the raw sensors.log with Polars and compute full-resolution stats.
+
+    Finds the *_sensors.log file in the session group, reads all rows (~330k),
+    and returns per-signal statistics (mean, std, p95, p99, alarm_count, etc.).
+    Falls back to an empty dict if no sensors file is present or parsing fails.
+    """
+    sensors_file: IngestedFile | None = None
+    for f in files:
+        if f.classification and f.classification.family == SourceFileFamily.sensors_log:
+            sensors_file = f
+            break
+
+    if sensors_file is None:
+        return {}
+
+    path = Path(sensors_file.path)
+    if not path.exists():
+        logger.warning("Sensors log not found at %s — skipping full stats", path)
+        return {}
+
+    try:
+        from analytics.telemetry_parser import compute_full_signal_stats
+        # Load alarm thresholds from signals.yaml for alarm_count computation.
+        alarm_thresholds = _load_alarm_thresholds()
+        stats = compute_full_signal_stats(path, alarm_thresholds=alarm_thresholds)
+        logger.info("Full signal stats computed from %s (%d signals)", path.name, len(stats))
+        return stats
+    except Exception as exc:
+        logger.warning("Full signal stats failed for %s: %s", path.name, exc)
+        return {}
+
+
+def _load_alarm_thresholds() -> dict[str, dict[str, float]]:
+    """Read alarm_high / alarm_low from signals.yaml for alarm_count tracking."""
+    try:
+        from profiles.base.profile import load_yaml
+        signals_path = Path(__file__).resolve().parents[2] / "profiles" / "m350" / "signals.yaml"
+        raw = load_yaml(signals_path)
+        result: dict[str, dict[str, float]] = {}
+        for sig_name, sig_data in (raw.get("signals") or {}).items():
+            entry: dict[str, float] = {}
+            if (ah := sig_data.get("alarm_high")) is not None:
+                entry["alarm_high"] = float(ah)
+            if (al := sig_data.get("alarm_low")) is not None:
+                entry["alarm_low"] = float(al)
+            if entry:
+                result[sig_name] = entry
+        return result
+    except Exception:
+        return {}

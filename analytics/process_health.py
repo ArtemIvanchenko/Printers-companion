@@ -13,19 +13,38 @@ which are robust to unknown scaling, plus a few clearly-labelled heuristic level
 """
 from __future__ import annotations
 
-from statistics import fmean, median, pstdev
+import math
+from statistics import fmean, median
 from typing import Any
 
 
 def _clean(values: list[Any]) -> list[float]:
-    return [float(v) for v in values if isinstance(v, (int, float))]
+    """Return finite floats only — drops None, NaN, Inf, and non-numeric values."""
+    result = []
+    for v in values:
+        if not isinstance(v, (int, float)):
+            continue
+        f = float(v)
+        if math.isfinite(f):
+            result.append(f)
+    return result
+
+
+def _pstdev(values: list[float]) -> float:
+    """Population std-dev using plain math — avoids statistics.pstdev
+    which breaks on very large floats in Python 3.11 (AttributeError on Fraction)."""
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / len(values)
+    return math.sqrt(variance)
 
 
 def _zscores(values: list[float]) -> list[float]:
     if len(values) < 2:
         return [0.0] * len(values)
     mean = fmean(values)
-    sd = pstdev(values)
+    sd = _pstdev(values)
     if sd == 0:
         return [0.0] * len(values)
     return [(v - mean) / sd for v in values]
@@ -50,7 +69,7 @@ def _robust_spike(values: list[float]) -> tuple[int, float] | None:
         return (peak_idx, z)
     # Flat baseline: estimate scale from all-but-the-most-extreme point.
     base = sorted(values, key=lambda v: abs(v - med))[:-1]
-    scale = pstdev(base) if len(base) >= 2 else 0.0
+    scale = _pstdev(base) if len(base) >= 2 else 0.0
     if scale > 0:
         return (peak_idx, (values[peak_idx] - med) / scale)
     # Truly constant baseline with a single different value.
@@ -65,7 +84,7 @@ def _coefficient_of_variation(values: list[float]) -> float:
     mean = fmean(values)
     if mean == 0:
         return 0.0
-    return pstdev(values) / abs(mean)
+    return _pstdev(values) / abs(mean)
 
 
 def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5) -> list[dict[str, Any]]:

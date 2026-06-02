@@ -283,6 +283,29 @@ services:
     cap_drop:
       - ALL
 
+  # ── Auto-updater ────────────────────────────────────────────────────────────
+  # Watchtower watches Docker Hub for new image versions and restarts containers
+  # automatically.  It also exposes an HTTP API so the web dashboard can trigger
+  # an on-demand update check with a single button click — no terminal needed.
+  watchtower:
+    image: containrrr/watchtower:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_HTTP_API_UPDATE: "true"
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:-pla-watchtower-token}
+      WATCHTOWER_HTTP_API_PERIODIC_POLLS: "true"
+      WATCHTOWER_POLL_INTERVAL: "3600"        # check Docker Hub every hour
+      WATCHTOWER_CLEANUP: "true"              # remove old image layers after update
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      WATCHTOWER_LABEL_ENABLE: "false"        # watch ALL containers in this compose
+      DOCKER_API_VERSION: "1.41"              # fix for Docker Desktop API negotiation
+    ports:
+      - "8888:8080"    # expose only on localhost; UI calls localhost:8888 internally
+    networks:
+      - backend_net
+    restart: unless-stopped
+
 networks:
   backend_net:
     driver: bridge
