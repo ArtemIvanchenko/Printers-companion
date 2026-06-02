@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,40 @@ class IngestionResult(BaseModel):
 
 
 class IngestionService:
+    # Files whose data is fully contained in other logs — skip to save memory and time.
+    #
+    # _burn.log      → same sensor columns as _sensors.log, just 1 row/layer (redundant)
+    # _stateFlowData.log → binary file, unreadable garbage
+    # table_temp.log → table temperature = ST5 column already in _sensors.log
+    #
+    # _stateFlow.log is skipped separately by size (see _should_skip).
+    SKIP_PATTERNS: tuple[str, ...] = (
+        "*_burn.log",
+        "*_stateFlowData.log",
+        "table_temp.log",
+        "._*",            # macOS AppleDouble metadata files
+    )
+    # stateFlow logs at 500+ Hz but 99.98% rows are identical; classification
+    # only uses it as "supportive" evidence — Monitor100 is sufficient.
+    # Skip stateFlow files larger than this threshold.
+    STATEFLOW_MAX_BYTES = 10 * 1024 * 1024   # 10 MB
+
+    def _should_skip(self, path: Path) -> str | None:
+        """Return a skip reason string if this file should not be ingested, else None."""
+        name = path.name
+        for pattern in self.SKIP_PATTERNS:
+            if fnmatch(name, pattern):
+                return f"redundant file type: matches skip pattern '{pattern}'"
+        if fnmatch(name, "*_stateFlow.log"):
+            size = path.stat().st_size
+            if size > self.STATEFLOW_MAX_BYTES:
+                return (
+                    f"stateFlow file too large ({size / 1024 / 1024:.0f} MB > "
+                    f"{self.STATEFLOW_MAX_BYTES // 1024 // 1024} MB): "
+                    f"data is 99%+ identical rows; classification uses monitor100 instead"
+                )
+        return None
+
     def __init__(self, registry: ParserRegistry, profile: PrinterProfilePlugin | None = None) -> None:
         self.registry = registry
         self.profile = profile
@@ -48,6 +83,10 @@ class IngestionService:
             return result
         for path in sorted(root.rglob("*")):
             if not path.is_file():
+                continue
+            skip_reason = self._should_skip(path)
+            if skip_reason:
+                result.skipped.append({"path": str(path), "reason": skip_reason})
                 continue
             try:
                 result.files.append(self._inspect_file(path, root))

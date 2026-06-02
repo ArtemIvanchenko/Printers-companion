@@ -62,7 +62,12 @@ def process_due_import_jobs() -> int:
     failed = 0
     registry = build_registry()
     profile = get_profile()
-    
+    settings = get_settings()
+
+    # Read pending job IDs first in a short-lived session.
+    # Each job then gets its OWN session so a DB error in one job
+    # (e.g. PostgreSQL 1 GB jsonb limit) cannot roll back all others.
+    pending_ids: list[str] = []
     with SessionLocal() as db:
         repo = RuntimeRepository(db)
         for job in repo.list_import_jobs():
@@ -72,23 +77,32 @@ def process_due_import_jobs() -> int:
                 and job.postponed_until is not None
                 and job.postponed_until <= now
             )
-            if job.status != ImportJobStatus.checking_stability and not due_postponed:
+            if job.status == ImportJobStatus.checking_stability or due_postponed:
+                pending_ids.append(job.import_job_id)
+
+    for job_id in pending_ids:
+        # Fresh session per job — a failed commit here cannot poison other jobs.
+        with SessionLocal() as db:
+            repo = RuntimeRepository(db)
+            job = repo.get_import_job(job_id)
+            if job is None:
                 continue
-            
-            logger.info("Processing confirmed import job %s from %s", job.import_job_id, job.source_path)
+
+            logger.info("Processing import job %s from %s", job.import_job_id, job.source_path)
             try:
                 result = retry_import_job(
                     job,
                     registry=registry,
                     profile=profile,
                     actor="worker",
-                    settings=get_settings(),
-                    now=now
+                    settings=settings,
+                    now=now,
                 )
                 repo.save_import_job(result.job)
                 repo.save_notifications(result.notifications)
                 repo.save_sessions(result.sessions)
                 repo.save_reports(result.reports)
+                repo.commit()
                 processed += 1
                 logger.info("Successfully processed import job %s", job.import_job_id)
             except Exception as exc:
@@ -97,24 +111,29 @@ def process_due_import_jobs() -> int:
                     "Failed to process import job %s: %s",
                     job.import_job_id,
                     exc,
-                    exc_info=True
+                    exc_info=True,
                 )
-                # Try to save error state to DB for operator visibility
+                # Save failed status in a brand-new session (the current one
+                # is in a rolled-back state and cannot be used).
                 try:
-                    job.status = ImportJobStatus.failed
-                    job.updated_at = now
-                    repo.save_import_job(job)
+                    with SessionLocal() as db2:
+                        repo2 = RuntimeRepository(db2)
+                        job2 = repo2.get_import_job(job_id)
+                        if job2:
+                            job2.status = ImportJobStatus.failed
+                            job2.updated_at = now
+                            repo2.save_import_job(job2)
+                            repo2.commit()
                 except Exception as db_exc:
-                    logger.error("Failed to save error state for job %s: %s", job.import_job_id, db_exc)
-        
-        try:
-            repo.commit()
-        except Exception as exc:
-            logger.error("Failed to commit database changes: %s", exc)
-    
+                    logger.error(
+                        "Failed to persist error state for job %s: %s",
+                        job_id,
+                        db_exc,
+                    )
+
     if failed > 0:
         logger.warning("Processed %s job(s) successfully, %s failed", processed, failed)
-    
+
     return processed
 
 

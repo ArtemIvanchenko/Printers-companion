@@ -7,7 +7,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.routes import (
     agent,
+    analysis,
     anomalies,
+    updater,
     background,
     chat,
     dashboard,
@@ -88,6 +90,8 @@ app.include_router(dashboard.router)
 app.include_router(realtime.router)
 app.include_router(maintenance.router)
 app.include_router(powder.router)
+app.include_router(analysis.router)
+app.include_router(updater.router)
 
 
 @app.get("/alarm-demo", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)
