@@ -19,6 +19,21 @@ def _ensure_schema():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_object_store(monkeypatch):
+    """No MinIO in the test harness: make the real ObjectStore report unavailable
+    so report offload short-circuits without a slow network round-trip. Tests that
+    exercise the offload path inject their own in-memory ObjectStore."""
+    try:
+        monkeypatch.setattr(
+            "storage.object_store.minio_client.ObjectStore.is_available",
+            lambda self: False,
+            raising=False,
+        )
+    except Exception:
+        pass  # minio not installed -> offload import fails fast anyway
+
+
 @pytest.fixture
 def mock_db_session():
     """Mock SQLAlchemy session for testing."""

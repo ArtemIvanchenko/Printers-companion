@@ -9,7 +9,7 @@ from domain.services.ingestion import IngestionService
 from domain.services.session_grouping import group_files_into_sessions
 from domain.services.session_overview import build_group_overview
 from profiles.m350.profile import build_registry, get_profile
-from reporting.json_report.generator import generate_session_json_report
+from reporting.json_report.generator import _timeline_preview, generate_session_json_report
 from reporting.markdown_report.generator import generate_markdown_report
 from storage.repositories.runtime import RuntimeRepository
 
@@ -103,7 +103,7 @@ def reanalyze_session(session_id: str, repo: RuntimeRepository = Depends(get_run
 @router.get("/{session_id}/timeline")
 def get_timeline(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
     report = _generate_report(session_id, include_markdown=False, repo=repo)
-    return report["timeline"]
+    return _timeline_preview(report["timeline"])
 
 
 @router.get("/{session_id}/segments")
