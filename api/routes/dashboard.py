@@ -1,6 +1,7 @@
 """HTML Dashboard with all analytics charts."""
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
@@ -230,38 +231,19 @@ async def dashboard():
     gas_total = sum(e['value'] for e in gas_events if e['value'])
     powder_total = sum(e['value'] for e in powder_events if e['value'])
     
-    # Session types
-    types = {}
-    for s in sessions:
-        t = s['type']
-        types[t] = types.get(t, 0) + 1
-    
-    # Material breakdown
-    materials = {}
-    for s in sessions:
-        m = s.get('material') or 'unknown'
-        materials[m] = materials.get(m, 0) + 1
-    
+    # Counts by category (Counter keeps first-seen order, like the old dicts)
+    types = Counter(s['type'] for s in sessions)
+    materials = Counter(s.get('material') or 'unknown' for s in sessions)
+    quality_stats = Counter(q['result'] for q in quality)
+    defects = Counter(q['defect_type'] for q in quality if q.get('defect_type'))
+
     # Duration per session
     durations = [s['duration_min'] for s in sessions if s['type'] == 'REAL_PRINT']
     dates_labels = [s['date'] for s in sessions if s['type'] == 'REAL_PRINT']
-    
+
     # Pauses
     pauses = [s.get('pause_count', 0) for s in sessions]
     pause_labels = [s['date'] for s in sessions]
-    
-    # Quality stats
-    quality_stats = {}
-    for q in quality:
-        r = q['result']
-        quality_stats[r] = quality_stats.get(r, 0) + 1
-    
-    # Defects
-    defects = {}
-    for q in quality:
-        if q.get('defect_type'):
-            d = q['defect_type']
-            defects[d] = defects.get(d, 0) + 1
     
     # Pre-compute JS-safe color arrays (avoids undefined-variable ReferenceError in browser)
     duration_colors = json.dumps(

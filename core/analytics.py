@@ -222,17 +222,9 @@ class AnalyticsService:
         if action == "count":
             return f"📊 {question_summary}\n\n  Результат: {result.get('result', 0)}"
 
-        if action == "sum":
-            return f"📊 {question_summary}\n\n  Сумма ({result.get('field', '?')}): {result.get('result', 0)}"
-
-        if action == "avg":
-            return f"📊 {question_summary}\n\n  Среднее ({result.get('field', '?')}): {result.get('result', 0)}"
-
-        if action == "max":
-            return f"📊 {question_summary}\n\n  Максимум ({result.get('field', '?')}): {result.get('result', 0)}"
-
-        if action == "min":
-            return f"📊 {question_summary}\n\n  Минимум ({result.get('field', '?')}): {result.get('result', 0)}"
+        _scalar_labels = {"sum": "Сумма", "avg": "Среднее", "max": "Максимум", "min": "Минимум"}
+        if action in _scalar_labels:
+            return f"📊 {question_summary}\n\n  {_scalar_labels[action]} ({result.get('field', '?')}): {result.get('result', 0)}"
 
         if action == "list":
             rows = result.get("result", [])
@@ -388,59 +380,40 @@ class AnalyticsService:
             for r in rows
         ]
 
-    def _get_gas_events(self, session_ids: list[str]) -> list[dict[str, Any]]:
-        query = select(OperatorEvent).where(
-            OperatorEvent.event_type.in_(
-                ["gas_cylinder_replaced", "gas_consumption_recorded", "gas_pressure_issue"]
-            )
-        )
+    _GAS_EVENT_TYPES = ["gas_cylinder_replaced", "gas_consumption_recorded", "gas_pressure_issue"]
+    _POWDER_EVENT_TYPES = [
+        "powder_consumption_recorded", "powder_batch_changed",
+        "powder_reused", "powder_sieved", "powder_dried",
+    ]
+
+    def _get_consumable_events(
+        self, event_types: list[str], id_field: str, session_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Shared loader for gas/powder events — they differ only by the event-type
+        filter and the name of one provenance field (``gas_cylinder_id`` / ``powder_batch``)."""
+        query = select(OperatorEvent).where(OperatorEvent.event_type.in_(event_types))
         if session_ids:
             query = query.where(OperatorEvent.session_id.in_(session_ids))
         query = query.order_by(OperatorEvent.timestamp.desc())
-        rows = self.db.scalars(query).all()
         return [
             {
                 "event_id": r.event_id,
                 "event_type": r.event_type,
                 "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-                "gas_cylinder_id": r.gas_cylinder_id,
+                id_field: getattr(r, id_field),
                 "value": r.value,
                 "unit": r.unit,
                 "note": r.note,
                 "session_id": r.session_id,
             }
-            for r in rows
+            for r in self.db.scalars(query).all()
         ]
 
+    def _get_gas_events(self, session_ids: list[str]) -> list[dict[str, Any]]:
+        return self._get_consumable_events(self._GAS_EVENT_TYPES, "gas_cylinder_id", session_ids)
+
     def _get_powder_events(self, session_ids: list[str]) -> list[dict[str, Any]]:
-        query = select(OperatorEvent).where(
-            OperatorEvent.event_type.in_(
-                [
-                    "powder_consumption_recorded",
-                    "powder_batch_changed",
-                    "powder_reused",
-                    "powder_sieved",
-                    "powder_dried",
-                ]
-            )
-        )
-        if session_ids:
-            query = query.where(OperatorEvent.session_id.in_(session_ids))
-        query = query.order_by(OperatorEvent.timestamp.desc())
-        rows = self.db.scalars(query).all()
-        return [
-            {
-                "event_id": r.event_id,
-                "event_type": r.event_type,
-                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-                "powder_batch": r.powder_batch,
-                "value": r.value,
-                "unit": r.unit,
-                "note": r.note,
-                "session_id": r.session_id,
-            }
-            for r in rows
-        ]
+        return self._get_consumable_events(self._POWDER_EVENT_TYPES, "powder_batch", session_ids)
 
     def _get_quality_outcomes(self, session_ids: list[str]) -> list[dict[str, Any]]:
         query = select(QualityOutcome)
