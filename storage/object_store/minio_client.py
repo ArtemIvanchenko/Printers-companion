@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 from minio import Minio
@@ -24,6 +25,29 @@ class ObjectStore:
         self.ensure_bucket(bucket)
         self.client.fput_object(bucket, object_name, str(path))
         return f"s3://{bucket}/{object_name}"
+
+    def put_bytes(
+        self, bucket: str, object_name: str, data: bytes,
+        content_type: str = "application/json",
+    ) -> str:
+        """Upload an in-memory blob; returns its s3://bucket/object URI."""
+        self.ensure_bucket(bucket)
+        self.client.put_object(
+            bucket, object_name, io.BytesIO(data), length=len(data), content_type=content_type,
+        )
+        return f"s3://{bucket}/{object_name}"
+
+    def get_bytes(self, bucket: str, object_name: str) -> bytes | None:
+        """Download an object's bytes, or None if missing/unavailable."""
+        try:
+            response = self.client.get_object(bucket, object_name)
+            try:
+                return response.read()
+            finally:
+                response.close()
+                response.release_conn()
+        except Exception:
+            return None
 
     def is_available(self) -> bool:
         try:

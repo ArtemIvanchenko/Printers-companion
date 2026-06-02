@@ -1,3 +1,5 @@
+import json
+import logging
 import math
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -26,6 +28,8 @@ from domain.services.import_jobs import ImportJobRecord
 from domain.services.ingestion import IngestedFile
 from operator_journal.notifications import NotificationMessage
 
+logger = logging.getLogger(__name__)
+
 
 def _sanitize_for_json(obj: Any) -> Any:
     """Recursively replace NaN/Inf floats with None so the payload is valid JSON.
@@ -45,6 +49,53 @@ def _sanitize_for_json(obj: Any) -> Any:
 def _model_to_dict(row: Any, fields: list[str]) -> dict[str, Any]:
     """Generic model -> dict converter."""
     return jsonable_encoder({field: getattr(row, field, None) for field in fields})
+
+
+def _report_payload(report: dict[str, Any]) -> dict[str, Any]:
+    """Slim DB copy of a report: full timeline replaced by a bounded preview."""
+    from reporting.json_report.generator import _timeline_preview
+    payload = dict(report)
+    timeline = payload.get("timeline")
+    if isinstance(timeline, list):
+        payload["timeline"] = _timeline_preview(timeline)
+    return payload
+
+
+def _offload_report(report_id: str, report: dict[str, Any]) -> str | None:
+    """Upload the full report JSON to object storage; return its s3 URI or None.
+
+    Best-effort: if MinIO is unavailable the import still succeeds — the DB keeps
+    the bounded payload (graceful, lossy fallback).
+    """
+    try:
+        from core.config.settings import get_settings
+        from storage.object_store.minio_client import ObjectStore
+        store = ObjectStore()
+        if not store.is_available():
+            return None
+        bucket = get_settings().minio_bucket_reports
+        data = json.dumps(jsonable_encoder(report), ensure_ascii=False).encode("utf-8")
+        return store.put_bytes(bucket, f"{report_id}.json", data)
+    except Exception as exc:
+        logger.warning("Report %s offload to object store failed: %s", report_id, exc)
+        return None
+
+
+def _load_offloaded_report(storage_uri: str) -> dict[str, Any] | None:
+    """Fetch a full report from object storage by its s3://bucket/object URI."""
+    if not storage_uri.startswith("s3://"):
+        return None
+    bucket, _, object_name = storage_uri[len("s3://"):].partition("/")
+    try:
+        from storage.object_store.minio_client import ObjectStore
+        store = ObjectStore()
+        if not store.is_available():
+            return None
+        data = store.get_bytes(bucket, object_name)
+        return json.loads(data.decode("utf-8")) if data else None
+    except Exception as exc:
+        logger.warning("Loading offloaded report %s failed: %s", storage_uri, exc)
+        return None
 
 
 class RuntimeRepository:
@@ -203,10 +254,15 @@ class RuntimeRepository:
 
     def save_report(self, report: dict[str, Any], report_type: str = "session") -> None:
         report_id = report["report_id"]
+        # Offload the full report (incl. complete timeline) to object storage so a
+        # huge timeline can't blow the PostgreSQL 1 GB per-value limit. Postgres
+        # keeps only a slim copy (bounded timeline preview) + the storage pointer.
+        storage_uri = _offload_report(report_id, report)
         values = {
             "session_id": report.get("session_id"),
             "report_type": report_type,
-            "payload": jsonable_encoder(report),
+            "storage_uri": storage_uri,
+            "payload": jsonable_encoder(_report_payload(report)),
             "version_metadata": jsonable_encoder(report.get("version_metadata", {})),
         }
         self._upsert(ReportArtifact, report_id, "report_id", values)
@@ -218,7 +274,13 @@ class RuntimeRepository:
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
         row = self.db.get(ReportArtifact, report_id)
-        return row.payload if row else None
+        if not row:
+            return None
+        if row.storage_uri:
+            full = _load_offloaded_report(row.storage_uri)
+            if full is not None:
+                return full
+        return row.payload
 
     def list_reports_for_session(self, session_id: str) -> list[dict[str, Any]]:
         rows = self.db.scalars(

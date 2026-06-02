@@ -2,34 +2,29 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from core.utils.timekeys import ts_sort_key
-
-# PostgreSQL jsonb hard limit is 1 GB.  A stateFlow.log can produce millions
-# of events; serialising them all blows the limit.  We keep a capped,
-# representative sample: head + important events + sampled tail.
+# The full timeline is offloaded to object storage (no size limit); Postgres and
+# the dashboard keep only a bounded preview to stay well under the 1 GB jsonb cap.
 _MAX_TIMELINE_EVENTS = 2_000
 
 
-def _truncate_timeline(events: list) -> list[dict]:
-    """Return at most _MAX_TIMELINE_EVENTS events, preserving structure.
+def _timeline_preview(timeline: list[dict], cap: int = _MAX_TIMELINE_EVENTS) -> list[dict]:
+    """Bounded view of an already-serialised timeline (list of event dicts).
 
-    Strategy:
-    - Always keep the first 200 events (startup sequence).
-    - Always keep events tagged as errors or alarms (regardless of position).
-    - Fill the remaining budget with an evenly-spaced sample of the rest.
-    - Append a sentinel at the end when truncated so consumers know.
+    Keeps the first 200 events + all priority events (error/alarm/…) + an
+    evenly-spaced sample of the rest, then a sentinel. The complete timeline is
+    stored in object storage; this is only for quick display / the DB payload.
     """
-    if len(events) <= _MAX_TIMELINE_EVENTS:
-        return [e.model_dump(mode="json") for e in events]
+    if len(timeline) <= cap:
+        return timeline
 
     PRIORITY_TYPES = {"error", "alarm", "finish", "abort", "restart_attempt", "pause", "resume"}
-    head = events[:200]
-    rest = events[200:]
+    head = timeline[:200]
+    rest = timeline[200:]
 
-    priority = [e for e in rest if getattr(e, "event_type", "") in PRIORITY_TYPES]
-    others   = [e for e in rest if getattr(e, "event_type", "") not in PRIORITY_TYPES]
+    priority = [e for e in rest if e.get("event_type") in PRIORITY_TYPES]
+    others   = [e for e in rest if e.get("event_type") not in PRIORITY_TYPES]
 
-    budget = _MAX_TIMELINE_EVENTS - len(head) - len(priority)
+    budget = cap - len(head) - len(priority)
     if budget > 0 and others:
         step = max(1, len(others) // budget)
         sampled = others[::step][:budget]
@@ -37,15 +32,14 @@ def _truncate_timeline(events: list) -> list[dict]:
         sampled = []
 
     combined = head + priority + sampled
-    combined.sort(key=lambda e: ts_sort_key(getattr(e, "ts", None)))
+    combined.sort(key=lambda e: e.get("ts") or "")
 
-    result = [e.model_dump(mode="json") for e in combined]
+    result = list(combined)
     result.append({
         "event_type": "_truncated",
         "note": (
-            f"Timeline truncated: {len(events)} total events → "
-            f"{len(result) - 1} kept (head + priority + sample). "
-            f"Full data in sensors/stateFlow logs."
+            f"Timeline preview: {len(timeline)} total events → {len(result) - 1} shown. "
+            f"Full timeline in object storage (reports bucket)."
         ),
     })
     return result
@@ -108,7 +102,7 @@ def generate_session_json_report(
             for file in files
         ],
         "data_quality": data_quality,
-        "timeline": _truncate_timeline(deduped_events),
+        "timeline": [event.model_dump(mode="json") for event in deduped_events],
         "phase_segments": [segment.model_dump(mode="json") for segment in segments],
         "layer_features": layer_features,
         "anomalies": [],
