@@ -137,10 +137,7 @@ def parse_operator_text(message: str, source_channel: SourceChannel = SourceChan
         if batch:
             draft.powder_batch = batch.group(1) or batch.group(2)
             draft.confidence += 0.25
-        material = MATERIAL_RE.search(text)
-        if material:
-            draft.material = material.group(1)
-            draft.confidence += 0.15
+        # material is detected once by the shared fallback at the end of this function
         reuse = re.search(r"(?:цикл|reuse cycle)\s*(\d+)|(\d+)\s*цикл", lower)
         if reuse and draft.event_type == "powder_reused":
             draft.value = next(group for group in reuse.groups() if group)

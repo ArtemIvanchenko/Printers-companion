@@ -113,6 +113,32 @@ class QueryPlan:
     question_summary: str = ""
 
 
+def _parse_plan_json(content: str) -> dict[str, Any]:
+    """Strip an optional ```json fence and parse the model's JSON reply."""
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("```", 2)[1]
+        if content.startswith("json"):
+            content = content[4:].strip()
+    return json.loads(content)
+
+
+def _plan_from_raw(raw: dict[str, Any], question: str) -> QueryPlan:
+    """Build a QueryPlan from the raw LLM dict (shared by sync + async paths)."""
+    return QueryPlan(
+        entity=raw.get("entity", "sessions"),
+        action=raw.get("action", "list"),
+        field=raw.get("field"),
+        filters=raw.get("filters", []),
+        group_by=raw.get("group_by"),
+        order_by=raw.get("order_by"),
+        order_dir=raw.get("order_dir", "desc"),
+        limit=raw.get("limit"),
+        select_fields=raw.get("select_fields", []),
+        question_summary=raw.get("question_summary", question),
+    )
+
+
 def _build_query_plan(question: str) -> dict[str, Any] | None:
     """Use LLM to translate question into a query plan."""
     settings = get_settings()
@@ -143,13 +169,7 @@ def _build_query_plan(question: str) -> dict[str, Any] | None:
         if not result or not result.success or not result.content:
             return None
 
-        content = result.content.strip()
-        if content.startswith("```"):
-            content = content.split("```", 2)[1]
-            if content.startswith("json"):
-                content = content[4:].strip()
-
-        return json.loads(content)
+        return _parse_plan_json(result.content)
     except Exception as exc:
         logger.exception("Query planning failed: %s", exc)
         return None
@@ -160,19 +180,7 @@ def plan_query(question: str) -> QueryPlan | None:
     raw = _build_query_plan(question)
     if not raw:
         return None
-
-    return QueryPlan(
-        entity=raw.get("entity", "sessions"),
-        action=raw.get("action", "list"),
-        field=raw.get("field"),
-        filters=raw.get("filters", []),
-        group_by=raw.get("group_by"),
-        order_by=raw.get("order_by"),
-        order_dir=raw.get("order_dir", "desc"),
-        limit=raw.get("limit"),
-        select_fields=raw.get("select_fields", []),
-        question_summary=raw.get("question_summary", question),
-    )
+    return _plan_from_raw(raw, question)
 
 
 async def plan_query_async(question: str) -> QueryPlan | None:
@@ -193,25 +201,8 @@ async def plan_query_async(question: str) -> QueryPlan | None:
         if not result or not result.success or not result.content:
             return None
 
-        content = result.content.strip()
-        if content.startswith("```"):
-            content = content.split("```", 2)[1]
-            if content.startswith("json"):
-                content = content[4:].strip()
-
-        raw = json.loads(content)
-        return QueryPlan(
-            entity=raw.get("entity", "sessions"),
-            action=raw.get("action", "list"),
-            field=raw.get("field"),
-            filters=raw.get("filters", []),
-            group_by=raw.get("group_by"),
-            order_by=raw.get("order_by"),
-            order_dir=raw.get("order_dir", "desc"),
-            limit=raw.get("limit"),
-            select_fields=raw.get("select_fields", []),
-            question_summary=raw.get("question_summary", question),
-        )
+        raw = _parse_plan_json(result.content)
+        return _plan_from_raw(raw, question)
     except Exception as exc:
         logger.exception("Async query planning failed: %s", exc)
         return None

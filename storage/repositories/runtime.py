@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -26,8 +27,23 @@ from domain.services.ingestion import IngestedFile
 from operator_journal.notifications import NotificationMessage
 
 
+def _sanitize_for_json(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None so the payload is valid JSON.
+
+    PostgreSQL's json/jsonb type rejects NaN and Infinity (not part of the JSON
+    spec); corrupted sensor readings can produce these values.
+    """
+    if isinstance(obj, float):
+        return None if not math.isfinite(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
 def _model_to_dict(row: Any, fields: list[str]) -> dict[str, Any]:
-    """Generic model to dict converter."""
+    """Generic model -> dict converter."""
     return jsonable_encoder({field: getattr(row, field, None) for field in fields})
 
 
@@ -85,66 +101,11 @@ class RuntimeRepository:
 
     def get_import_job(self, import_job_id: str) -> ImportJobRecord | None:
         row = self.db.get(ImportJob, import_job_id)
-        if not row:
-            return None
-        return ImportJobRecord.model_validate(
-            {
-                "import_job_id": row.import_job_id,
-                "source_path": row.source_path,
-                "source_name": row.source_name,
-                "source_kind": row.source_kind,
-                "status": row.status,
-                "detected_at": row.detected_at,
-                "updated_at": row.updated_at,
-                "confirmation_deadline": row.confirmation_deadline,
-                "confirmed_by": row.confirmed_by,
-                "confirmed_at": row.confirmed_at,
-                "postponed_until": row.postponed_until,
-                "ignored_by": row.ignored_by,
-                "ignored_at": row.ignored_at,
-                "last_stability_check_at": row.last_stability_check_at,
-                "file_snapshot": row.file_snapshot or {},
-                "checksum_manifest": row.checksum_manifest or {},
-                "session_ids": row.session_ids or [],
-                "report_ids": row.report_ids or [],
-                "missing_context_questions": row.missing_context_questions or [],
-                "notification_log": row.notification_log or [],
-                "error": row.error,
-                "audit_trail": row.audit_trail or [],
-            }
-        )
+        return _import_job_record_from_row(row) if row else None
 
     def list_import_jobs(self) -> list[ImportJobRecord]:
         rows = self.db.scalars(select(ImportJob).order_by(ImportJob.detected_at.desc())).all()
-        return [
-            ImportJobRecord.model_validate(
-                {
-                    "import_job_id": row.import_job_id,
-                    "source_path": row.source_path,
-                    "source_name": row.source_name,
-                    "source_kind": row.source_kind,
-                    "status": row.status,
-                    "detected_at": row.detected_at,
-                    "updated_at": row.updated_at,
-                    "confirmation_deadline": row.confirmation_deadline,
-                    "confirmed_by": row.confirmed_by,
-                    "confirmed_at": row.confirmed_at,
-                    "postponed_until": row.postponed_until,
-                    "ignored_by": row.ignored_by,
-                    "ignored_at": row.ignored_at,
-                    "last_stability_check_at": row.last_stability_check_at,
-                    "file_snapshot": row.file_snapshot or {},
-                    "checksum_manifest": row.checksum_manifest or {},
-                    "session_ids": row.session_ids or [],
-                    "report_ids": row.report_ids or [],
-                    "missing_context_questions": row.missing_context_questions or [],
-                    "notification_log": row.notification_log or [],
-                    "error": row.error,
-                    "audit_trail": row.audit_trail or [],
-                }
-            )
-            for row in rows
-        ]
+        return [_import_job_record_from_row(row) for row in rows]
 
     def save_notifications(self, notifications: Iterable[NotificationMessage]) -> None:
         for notification in notifications:
@@ -200,7 +161,7 @@ class RuntimeRepository:
 
     def save_session_payload(self, session_id: str, payload: dict[str, Any]) -> None:
         existing = self.db.get(BuildSession, session_id)
-        context = {"runtime_payload": jsonable_encoder(payload)}
+        context = {"runtime_payload": _sanitize_for_json(jsonable_encoder(payload))}
         if existing:
             existing.context = context
             existing.updated_at = datetime.now(timezone.utc)
@@ -513,6 +474,27 @@ def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, str):
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     return None
+
+
+_IMPORT_JOB_SCALARS = (
+    "import_job_id", "source_path", "source_name", "source_kind", "status",
+    "detected_at", "updated_at", "confirmation_deadline", "confirmed_by",
+    "confirmed_at", "postponed_until", "ignored_by", "ignored_at",
+    "last_stability_check_at", "error",
+)
+_IMPORT_JOB_DICTS = ("file_snapshot", "checksum_manifest")
+_IMPORT_JOB_LISTS = (
+    "session_ids", "report_ids", "missing_context_questions",
+    "notification_log", "audit_trail",
+)
+
+
+def _import_job_record_from_row(row: ImportJob) -> ImportJobRecord:
+    """Rebuild an ImportJobRecord from its ORM row (shared by get + list)."""
+    data: dict[str, Any] = {f: getattr(row, f) for f in _IMPORT_JOB_SCALARS}
+    data.update({f: getattr(row, f) or {} for f in _IMPORT_JOB_DICTS})
+    data.update({f: getattr(row, f) or [] for f in _IMPORT_JOB_LISTS})
+    return ImportJobRecord.model_validate(data)
 
 
 def _operator_event_to_dict(row: OperatorEvent) -> dict[str, Any]:
