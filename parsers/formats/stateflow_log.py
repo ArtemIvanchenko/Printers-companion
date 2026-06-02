@@ -38,7 +38,44 @@ class StateFlowLogParser(BaseParser):
     file_family = SourceFileFamily.stateflow_log
     role = FileRole.primary
 
+    # stateFlow classification evidence is *supportive*, not required:
+    # real_print is confirmed by burn_log_layers / main_event_print_start.
+    # A 523 MB stateFlow file (2.6 M identical rows) is not worth reading —
+    # it causes OOM and takes minutes.  Skip parsing above this threshold.
+    MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024   # 10 MB
+    # Secondary guard behind the size gate: a sub-10 MB file of tiny rows could
+    # still hold hundreds of thousands of near-identical lines.  Stop scanning
+    # once this many rows have been read (transitions are capped separately).
+    MAX_ROWS = 500_000
+    MAX_TRANSITIONS = 50_000
+
     def parse(self, path: Path, context: ParserContext) -> ParseResult:
+        file_size = path.stat().st_size
+        if file_size > self.MAX_FILE_SIZE_BYTES:
+            return ParseResult(
+                parser_name=self.name,
+                parser_version=self.version,
+                profile_id=context.profile_id,
+                file_family=self.file_family,
+                role=self.role,
+                transitions=[],
+                diagnostics=[
+                    ParseDiagnosticRecord(
+                        severity="info",
+                        code="stateflow_skipped_large_file",
+                        message=(
+                            f"stateFlow file skipped: {file_size / 1024 / 1024:.1f} MB "
+                            f"> {self.MAX_FILE_SIZE_BYTES // 1024 // 1024} MB limit. "
+                            f"Classification uses burn_log and monitor100 evidence instead."
+                        ),
+                        context={"file_size_bytes": file_size,
+                                 "limit_bytes": self.MAX_FILE_SIZE_BYTES},
+                    )
+                ],
+                data_quality=["skipped_large_file"],
+                metadata={"file_size_bytes": file_size, "skipped": True},
+            )
+
         encoding = estimate_encoding(path)
         date_hint = date_hint_from_filename(path)
         header: list[str] | None = None
@@ -50,11 +87,29 @@ class StateFlowLogParser(BaseParser):
         diagnostics: list[ParseDiagnosticRecord] = []
         row_count = 0
         malformed = 0
+        truncated = False
 
         for line_no, offset, line in iter_text_lines(path, encoding):
             if not line.strip():
                 continue
             values = split_row(line)
+            # Stop early: the rest of the file is almost certainly identical rows.
+            if row_count >= self.MAX_ROWS:
+                diagnostics.append(
+                    ParseDiagnosticRecord(
+                        severity="info",
+                        code="stateflow_rows_capped",
+                        message=(
+                            f"stateFlow parsing stopped at {self.MAX_ROWS:,} rows "
+                            f"({len(transitions)} transitions found). "
+                            f"File is likely much larger but contains identical repeated rows."
+                        ),
+                        source_line=line_no,
+                        context={"max_rows": self.MAX_ROWS, "transitions_found": len(transitions)},
+                    )
+                )
+                truncated = True
+                break
             if header is None:
                 has_timestamp_column = any(
                     "time" in value.lower() or "date" in value.lower() for value in values
@@ -102,23 +157,40 @@ class StateFlowLogParser(BaseParser):
                 duration = None
                 if previous_ts is not None and ts is not None:
                     duration = max((ts - previous_ts).total_seconds(), 0.0)
-                transitions.append(
-                    StateTransitionDraft(
-                        ts_start=previous_ts,
-                        ts_end=ts,
-                        duration_sec=duration,
-                        changed_columns=changed,
-                        previous_state={column: previous_state.get(column) for column in changed},
-                        new_state={column: state.get(column) for column in changed},
-                        subsystem=infer_subsystem(changed),
-                        source_file_id=context.source_file_id,
-                        source_offset_start=previous_offset,
-                        source_offset_end=offset,
-                        raw_excerpt_sample=raw_sample,
-                        parser_version=self.version,
-                        profile_version=context.profile_version,
+                if not truncated:
+                    transitions.append(
+                        StateTransitionDraft(
+                            ts_start=previous_ts,
+                            ts_end=ts,
+                            duration_sec=duration,
+                            changed_columns=changed,
+                            previous_state={column: previous_state.get(column) for column in changed},
+                            new_state={column: state.get(column) for column in changed},
+                            subsystem=infer_subsystem(changed),
+                            source_file_id=context.source_file_id,
+                            source_offset_start=previous_offset,
+                            source_offset_end=offset,
+                            raw_excerpt_sample=raw_sample,
+                            parser_version=self.version,
+                            profile_version=context.profile_version,
+                        )
                     )
-                )
+                    if len(transitions) >= self.MAX_TRANSITIONS:
+                        truncated = True
+                        diagnostics.append(
+                            ParseDiagnosticRecord(
+                                severity="info",
+                                code="stateflow_transitions_capped",
+                                message=(
+                                    f"stateFlow parsing stopped at {self.MAX_TRANSITIONS:,} "
+                                    f"transitions (row {row_count:,}). File may be larger; "
+                                    f"remaining rows skipped to prevent OOM."
+                                ),
+                                source_line=line_no,
+                                context={"max_transitions": self.MAX_TRANSITIONS},
+                            )
+                        )
+                        break  # stop reading — no point scanning remaining 500 MB
                 previous_state = state
                 previous_ts = ts
                 previous_offset = offset
@@ -150,6 +222,7 @@ class StateFlowLogParser(BaseParser):
                 "compression_ratio": compression_ratio,
                 "streaming": True,
                 "malformed_rows": malformed,
+                "truncated": truncated,
             },
         )
 

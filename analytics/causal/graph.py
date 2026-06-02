@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 import networkx as nx
+
+from core.utils.timekeys import ts_sort_key
 
 
 @dataclass
@@ -36,7 +37,7 @@ class CandidateHypothesis:
 
 def build_temporal_dependency_graph(items: list[dict[str, Any]], near_seconds: int = 3600) -> nx.DiGraph:
     graph = nx.DiGraph()
-    sorted_items = sorted(items, key=lambda item: item.get("ts") or datetime.min)
+    sorted_items = sorted(items, key=lambda item: ts_sort_key(item.get("ts")))
     for item in sorted_items:
         graph.add_node(item["id"], **item)
     for source, target in zip(sorted_items, sorted_items[1:], strict=False):

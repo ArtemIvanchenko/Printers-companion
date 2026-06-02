@@ -86,8 +86,14 @@ def _get_column(model, field_name: str) -> Any | None:
     if hasattr(model, field_name):
         return getattr(model, field_name)
     if field_name in SESSION_CONTEXT_FIELDS:
-        json_path = SESSION_CONTEXT_FIELDS[field_name].split(" -> ")
-        return func.json_extract_path_text(BuildSession.context, *json_path[1:])
+        # Portable JSON path access: SQLAlchemy compiles the [] indexing +
+        # as_string() to json_extract on SQLite and #>> on PostgreSQL, instead
+        # of the Postgres-only json_extract_path_text().
+        keys = SESSION_CONTEXT_FIELDS[field_name].split(" -> ")[1:]
+        col = BuildSession.context
+        for key in keys:
+            col = col[key]
+        return col.as_string()
     logger.warning("Unknown field '%s' on model '%s'", field_name, model.__name__)
     return None
 
