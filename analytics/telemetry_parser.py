@@ -22,18 +22,30 @@ logger = logging.getLogger(__name__)
 # ── Signal → semantic group mapping ─────────────────────────────────────────
 
 _GROUP: dict[str, str] = {
-    "SO1": "oxygen",    "SO2": "oxygen",
+    # Oxygen
+    "SO1": "oxygen",      "SO2": "oxygen",
+    # Temperatures
     "ST3": "temperature", "ST4": "temperature", "ST5": "temperature",
-    "SP4": "pressure",  "SP1": "pressure",  "SP3": "pressure",
+    "ST2": "temperature",                         # recuperator zone
+    # Pressure — confirmed in sensors.log header
+    "SP1": "pressure",    "SP2": "pressure",      "SP3": "pressure",
+    "SP4": "pressure",    "SP5": "pressure",      "SP8": "pressure",
+    "SP14": "pressure",   "SP15": "pressure",     "SP16": "pressure",
+    # Pressure — SCADA visible but may appear in other sessions
+    "SP9": "pressure",    "SP11": "pressure",     "SP12": "pressure",
+    # Flow
     "SF1": "flow",
-    "ST1 (flow H)": "humidity", "Flow H": "humidity",
-    "ST1 (flow T)": "temp_gas", "Flow T": "temp_gas",
+    # Gas flow temperature / humidity (two column-name variants in use)
+    "ST1 (flow H)": "humidity",  "Flow H": "humidity",
+    "ST1 (flow T)": "temp_gas",  "Flow T": "temp_gas",
+    # Mechanics / counters
     "LIR": "layer_counter",
+    # Binary / other signals seen on SCADA
+    "BI1": "binary",
 }
 
 # Columns that are always numeric; "Time" stays as string.
-_NUMERIC_COLS = set(_GROUP.keys()) | {"Raquel", "Bunker", "Filled B",
-                                       "SP2", "SP5", "SP8", "SP14", "SP15", "SP16"}
+_NUMERIC_COLS = set(_GROUP.keys()) | {"Raquel", "Bunker", "Filled B"}
 
 
 def parse_sensors_log(path: Path) -> dict[str, np.ndarray]:
