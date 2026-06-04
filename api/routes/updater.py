@@ -5,19 +5,26 @@ The web dashboard calls POST /admin/update; we fire the Watchtower request
 in the background (fire-and-forget) because it holds the connection open for
 the full duration of the pull (potentially 5-10 minutes).
 
-The dashboard JS then polls /health until the API comes back after restart.
+Auto-update: Watchtower also polls Docker Hub every hour automatically
+(WATCHTOWER_POLL_INTERVAL=3600 + WATCHTOWER_HTTP_API_PERIODIC_POLLS=true).
+When it applies an update it calls POST /admin/update/notify (shoutrrr webhook)
+so we can record the timestamp and show it in the dashboard.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import socket
 import subprocess
+from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException
+import redis as _redis
+from fastapi import APIRouter, HTTPException, Request
 
+from core.config.settings import get_settings
 from core.versioning.constants import (
     ANALYSIS_VERSION,
     APP_VERSION,
@@ -33,15 +40,58 @@ _WATCHTOWER_PORT = 8080
 _WATCHTOWER_URL  = f"http://{_WATCHTOWER_HOST}:{_WATCHTOWER_PORT}"
 _WATCHTOWER_TOKEN = os.environ.get("WATCHTOWER_TOKEN", "pla-watchtower-token")
 
-# The event loop keeps only weak references to bare tasks, so a fire-and-forget
-# task can be garbage-collected (and cancelled) mid-pull.  Hold a strong ref
-# until each task finishes.  See https://docs.python.org/3/library/asyncio-task.html
+# Time when this API process started (≈ time of last deploy/restart).
+_START_TIME = datetime.now(timezone.utc)
+
+# Redis key for last update event; TTL = 90 days.
+_REDIS_KEY = "pla:update:last_event"
+_REDIS_TTL = 60 * 60 * 24 * 90
+
+# Strong references keep fire-and-forget tasks alive until done.
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
+# ── Redis helpers (sync, best-effort) ────────────────────────────────────────
+
+def _redis_client() -> _redis.Redis | None:
+    """Return a short-timeout Redis client, or None if unreachable."""
+    try:
+        settings = get_settings()
+        return _redis.from_url(
+            settings.redis_url,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+            decode_responses=True,
+        )
+    except Exception:
+        return None
+
+
+def _store_update_event(event: dict) -> None:
+    try:
+        r = _redis_client()
+        if r:
+            r.set(_REDIS_KEY, json.dumps(event), ex=_REDIS_TTL)
+    except Exception as exc:
+        logger.warning("Could not store update event in Redis: %s", exc)
+
+
+def _load_update_event() -> dict:
+    try:
+        r = _redis_client()
+        if r:
+            raw = r.get(_REDIS_KEY)
+            if raw:
+                return json.loads(raw)
+    except Exception as exc:
+        logger.warning("Could not load update event from Redis: %s", exc)
+    return {}
+
+
+# ── Version ───────────────────────────────────────────────────────────────────
+
 def _git_commit() -> str:
-    """Short git commit hash baked into the running process (best-effort)."""
-    # In Docker, injected as GIT_COMMIT build-arg → env var.
+    """Short git commit hash (injected at Docker build, or read from git)."""
     if c := os.environ.get("GIT_COMMIT", "").strip():
         return c[:8]
     try:
@@ -56,12 +106,14 @@ def _git_commit() -> str:
 
 @router.get("/version")
 async def get_version() -> dict:
-    """Return the running application version and component manifests."""
+    """Running application version + component manifests + uptime info."""
     return {
         "version": APP_VERSION,
         "git_commit": _git_commit(),
         "build_date": os.environ.get("BUILD_DATE", "unknown"),
         "docker_image": os.environ.get("DOCKER_IMAGE", "dev"),
+        "started_at": _START_TIME.isoformat(),
+        "auto_update_interval_sec": 3600,
         "components": {
             "analysis": ANALYSIS_VERSION,
             "signal_dictionary": SIGNAL_DICTIONARY_VERSION,
@@ -69,6 +121,38 @@ async def get_version() -> dict:
         },
     }
 
+
+# ── Update history ────────────────────────────────────────────────────────────
+
+@router.get("/update/history")
+async def update_history() -> dict:
+    """Last recorded update event (auto via Watchtower webhook or manual trigger)."""
+    return await asyncio.get_running_loop().run_in_executor(None, _load_update_event)
+
+
+@router.post("/update/notify")
+async def watchtower_notify(request: Request) -> dict:
+    """Watchtower shoutrrr generic webhook — called after each auto-update.
+
+    Watchtower config (docker-compose.yml):
+      WATCHTOWER_NOTIFICATION_URL: "generic+http://api:8000/admin/update/notify"
+      WATCHTOWER_NOTIFICATIONS_LEVEL: "info"
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    event = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "source": "auto",
+        "message": body.get("message", ""),
+    }
+    await asyncio.get_running_loop().run_in_executor(None, _store_update_event, event)
+    logger.info("Auto-update notification received from Watchtower")
+    return {"ok": True}
+
+
+# ── Watchtower TCP check ───────────────────────────────────────────────────────
 
 def _watchtower_reachable() -> bool:
     """TCP-level check — avoids HTTP timeout from a blocking update call."""
@@ -86,13 +170,10 @@ async def update_status() -> dict:
     return {"watchtower": "online" if online else "offline"}
 
 
-async def _fire_watchtower() -> None:
-    """Send the update request to Watchtower in the background.
+# ── Manual trigger ─────────────────────────────────────────────────────────────
 
-    Watchtower holds the connection open for the full pull duration — we set
-    a generous timeout and ignore the result; the containers will restart when
-    new images are ready regardless of whether we read the response.
-    """
+async def _fire_watchtower() -> None:
+    """Send update request to Watchtower in the background (fire-and-forget)."""
     try:
         async with httpx.AsyncClient(timeout=600.0) as client:
             await client.post(
@@ -116,8 +197,10 @@ async def trigger_update() -> dict:
             detail="Watchtower недоступен. Убедитесь что контейнер watchtower запущен.",
         )
 
-    # Fire and forget — don't await, return immediately to the browser.
-    # Keep a strong reference so the GC can't cancel the task mid-pull.
+    # Record manual trigger immediately (before the actual pull starts).
+    event = {"at": datetime.now(timezone.utc).isoformat(), "source": "manual"}
+    await asyncio.get_running_loop().run_in_executor(None, _store_update_event, event)
+
     task = asyncio.create_task(_fire_watchtower())
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
