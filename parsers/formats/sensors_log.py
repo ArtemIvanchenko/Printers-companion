@@ -12,10 +12,15 @@ class SensorsLogParser(BaseParser):
     file_family = SourceFileFamily.sensors_log
     role = FileRole.secondary
 
+    # Columns that are always present in sensors.log but are not signals —
+    # the timestamp column and powder-system counters are expected, not unknown.
+    _META_COLUMNS = frozenset({"Time"})
+
     def parse(self, path: Path, context: ParserContext) -> ParseResult:
+        known = set(context.signal_mappings.keys()) | self._META_COLUMNS
         table, diagnostics, metadata = parse_table_stream(
             path,
-            known_columns=context.signal_mappings.keys(),
+            known_columns=known,
             max_rows=int(context.options.get("sensor_sample_rows", 5000)),
         )
         startup_bad_rows = 0
