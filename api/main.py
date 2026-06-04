@@ -30,6 +30,7 @@ from api.routes import (
 from core.config.settings import get_settings
 from core.logging.config import RequestIDMiddleware, configure_logging
 from core.preflight import run_preflight
+from core.versioning.version import APP_VERSION
 from storage.db.init_db import create_all
 
 
@@ -49,7 +50,7 @@ configure_logging(settings.log_level)
 
 app = FastAPI(
     title="Printer Log Analytics",
-    version="0.1.0",
+    version=APP_VERSION,
     description="Extensible industrial log analytics platform for metal 3D printers.",
     lifespan=lifespan,
 )
@@ -68,7 +69,7 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "llm_provider": settings.llm_provider}
+    return {"status": "ok", "version": APP_VERSION, "llm_provider": settings.llm_provider}
 
 
 app.include_router(sessions.router)

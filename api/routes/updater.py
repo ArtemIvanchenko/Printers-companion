@@ -13,9 +13,17 @@ import asyncio
 import logging
 import os
 import socket
+import subprocess
 
 import httpx
 from fastapi import APIRouter, HTTPException
+
+from core.versioning.constants import (
+    ANALYSIS_VERSION,
+    APP_VERSION,
+    RULE_PACK_VERSION,
+    SIGNAL_DICTIONARY_VERSION,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -29,6 +37,37 @@ _WATCHTOWER_TOKEN = os.environ.get("WATCHTOWER_TOKEN", "pla-watchtower-token")
 # task can be garbage-collected (and cancelled) mid-pull.  Hold a strong ref
 # until each task finishes.  See https://docs.python.org/3/library/asyncio-task.html
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _git_commit() -> str:
+    """Short git commit hash baked into the running process (best-effort)."""
+    # In Docker, injected as GIT_COMMIT build-arg → env var.
+    if c := os.environ.get("GIT_COMMIT", "").strip():
+        return c[:8]
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+@router.get("/version")
+async def get_version() -> dict:
+    """Return the running application version and component manifests."""
+    return {
+        "version": APP_VERSION,
+        "git_commit": _git_commit(),
+        "build_date": os.environ.get("BUILD_DATE", "unknown"),
+        "docker_image": os.environ.get("DOCKER_IMAGE", "dev"),
+        "components": {
+            "analysis": ANALYSIS_VERSION,
+            "signal_dictionary": SIGNAL_DICTIONARY_VERSION,
+            "rule_pack": RULE_PACK_VERSION,
+        },
+    }
 
 
 def _watchtower_reachable() -> bool:

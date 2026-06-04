@@ -25,3 +25,15 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --progress-bar off --retries 20 --timeout 120 --no-deps -e .
 USER app
+
+# Version metadata — injected at build time by release.sh
+ARG APP_VERSION=dev
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+ENV APP_VERSION=$APP_VERSION \
+    GIT_COMMIT=$GIT_COMMIT \
+    BUILD_DATE=$BUILD_DATE
+LABEL org.opencontainers.image.version="$APP_VERSION" \
+      org.opencontainers.image.revision="$GIT_COMMIT" \
+      org.opencontainers.image.created="$BUILD_DATE" \
+      org.opencontainers.image.source="https://github.com/artemivanchenko/printer-log-analytics"
