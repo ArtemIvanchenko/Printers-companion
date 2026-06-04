@@ -300,6 +300,9 @@ services:
       WATCHTOWER_INCLUDE_RESTARTING: "true"
       WATCHTOWER_LABEL_ENABLE: "false"        # watch ALL containers in this compose
       DOCKER_API_VERSION: "1.41"              # fix for Docker Desktop API negotiation
+      # Notify the API after each auto-update so the dashboard can show "last updated X ago"
+      WATCHTOWER_NOTIFICATION_URL: "generic+http://api:8000/admin/update/notify"
+      WATCHTOWER_NOTIFICATIONS_LEVEL: "info"
     ports:
       - "8888:8080"    # expose only on localhost; UI calls localhost:8888 internally
     networks:

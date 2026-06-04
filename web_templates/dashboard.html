@@ -469,6 +469,37 @@
                     Когда обновление завершится, страница перезагрузится автоматически.
                 </p>
 
+                <!-- Version info card -->
+                <div id="version-card" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:16px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                        <span style="color:#a0aec0;font-size:13px;">Текущая версия</span>
+                        <span id="vc-version" style="font-weight:700;color:#10b981;font-size:20px;font-family:monospace;">…</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:4px;">
+                        <div style="color:#6b7280;font-size:12px;">
+                            🕐 Запущена: <span id="vc-started" style="color:#a0aec0;">…</span>
+                        </div>
+                        <div style="color:#6b7280;font-size:12px;">
+                            🔄 Последнее обновление: <span id="vc-last-update" style="color:#a0aec0;">нет данных</span>
+                        </div>
+                        <div style="color:#6b7280;font-size:12px;">
+                            📦 Коммит: <span id="vc-commit" style="color:#a0aec0;font-family:monospace;">…</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Auto-update banner -->
+                <div style="background:#0f3460;border:1px solid #1a5276;border-radius:12px;padding:14px 16px;margin-bottom:16px;display:flex;align-items:center;gap:12px;">
+                    <span style="font-size:22px;">🔄</span>
+                    <div>
+                        <div style="color:#e2e8f0;font-size:14px;font-weight:600;">Авто-обновление активно</div>
+                        <div style="color:#85929e;font-size:12px;margin-top:2px;">
+                            Watchtower проверяет Docker Hub каждый час и устанавливает обновления автоматически
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Watchtower status -->
                 <div id="update-status-box" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:20px;">
                     <div style="display:flex;align-items:center;gap:12px;">
                         <span id="update-wt-dot" style="width:10px;height:10px;border-radius:50%;background:#6b7280;display:inline-block;"></span>
@@ -802,7 +833,7 @@
             if (page === 'powder') loadPowder();
             if (page === 'maintenance') loadMaintenance();
             if (page === 'patterns') loadPatterns();
-            if (page === 'update') checkWatchtower();
+            if (page === 'update') { checkWatchtower(); loadVersionInfo(); }
         }
 
         // =========================================================
@@ -1013,6 +1044,33 @@
         // =========================================================
         // UPDATE — Watchtower on-demand update
         // =========================================================
+        function _fmtAgo(date) {
+            const s = Math.floor((Date.now() - date) / 1000);
+            if (s < 60)    return `${s} сек назад`;
+            if (s < 3600)  return `${Math.floor(s / 60)} мин назад`;
+            if (s < 86400) return `${Math.floor(s / 3600)} ч назад`;
+            return date.toLocaleDateString('ru');
+        }
+
+        async function loadVersionInfo() {
+            try {
+                const [v, h] = await Promise.all([
+                    fetch('/admin/version').then(r => r.json()),
+                    fetch('/admin/update/history').then(r => r.json()),
+                ]);
+                const el = id => document.getElementById(id);
+                el('vc-version').textContent  = v.version    || '—';
+                el('vc-commit').textContent   = v.git_commit || '—';
+                el('vc-started').textContent  = v.started_at
+                    ? new Date(v.started_at).toLocaleString('ru') : '—';
+                if (h && h.at) {
+                    const ago = _fmtAgo(new Date(h.at));
+                    const src = h.source === 'auto' ? 'авто' : 'вручную';
+                    el('vc-last-update').textContent = `${ago} (${src})`;
+                }
+            } catch(e) { /* не блокирует работу */ }
+        }
+
         async function checkWatchtower() {
             try {
                 const r = await fetch('/admin/update/status');
