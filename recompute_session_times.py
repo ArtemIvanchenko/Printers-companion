@@ -66,6 +66,12 @@ def recompute(dry_run: bool) -> int:
                 print(f"[skip] {row.session_id}: cannot rebuild files ({exc})")
                 continue
 
+            # Stored files are slim (no events). Re-read events from the on-disk
+            # logs so the recompute has real layer/timestamp data; without this it
+            # would recompute 0 layers / anchor-only duration.
+            from storage.repositories.runtime import _rehydrate_parse_results
+            files = _rehydrate_parse_results(files)
+
             old_group = payload.get("group", {}) or {}
             old_feats = old_group.get("features", {}) or {}
             old_dur_min = old_feats.get("duration_min")
