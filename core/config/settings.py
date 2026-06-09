@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     raw_logs_host_path: str = r"C:\PrinterLogs"
     raw_logs_container_path: str = "/mnt/raw_logs"
-    incoming_path: str = "/mnt/raw_logs/incoming"
+    incoming_path: str = "/mnt/raw_logs"
     watch_mode: Literal["filesystem_events", "polling"] = "filesystem_events"
     require_operator_import_confirmation: bool = True
     file_stability_seconds: int = 60

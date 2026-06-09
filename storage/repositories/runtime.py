@@ -213,16 +213,38 @@ class RuntimeRepository:
     def save_session_payload(self, session_id: str, payload: dict[str, Any]) -> None:
         existing = self.db.get(BuildSession, session_id)
         context = {"runtime_payload": _sanitize_for_json(jsonable_encoder(payload))}
+        group = payload.get("group", {}) or {}
+
+        def _parse_ts(value: str | None) -> datetime | None:
+            if not value:
+                return None
+            try:
+                from datetime import timezone as _tz
+                dt = datetime.fromisoformat(value)
+                return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+            except Exception:
+                return None
+
+        start_ts = _parse_ts(group.get("start_ts"))
+        end_ts   = _parse_ts(group.get("end_ts"))
+        confidence = float(group.get("confidence") or 0.0)
+
         if existing:
             existing.context = context
             existing.updated_at = datetime.now(timezone.utc)
+            if start_ts and not existing.start_ts:
+                existing.start_ts = start_ts
+            if end_ts and not existing.end_ts:
+                existing.end_ts = end_ts
         else:
             self.db.add(
                 BuildSession(
                     session_id=session_id,
                     status="runtime_payload",
                     context=context,
-                    grouping_confidence=float(payload.get("group", {}).get("confidence") or 0.0),
+                    grouping_confidence=confidence,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
                 )
             )
         self.commit()

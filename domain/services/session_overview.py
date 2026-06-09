@@ -253,6 +253,10 @@ def build_group_overview(
         "telemetry": telemetry,
         "health": health,
         "signal_stats": signal_stats,
+        # Timestamps preserved in payload so save_session_payload can populate
+        # BuildSession.start_ts / end_ts (needed for dashboard ordering + charts).
+        "start_ts": start_ts.isoformat() if start_ts else None,
+        "end_ts": end_ts.isoformat() if end_ts else None,
     }
 
 

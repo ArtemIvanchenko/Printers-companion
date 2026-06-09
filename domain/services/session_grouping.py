@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -55,7 +56,11 @@ def group_files_into_sessions(
     sorted_files = sorted(files, key=_file_temporal_anchor)
     first_anchor = _file_temporal_anchor(sorted_files[0])
     groups: list[SessionGroup] = []
-    current = SessionGroup(group_id="auto_group_1", files=[sorted_files[0]], start_ts=first_anchor)
+    def _make_id(ts: datetime | None) -> str:
+        date = ts.strftime("%Y%m%d") if ts else "unknown"
+        return f"session_{date}_{uuid4().hex[:8]}"
+
+    current = SessionGroup(group_id=_make_id(first_anchor), files=[sorted_files[0]], start_ts=first_anchor)
     last_anchor = first_anchor
 
     for file in sorted_files[1:]:
@@ -72,7 +77,7 @@ def group_files_into_sessions(
             current.confidence = _confidence(current)
             groups.append(current)
             current = SessionGroup(
-                group_id=f"auto_group_{len(groups) + 1}",
+                group_id=_make_id(anchor),
                 files=[file],
                 start_ts=anchor,
                 reasons=["new_gap_exceeded"],
