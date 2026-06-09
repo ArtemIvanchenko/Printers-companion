@@ -98,6 +98,34 @@ def _load_offloaded_report(storage_uri: str) -> dict[str, Any] | None:
         return None
 
 
+def _rehydrate_parse_results(files: list[IngestedFile]) -> list[IngestedFile]:
+    """Re-parse files that were stored without parse_result (events stripped).
+
+    The session payload keeps slim files for size; consumers that need events
+    (report generation) re-read them from the original on-disk path. Files whose
+    source no longer exists keep their slim form.
+    """
+    from pathlib import Path
+    need = [f for f in files if f.parse_result is None and f.path and Path(f.path).exists()]
+    if not need:
+        return files
+    try:
+        from parsers.base.base import ParserContext
+        from profiles.m350.profile import build_registry, get_profile
+        registry = build_registry()
+        profile = get_profile()
+        for f in need:
+            ctx = ParserContext(
+                profile_id=profile.profile_id,
+                profile_version=profile.version,
+                signal_mappings=profile.signal_mappings,
+            )
+            f.parse_result = registry.parse(Path(f.path), f.classification.family, ctx)
+    except Exception as exc:
+        logger.warning("Rehydrate parse results failed: %s", exc)
+    return files
+
+
 class RuntimeRepository:
     """Persistence boundary for API/runtime workflows.
 
@@ -268,11 +296,21 @@ class RuntimeRepository:
                 payloads.append((row.session_id, payload))
         return payloads
 
-    def get_session_files(self, session_id: str) -> list[IngestedFile] | None:
+    def get_session_files(self, session_id: str, rehydrate: bool = False) -> list[IngestedFile] | None:
+        """Reconstruct the session's IngestedFile list from its stored payload.
+
+        Stored files are slim (parse_result/events stripped to keep the payload
+        tiny). When ``rehydrate=True`` (e.g. report generation needs the events),
+        re-parse each file from its on-disk path; files whose source is gone are
+        returned as-is (slim).
+        """
         payload = self.get_session_payload(session_id)
         if not payload:
             return None
-        return [IngestedFile.model_validate(item) for item in payload.get("files", [])]
+        files = [IngestedFile.model_validate(item) for item in payload.get("files", [])]
+        if rehydrate:
+            files = _rehydrate_parse_results(files)
+        return files
 
     def save_report(self, report: dict[str, Any], report_type: str = "session") -> None:
         report_id = report["report_id"]
