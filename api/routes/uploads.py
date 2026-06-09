@@ -129,6 +129,7 @@ async def new_print(payload: dict) -> dict:
     if not operator:
         raise HTTPException(422, "Поле 'operator' обязательно")
 
+    model_list = models if isinstance(models, list) else [models]
     record = {
         "event_id": f"np_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
         "event_type": "new_print_registered",
@@ -137,8 +138,10 @@ async def new_print(payload: dict) -> dict:
         "source_channel": "web",
         "value": material,
         "unit": "material",
-        "free_text": note,
-        "meta": {"models": models if isinstance(models, list) else [models]},
+        # save_operator_event persists 'note' and 'audit_trail'; the old keys
+        # 'free_text'/'meta' were silently dropped (no such columns/handling).
+        "note": note,
+        "audit_trail": [{"kind": "models", "models": model_list}],
     }
 
     try:
@@ -277,11 +280,12 @@ def _historical_rate() -> dict:
 
 @router.post("/stl-estimate")
 async def stl_estimate(file: UploadFile) -> dict:
-    """Upload an STL file → get volume (cm³) + estimated print time.
+    """Upload an STL file → get its volume (cm³) and a rough time reference.
 
-    Time estimate = volume × coefficient_min_per_cm3.
-    The coefficient defaults to the historical average from past sessions
-    or 45 min/cm³ if no history exists yet.
+    NOTE: we do not yet store the printed volume of past sessions, so a true
+    volume→time rate (min/cm³) cannot be computed. Until that data exists, the
+    time reference is simply the historical *average session duration* — it is
+    NOT a function of this STL's volume. The response says so explicitly.
     """
     if not (file.filename or "").lower().endswith(".stl"):
         raise HTTPException(422, "Ожидается файл .stl")
@@ -293,12 +297,9 @@ async def stl_estimate(file: UploadFile) -> dict:
     volume_cm3 = _stl_volume_cm3(data)
     hist = _historical_rate()
 
-    # Use historical rate or fallback 45 min/cm³
-    coef = hist["avg_duration_min"] or 45.0
-    est_min = volume_cm3 * coef / max(volume_cm3, 1)  # per-session avg, not per cm³
-
-    # Better: if we can't correlate volume→time yet, just show history avg duration
-    est_hours = round(coef / 60, 1)  # avg session duration in hours
+    # Average past session duration (hours). Fallback 45 min when no history.
+    avg_duration_min = hist["avg_duration_min"] or 45.0
+    est_hours = round(avg_duration_min / 60, 1)
 
     warnings = _stl_warnings(file.filename or "", volume_cm3)
 
