@@ -85,7 +85,9 @@ def _trigger_rescan(path: str) -> None:
                     )
                     repo.save_session_payload(
                         group.group_id,
-                        {"files": [f.model_dump(mode="json") for f in group.files], "group": overview},
+                        # Strip parse_result (events): tiny payload; events re-read
+                        # from disk on demand (avoids ~96 MB/session in the DB).
+                        {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
                     )
                 repo.commit()
             logger.info("upload rescan: complete, %d groups", len(groups))

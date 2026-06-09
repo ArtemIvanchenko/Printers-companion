@@ -97,7 +97,9 @@ async def _startup_import(raw_logs_path: str) -> None:
                 )
                 repo.save_session_payload(
                     session_id,
-                    {"files": [f.model_dump(mode="json") for f in group.files], "group": overview},
+                    # Strip parse_result (events): keeps the payload tiny; events
+                    # are re-read from disk on demand. Avoids ~96 MB/session.
+                    {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
                 )
                 imported += 1
             # save_session_payload already commits each row; no extra commit needed

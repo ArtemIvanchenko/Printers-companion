@@ -61,7 +61,9 @@ def import_folder(folder: Path) -> int:
             )
             repo.save_session_payload(
                 group.group_id,
-                {"files": [f.model_dump(mode="json") for f in group.files], "group": overview},
+                # Strip parse_result: storing every event (monitor100 ≈ 231k →
+                # ~96 MB/session) bloats the DB and slows every dashboard load.
+                {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
             )
             feats = overview["features"]
             print(

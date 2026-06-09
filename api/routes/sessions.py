@@ -59,7 +59,9 @@ def ingest_session(payload: dict, repo: RuntimeRepository = Depends(get_runtime_
         )
         repo.save_session_payload(
             session_id,
-            {"files": [f.model_dump(mode="json") for f in group.files], "group": overview},
+            # Strip parse_result (events): tiny payload; events re-read from disk
+            # on demand (avoids ~96 MB/session of monitor events in the DB).
+            {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
         )
         response_groups.append({"session_id": session_id, **overview})
     repo.commit()
@@ -187,7 +189,8 @@ def _generate_report(session_id: str, include_markdown: bool, repo: RuntimeRepos
     if cached is not None:
         return cached
 
-    files = repo.get_session_files(session_id)
+    # Report needs the events → rehydrate parse_result from disk (stored slim).
+    files = repo.get_session_files(session_id, rehydrate=True)
     if files is None:
         raise HTTPException(status_code=404, detail="Session not found")
     report = generate_session_json_report(session_id, files)
