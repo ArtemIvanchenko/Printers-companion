@@ -1,4 +1,5 @@
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from background_reanalysis.job_planner import plan_historical_reanalysis
 from background_reanalysis.scheduler import run_bounded_historical_reanalysis
@@ -49,8 +50,18 @@ def main() -> None:
     settings = get_settings()
     schedules = configured_schedules()
     print(f"Scheduler configured: {schedules}")
-    scheduler.add_job(run_daily_review, "cron", hour=20, minute=0, id="daily_review")
-    scheduler.add_job(run_historical_job, "cron", hour=2, minute=0, id="historical_reanalysis")
+    # Honor the configured cron strings instead of hardcoding the hours, so
+    # DAILY_REVIEW_CRON / HISTORICAL_REANALYSIS_CRON in .env actually take effect.
+    scheduler.add_job(
+        run_daily_review,
+        CronTrigger.from_crontab(settings.daily_review_cron),
+        id="daily_review",
+    )
+    scheduler.add_job(
+        run_historical_job,
+        CronTrigger.from_crontab(settings.historical_reanalysis_cron),
+        id="historical_reanalysis",
+    )
     print(f"Cron schedules: daily_review={settings.daily_review_cron}, historical_reanalysis={settings.historical_reanalysis_cron}")
     scheduler.start()
 

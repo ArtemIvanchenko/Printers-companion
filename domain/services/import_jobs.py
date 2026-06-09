@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import tempfile
 import zipfile
@@ -277,9 +278,12 @@ def persist_parse_results_to_db(
         repo = RuntimeRepository(db)
         
         for ingested_file in ingested_files:
-            # Save SourceFile
-            source_file_id = f"file_{uuid4().hex}"
+            # Deterministic id from session + file content hash: re-persisting the
+            # same file (retry / re-detected folder) UPSERTS the same row instead
+            # of inserting a duplicate. (uuid4 here doubled every file/event on
+            # any re-import.)
             file_name = Path(ingested_file.path).name
+            source_file_id = "file_" + _stable_hash(session_id, ingested_file.checksum or file_name)
             try:
                 repo.save_source_file(
                     source_file_id=source_file_id,
@@ -303,12 +307,16 @@ def persist_parse_results_to_db(
             # Save CanonicalEvents from parse_result (in batches)
             if ingested_file.parse_result and ingested_file.parse_result.events:
                 batch: list[dict] = []
-                for event_draft in ingested_file.parse_result.events:
+                for event_index, event_draft in enumerate(ingested_file.parse_result.events):
                     # Source location fields live on the nested `source`
                     # (SourceLocation), not on the event draft itself.
                     source = getattr(event_draft, 'source', None)
+                    # Deterministic event id: stable across re-parses (same file →
+                    # same event order → same index), so re-import upserts instead
+                    # of duplicating. The index disambiguates events that share a
+                    # source line/offset (e.g. time.log emits several per line).
                     batch.append({
-                        "event_id": f"event_{uuid4().hex}",
+                        "event_id": "event_" + _stable_hash(source_file_id, str(event_index)),
                         "session_id": session_id,
                         "source_file_id": source_file_id,
                         "ts": getattr(event_draft, 'ts', None),
@@ -490,7 +498,10 @@ def safe_extract_zip(archive: zipfile.ZipFile, target_dir: Path) -> None:
     root = target_dir.resolve()
     for member in archive.infolist():
         destination = (root / member.filename).resolve()
-        if not str(destination).startswith(str(root)):
+        # Use path-relative containment, not str.startswith: a sibling dir that
+        # shares the prefix (e.g. root='/tmp/imp', dest='/tmp/imp-evil/x') would
+        # wrongly pass a startswith check and escape the extraction root.
+        if destination != root and root not in destination.parents:
             raise ValueError(f"Unsafe ZIP member path: {member.filename}")
     archive.extractall(root)
 
@@ -570,6 +581,11 @@ def _ensure_session_record(session_id: str, grouping_confidence: float) -> None:
             ))
             db.commit()
             logger.info("Created session record %s in database", session_id)
+
+
+def _stable_hash(*parts: str) -> str:
+    """Short deterministic hex id from the given parts (for idempotent PKs)."""
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def _audit(action: str, actor: str, at: datetime, details: dict[str, Any] | None = None) -> dict[str, Any]:

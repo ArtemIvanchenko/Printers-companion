@@ -15,7 +15,9 @@ router = APIRouter(prefix="/agent", tags=["agent"], dependencies=[Depends(requir
 @router.get("/active-session")
 def active_session(repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
     sessions = repo.list_session_payloads()
-    return {"session_id": sessions[-1][0] if sessions else None}
+    # list_session_payloads() is ordered created_at DESC (newest first), so the
+    # active/current session is index 0, not -1 (which is the oldest).
+    return {"session_id": sessions[0][0] if sessions else None}
 
 
 @router.post("/operator-event-draft")
