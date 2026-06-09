@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1.7
+# Telegram bot does not need heavy ML deps — uses its own slim base.
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -24,7 +25,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --progress-bar off --retries 20 --timeout 120 -e .
 USER app
 
-# Version metadata — injected at build time by release.sh
 ARG APP_VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_DATE=unknown
