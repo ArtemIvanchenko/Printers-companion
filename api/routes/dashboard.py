@@ -215,10 +215,10 @@ async def dashboard():
     db = SessionLocal()
     try:
         # Load a limited amount of data for dashboard display (e.g., last 500 sessions)
-        sessions = get_sessions_paginated(db, skip=0, limit=500)
-        gas_events = get_gas_events_paginated(db, skip=0, limit=5000)
-        powder_events = get_powder_events_paginated(db, skip=0, limit=5000)
-        quality = get_quality_paginated(db, skip=0, limit=5000)
+        sessions = get_sessions_paginated(db, skip=0, limit=10_000)
+        gas_events = get_gas_events_paginated(db, skip=0, limit=10_000)
+        powder_events = get_powder_events_paginated(db, skip=0, limit=10_000)
+        quality = get_quality_paginated(db, skip=0, limit=10_000)
         tel_label, telemetry, health = get_latest_print_telemetry(db)
     finally:
         db.close()

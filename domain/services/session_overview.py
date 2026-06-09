@@ -64,7 +64,8 @@ def _downsample(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     if len(rows) <= limit:
         return rows
     step = len(rows) / limit
-    return [rows[int(i * step)] for i in range(limit)]
+    # Clamp to valid index range to avoid off-by-one on the last element
+    return [rows[min(int(i * step), len(rows) - 1)] for i in range(limit)]
 
 
 def _best_telemetry_table(files: list[IngestedFile]):
@@ -78,7 +79,10 @@ def _best_telemetry_table(files: list[IngestedFile]):
         for table in file.parse_result.tables:
             if not table.rows:
                 continue
-            columns = set(table.rows[0].keys())
+            # Collect columns across ALL rows — first row may be missing some
+            columns: set[str] = set()
+            for row in table.rows[:10]:   # sample up to 10 rows to find all keys
+                columns.update(row.keys())
             score = len(wanted & columns)
             if score > best_score:
                 best, best_score = table, score
@@ -86,24 +90,32 @@ def _best_telemetry_table(files: list[IngestedFile]):
 
 
 def _series(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list]:
-    """Extract the first present column from `columns` as a numeric series.
+    """Extract numeric series for each column present in the table.
 
-    Non-finite values (NaN, Inf) are replaced with None so the series
-    can be safely serialised to JSON and stored in PostgreSQL jsonb.
+    Checks column presence across ALL rows (not just the first row),
+    so data is not silently dropped when the first row is missing a key.
+    Non-finite values (NaN, Inf) are replaced with None for JSON safety.
     """
     import math
+    if not rows:
+        return {}
+    # Build a set of all column names seen across the table
+    all_keys: set[str] = set()
+    for row in rows[:20]:   # sample head to find all keys cheaply
+        all_keys.update(row.keys())
     out: dict[str, list] = {}
     for col in columns:
-        if col in rows[0]:
-            values = [r.get(col) for r in rows]
-            if any(isinstance(v, (int, float)) for v in values):
-                cleaned = []
-                for v in values:
-                    if isinstance(v, (int, float)) and math.isfinite(v):
-                        cleaned.append(v)
-                    else:
-                        cleaned.append(None)
-                out[col] = cleaned
+        if col not in all_keys:
+            continue
+        values = [r.get(col) for r in rows]
+        if any(isinstance(v, (int, float)) for v in values):
+            cleaned = []
+            for v in values:
+                if isinstance(v, (int, float)) and math.isfinite(v):
+                    cleaned.append(v)
+                else:
+                    cleaned.append(None)
+            out[col] = cleaned
     return out
 
 
@@ -215,12 +227,25 @@ def build_group_overview(
 
     total_events = len(events)
     total_lines = sum(_count_lines(f.parse_result) for f in files if f.parse_result)
-    burn_events = sum(
-        1 for e in events if "burn" in (e.event_type or "").lower() or e.phase == "burn"
-    )
-    layers = max((e.layer for e in events if e.layer is not None), default=0)
 
-    duration_sec = raw_features.get("duration_sec") or 0.0
+    # Count burn events without double-counting (event_type takes priority over phase).
+    burn_events = sum(
+        1 for e in events
+        if "burn" in (e.event_type or "").lower()
+        or (e.phase or "").lower().strip() == "burn"
+        and "burn" not in (e.event_type or "").lower()
+    )
+
+    # Layer count: number of unique printed layers in this session.
+    layer_nums = {e.layer for e in events if e.layer is not None}
+    layers = len(layer_nums) if layer_nums else 0
+
+    # Duration: prefer computed from event timestamps; fall back to group anchors.
+    duration_sec = raw_features.get("duration_sec")
+    if not duration_sec and isinstance(start_ts, datetime) and isinstance(end_ts, datetime) and end_ts > start_ts:
+        duration_sec = (end_ts - start_ts).total_seconds()
+    duration_sec = duration_sec or 0.0
+
     features = {
         "first_time": start_ts.strftime("%H:%M") if start_ts else "-",
         "last_time": end_ts.strftime("%H:%M") if end_ts else "-",
