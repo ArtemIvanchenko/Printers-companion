@@ -43,6 +43,14 @@ def _file_temporal_anchor(file: IngestedFile) -> datetime:
     file_name = file.classification.file_name or Path(file.relative_path).name
     hint = date_hint_from_filename(Path(file_name))
     if hint:
+        # Use mtime time-of-day component when available — it disambiguates
+        # multiple sessions on the same calendar day (e.g. two prints in one day).
+        # mtime is unreliable for the date (USB copies change it) but the time
+        # component within a known date is usually trustworthy enough for grouping.
+        if file.mtime:
+            mt = _normalize_dt(file.mtime)
+            return datetime(hint.year, hint.month, hint.day,
+                            mt.hour, mt.minute, mt.second, tzinfo=timezone.utc)
         return datetime(hint.year, hint.month, hint.day, tzinfo=timezone.utc)
     return _normalize_dt(file.mtime) if file.mtime else datetime.now(timezone.utc)
 
