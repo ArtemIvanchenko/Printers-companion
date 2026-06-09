@@ -217,6 +217,30 @@ def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
     return result[:300]
 
 
+def compute_print_span(
+    files: list[IngestedFile],
+) -> tuple[datetime | None, datetime | None]:
+    """Start/end of the actual print, derived from event timestamps.
+
+    Excludes the monitor100 daemon log: it runs continuously (not just during
+    the print), so its early-morning timestamps would inflate the span, and it
+    does not apply the midnight-rollover (day_shift) correction the main event
+    log does — making its absolute times unreliable for measuring duration.
+
+    Returns (None, None) when no usable timestamps are present.
+    """
+    print_ts: list[datetime] = []
+    for f in files:
+        pr = f.parse_result
+        if not pr or pr.file_family == SourceFileFamily.monitor100_log:
+            continue
+        print_ts.extend(e.ts for e in pr.events if e.ts is not None)
+        print_ts.extend(t.ts_start for t in pr.transitions if t.ts_start is not None)
+    if not print_ts:
+        return None, None
+    return min(print_ts), max(print_ts)
+
+
 def build_group_overview(
     group_id: str,
     files: list[IngestedFile],
@@ -237,22 +261,10 @@ def build_group_overview(
     total_events = len(events)
     total_lines = sum(_count_lines(f.parse_result) for f in files if f.parse_result)
 
-    # Print timespan: derive from event timestamps EXCLUDING the monitor100
-    # daemon log. monitor100 runs continuously (not just during the print), so
-    # its early-morning timestamps would inflate the span; it also does not
-    # apply the midnight-rollover (day_shift) correction the main event log
-    # does, making its absolute times unreliable for measuring duration.
-    print_ts: list[datetime] = []
-    for f in files:
-        pr = f.parse_result
-        if not pr or pr.file_family == SourceFileFamily.monitor100_log:
-            continue
-        print_ts.extend(e.ts for e in pr.events if e.ts is not None)
-        print_ts.extend(t.ts_start for t in pr.transitions if t.ts_start is not None)
-    span_start = min(print_ts) if print_ts else None
-    span_end = max(print_ts) if print_ts else None
-    # Displayed first/last times follow the same (filtered) span so the table's
-    # times and its duration are always consistent. Fall back to group anchors.
+    # Print timespan (monitor100 excluded — see compute_print_span). Displayed
+    # first/last times follow the same span so the table's times and its
+    # duration stay consistent. Fall back to group anchors when unavailable.
+    span_start, span_end = compute_print_span(files)
     disp_start = span_start or start_ts
     disp_end = span_end or end_ts
 
@@ -312,9 +324,11 @@ def build_group_overview(
         "health": health,
         "signal_stats": signal_stats,
         # Timestamps preserved in payload so save_session_payload can populate
-        # BuildSession.start_ts / end_ts (needed for dashboard ordering + charts).
-        "start_ts": start_ts.isoformat() if start_ts else None,
-        "end_ts": end_ts.isoformat() if end_ts else None,
+        # BuildSession.start_ts / end_ts (dashboard ordering + charts). Use the
+        # print span (monitor100 excluded) when available so the persisted times
+        # match the displayed first_time/last_time; fall back to group anchors.
+        "start_ts": disp_start.isoformat() if disp_start else None,
+        "end_ts": disp_end.isoformat() if disp_end else None,
     }
 
 
