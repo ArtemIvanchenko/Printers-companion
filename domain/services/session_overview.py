@@ -124,7 +124,10 @@ def _build_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
     if table is None:
         return {}
     rows = _downsample(table.rows, _MAX_TELEMETRY_POINTS)
-    time_axis = [r.get(_TIME_COLUMN) for r in rows] if _TIME_COLUMN in rows[0] else list(range(len(rows)))
+    # Probe for the Time column across sampled rows, not just rows[0] — the first
+    # row may be missing it even when the rest of the table carries timestamps.
+    has_time = any(_TIME_COLUMN in r for r in rows[:20])
+    time_axis = [r.get(_TIME_COLUMN) for r in rows] if has_time else list(range(len(rows)))
 
     telemetry: dict[str, Any] = {"time": time_axis}
     oxygen = _series(rows, _OXYGEN_COLUMNS)
@@ -181,7 +184,13 @@ def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
         if not file.parse_result:
             continue
         for t in file.parse_result.tables:
-            if t.rows and _LAYER_COLUMN in t.rows[0] and _TIME_COLUMN in t.rows[0]:
+            if not t.rows:
+                continue
+            # Sample several rows: the first may omit columns the table carries.
+            keys: set[str] = set()
+            for row in t.rows[:10]:
+                keys.update(row.keys())
+            if _LAYER_COLUMN in keys and _TIME_COLUMN in keys:
                 table = t
                 break
         if table:
@@ -228,6 +237,25 @@ def build_group_overview(
     total_events = len(events)
     total_lines = sum(_count_lines(f.parse_result) for f in files if f.parse_result)
 
+    # Print timespan: derive from event timestamps EXCLUDING the monitor100
+    # daemon log. monitor100 runs continuously (not just during the print), so
+    # its early-morning timestamps would inflate the span; it also does not
+    # apply the midnight-rollover (day_shift) correction the main event log
+    # does, making its absolute times unreliable for measuring duration.
+    print_ts: list[datetime] = []
+    for f in files:
+        pr = f.parse_result
+        if not pr or pr.file_family == SourceFileFamily.monitor100_log:
+            continue
+        print_ts.extend(e.ts for e in pr.events if e.ts is not None)
+        print_ts.extend(t.ts_start for t in pr.transitions if t.ts_start is not None)
+    span_start = min(print_ts) if print_ts else None
+    span_end = max(print_ts) if print_ts else None
+    # Displayed first/last times follow the same (filtered) span so the table's
+    # times and its duration are always consistent. Fall back to group anchors.
+    disp_start = span_start or start_ts
+    disp_end = span_end or end_ts
+
     # Count burn events without double-counting (event_type takes priority over phase).
     burn_events = sum(
         1 for e in events
@@ -240,15 +268,21 @@ def build_group_overview(
     layer_nums = {e.layer for e in events if e.layer is not None}
     layers = len(layer_nums) if layer_nums else 0
 
-    # Duration: prefer computed from event timestamps; fall back to group anchors.
-    duration_sec = raw_features.get("duration_sec")
-    if not duration_sec and isinstance(start_ts, datetime) and isinstance(end_ts, datetime) and end_ts > start_ts:
+    # Duration: prefer the monitor100-excluded print span; fall back to group
+    # anchors. (raw_features["duration_sec"] spans ALL events incl. monitor100,
+    # so it is NOT used here — it would reintroduce the inflation.)
+    duration_sec: float | None = None
+    if isinstance(span_start, datetime) and isinstance(span_end, datetime) and span_end > span_start:
+        duration_sec = (span_end - span_start).total_seconds()
+    elif isinstance(start_ts, datetime) and isinstance(end_ts, datetime) and end_ts > start_ts:
         duration_sec = (end_ts - start_ts).total_seconds()
     duration_sec = duration_sec or 0.0
 
     features = {
-        "first_time": start_ts.strftime("%H:%M") if start_ts else "-",
-        "last_time": end_ts.strftime("%H:%M") if end_ts else "-",
+        **raw_features,
+        "first_time": disp_start.strftime("%H:%M") if disp_start else "-",
+        "last_time": disp_end.strftime("%H:%M") if disp_end else "-",
+        "duration_sec": duration_sec,
         "duration_min": round(duration_sec / 60, 1),
         "total_lines": total_lines,
         "total_events": total_events,
@@ -257,7 +291,6 @@ def build_group_overview(
         "file_count": len(files),
         "pause_count": raw_features.get("pause_count", 0),
         "material": raw_features.get("material") or "unknown",
-        **raw_features,
     }
 
     telemetry = _build_telemetry(files)
