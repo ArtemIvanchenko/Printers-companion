@@ -119,16 +119,10 @@ info "Tagged v${NEW_VERSION}"
 # ── Docker build ──────────────────────────────────────────────────────────────
 step "Building Docker images (linux/amd64)"
 
-# Ensure builder exists (recreate if broken)
-if docker buildx ls 2>/dev/null | grep -q "pla-builder"; then
-  docker buildx use pla-builder 2>/dev/null || docker buildx rm pla-builder
-fi
-if ! docker buildx ls 2>/dev/null | grep -q "pla-builder"; then
-  docker buildx create --name pla-builder --driver docker-container --use
-  info "Created buildx builder: pla-builder"
-else
-  docker buildx use pla-builder
-fi
+# Ensure builder exists — always remove and recreate to avoid stale state
+docker buildx rm pla-builder 2>/dev/null || true
+docker buildx create --name pla-builder --driver docker-container --use
+info "Builder pla-builder ready"
 
 COMMON_ARGS=(
   --platform linux/amd64
