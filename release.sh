@@ -110,10 +110,14 @@ info "Updated pyproject.toml"
 step "Git commit and tag v$NEW_VERSION"
 
 run git add VERSION pyproject.toml
-run git commit -m "chore: release v${NEW_VERSION}
+if ! git diff --cached --quiet; then
+  run git commit -m "chore: release v${NEW_VERSION}
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
-run git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+else
+  info "Nothing to commit (version unchanged)"
+fi
+run git tag -f -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
 info "Tagged v${NEW_VERSION}"
 
 # ── Docker build ──────────────────────────────────────────────────────────────
