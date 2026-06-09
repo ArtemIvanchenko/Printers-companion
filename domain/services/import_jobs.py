@@ -533,19 +533,27 @@ _EVENT_BATCH_SIZE = 500
 
 
 def _flush_event_batch(repo, batch: list[dict]) -> int:
-    """Save and commit a batch of canonical events; returns how many were flushed."""
+    """Save and commit a batch of canonical events; returns how many were
+    actually persisted (0 if the commit failed — the count must not lie)."""
     if not batch:
         return 0
+    saved = 0
     for evt in batch:
         try:
             repo.save_canonical_event(**evt)
+            saved += 1
         except Exception as exc:
             logger.error("Failed to save event: %s", exc)
     try:
         repo.commit()
     except Exception as exc:
         logger.error("Failed to commit event batch: %s", exc)
-    return len(batch)
+        try:
+            repo.db.rollback()
+        except Exception:
+            pass
+        return 0  # nothing durably persisted in this batch
+    return saved
 
 
 def _ensure_session_record(session_id: str, grouping_confidence: float) -> None:
