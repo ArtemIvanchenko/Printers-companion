@@ -112,6 +112,7 @@
         <a href="#" onclick="showPage('patterns')" id="nav-patterns">🔍 Анализ</a>
         <a href="#" onclick="showPage('chat')" id="nav-chat">💬 Чат</a>
         <a href="#" onclick="showPage('update')" id="nav-update">⬆️ Обновление</a>
+        <a href="#" onclick="showPage('logs')" id="nav-logs">📋 Логи системы</a>
     </nav>
 
     <div id="import-status-bar" style="background:#1a1f2e;padding:8px 40px;border-bottom:1px solid #2d3748;display:none;">
@@ -469,6 +470,19 @@
                     Когда обновление завершится, страница перезагрузится автоматически.
                 </p>
 
+                <!-- Import status card -->
+                <div id="import-status-card" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:16px;margin-bottom:16px;">
+                    <div style="color:#a0aec0;font-size:12px;margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;">Состояние данных</div>
+                    <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                        <div><span style="font-size:22px;font-weight:700;color:#e2e8f0;" id="isc-sessions">—</span><div style="color:#6b7280;font-size:11px;">сессий в базе</div></div>
+                        <div><span style="font-size:22px;font-weight:700;color:#e2e8f0;" id="isc-jobs">—</span><div style="color:#6b7280;font-size:11px;">заданий импорта</div></div>
+                        <div style="flex:1;min-width:120px;">
+                            <div style="color:#6b7280;font-size:11px;">последний импорт</div>
+                            <div id="isc-last" style="color:#a0aec0;font-size:12px;margin-top:2px;">—</div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Version info card -->
                 <div id="version-card" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:16px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
@@ -518,6 +532,32 @@
                 <div id="update-log" style="margin-top:20px;font-family:monospace;font-size:13px;
                      color:#a0aec0;background:#0f1419;border-radius:8px;padding:16px;
                      min-height:60px;display:none;"></div>
+            </div>
+        </div>
+
+        <!-- Logs Page -->
+        <div id="page-logs" style="display:none;">
+            <div class="section">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px;">
+                    <h2 style="margin:0;">📋 Логи системы</h2>
+                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                        <select id="log-level-filter" onchange="loadLogs()"
+                            style="background:#1e2433;color:#e2e8f0;border:1px solid #2d3748;border-radius:6px;padding:6px 10px;font-size:13px;">
+                            <option value="">Все уровни</option>
+                            <option value="ERROR">ERROR</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="INFO">INFO</option>
+                            <option value="DEBUG">DEBUG</option>
+                        </select>
+                        <button onclick="loadLogs()"
+                            style="background:#3b82f6;color:white;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;">
+                            🔄 Обновить
+                        </button>
+                    </div>
+                </div>
+                <div id="log-viewer" style="font-family:monospace;font-size:12px;background:#0f1419;border-radius:8px;padding:16px;max-height:70vh;overflow-y:auto;color:#a0aec0;">
+                    <div style="color:#6b7280;">Загрузка…</div>
+                </div>
             </div>
         </div>
 
@@ -833,7 +873,8 @@
             if (page === 'powder') loadPowder();
             if (page === 'maintenance') loadMaintenance();
             if (page === 'patterns') loadPatterns();
-            if (page === 'update') { checkWatchtower(); loadVersionInfo(); }
+            if (page === 'update') { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
+            if (page === 'logs')   { loadLogs(); }
         }
 
         // =========================================================
@@ -1050,6 +1091,48 @@
             if (s < 3600)  return `${Math.floor(s / 60)} мин назад`;
             if (s < 86400) return `${Math.floor(s / 3600)} ч назад`;
             return date.toLocaleDateString('ru');
+        }
+
+        async function loadImportStatus() {
+            try {
+                const d = await fetch('/admin/import/status').then(r => r.json());
+                const el = id => document.getElementById(id);
+                el('isc-sessions').textContent = d.session_count ?? '—';
+                el('isc-jobs').textContent     = d.import_job_count ?? '—';
+                if (d.last_import_at) {
+                    const ago = _fmtAgo(new Date(d.last_import_at));
+                    const name = d.last_import_name ? ` · ${d.last_import_name}` : '';
+                    const st   = d.last_import_status ? ` (${d.last_import_status})` : '';
+                    el('isc-last').textContent = `${ago}${st}${name}`;
+                }
+            } catch(e) { /* не блокирует */ }
+        }
+
+        const _LOG_COLORS = {ERROR:'#ef4444', WARNING:'#f59e0b', INFO:'#60a5fa', DEBUG:'#6b7280'};
+        async function loadLogs() {
+            const viewer = document.getElementById('log-viewer');
+            const level  = document.getElementById('log-level-filter').value;
+            viewer.innerHTML = '<div style="color:#6b7280;">Загрузка…</div>';
+            try {
+                const url = '/admin/logs?n=300' + (level ? `&level=${level}` : '');
+                const logs = await fetch(url).then(r => r.json());
+                if (!logs.length) {
+                    viewer.innerHTML = '<div style="color:#6b7280;">Нет записей. Проверьте что volume app_logs смонтирован.</div>';
+                    return;
+                }
+                viewer.innerHTML = logs.map(e => {
+                    const col = _LOG_COLORS[e.level] || '#a0aec0';
+                    const ts  = e.ts ? e.ts.replace('T',' ').slice(0,19) : '';
+                    const lvl = (e.level || '').padEnd(7);
+                    const log = (e.logger || '').padEnd(30).slice(0,30);
+                    const msg = (e.msg || '').replace(/</g,'&lt;');
+                    const exc = e.exception ? `<div style="color:#ef4444;margin-left:8px;white-space:pre-wrap;">${e.exception.replace(/</g,'&lt;')}</div>` : '';
+                    return `<div style="margin-bottom:2px;"><span style="color:#4a5568;">${ts}</span> <span style="color:${col};font-weight:600;">${lvl}</span> <span style="color:#6b7280;">${log}</span> ${msg}${exc}</div>`;
+                }).join('');
+                viewer.scrollTop = viewer.scrollHeight;
+            } catch(e) {
+                viewer.innerHTML = '<div style="color:#ef4444;">Ошибка загрузки логов: ' + e + '</div>';
+            }
         }
 
         async function loadVersionInfo() {

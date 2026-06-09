@@ -25,6 +25,7 @@ services:
         source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
         read_only: true
+      - app_logs:/app/logs
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
@@ -322,3 +323,4 @@ volumes:
   redis_data:
   minio_data:
   stt_model_cache:
+  app_logs:        # structured JSON logs from the API; mounted read-write
