@@ -1252,23 +1252,27 @@
                 const d = await r.json();
                 const vol = d.volume_cm3;
                 const est = d.estimate;
+                const warns = (d.warnings || []).map(w =>
+                    `<div style="background:#451a03;border:1px solid #92400e;border-radius:6px;padding:8px 10px;font-size:12px;color:#fcd34d;margin-top:8px;">⚠️ ${w}</div>`
+                ).join('');
                 res.innerHTML = `
                     <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;">
                         <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">${d.filename}</div>
-                        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px;">
+                        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px;">
                             <div>
                                 <div style="font-size:28px;font-weight:700;color:#10b981;">${vol} <span style="font-size:14px;">см³</span></div>
                                 <div style="color:#6b7280;font-size:12px;">объём модели</div>
                             </div>
                             <div>
                                 <div style="font-size:28px;font-weight:700;color:#60a5fa;">${est.avg_session_hours} <span style="font-size:14px;">ч</span></div>
-                                <div style="color:#6b7280;font-size:12px;">средн. длительность</div>
+                                <div style="color:#6b7280;font-size:12px;">средн. длительность по истории</div>
                             </div>
                         </div>
-                        <div style="color:#a0aec0;font-size:12px;">${est.note} · ${est.sessions_used} сессий в истории</div>
+                        <div style="color:#a0aec0;font-size:12px;">${est.note} · ${est.sessions_used} сессий</div>
+                        ${warns}
                     </div>`;
             } catch(e) {
-                res.innerHTML = '<div style="color:#ef4444;">Ошибка: ' + e + '</div>';
+                res.innerHTML = `<div style="color:#ef4444;">Ошибка загрузки: ${e.message || e}<br><small style="color:#6b7280;">Убедитесь что API запущен (docker compose up)</small></div>`;
             }
         }
 
