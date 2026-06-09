@@ -409,8 +409,13 @@ def execute_confirmed_import(
 
         job.status = ImportJobStatus.analyzing
         job.updated_at = now
-        for index, group in enumerate(groups, start=1):
-            session_id = f"{job.import_job_id}_session_{index}"
+        # Lazy import: build_group_overview pulls the analytics stack.
+        from domain.services.session_overview import build_group_overview
+        for group in groups:
+            # Use the deterministic group id so this (watcher/confirmation) path
+            # converges with the startup/upload import paths — same print → same
+            # session id → deduplicated, not a parallel duplicate.
+            session_id = group.group_id
 
             # Create session record in DB first so FK constraints are satisfied
             _ensure_session_record(session_id, float(group.confidence) if group.confidence else 0.0)
@@ -421,13 +426,23 @@ def execute_confirmed_import(
                 "Persisted parse results for session %s: %d files, %d events",
                 session_id, files_saved, events_saved
             )
-            
+
             # Create analysis jobs for this session
             analysis_jobs_created = create_analysis_jobs_for_session(session_id, now=now)
             logger.info("Created %d analysis jobs for session %s", analysis_jobs_created, session_id)
-            
+
+            # Enrich exactly like the startup/upload paths: features, telemetry,
+            # health, classification, data_quality. Storing the bare group stub
+            # (the old behaviour) made the dashboard show these sessions as
+            # INCOMPLETE/empty — this was the root cause of "half the graphs
+            # are empty" when the watcher import path was active.
+            overview = build_group_overview(
+                session_id, group.files,
+                start_ts=group.start_ts, end_ts=group.end_ts,
+                grouping_confidence=float(group.confidence) if group.confidence else 0.0,
+            )
             stripped_files = [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files]
-            sessions[session_id] = {"files": stripped_files, "group": group.model_dump(mode="json", exclude={"files"})}
+            sessions[session_id] = {"files": stripped_files, "group": overview}
             report = generate_session_json_report(session_id, group.files)
             report["markdown"] = generate_markdown_report(report)
             reports[report["report_id"]] = report
