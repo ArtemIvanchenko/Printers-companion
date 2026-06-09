@@ -140,7 +140,7 @@ async def gas_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     try:
         svc = AnalyticsService()
-        data = svc.get_gas_stats(last_n=_parse_n(context.args[0] if context.args else None))
+        data = svc.get_gas_stats(last_n_sessions=_parse_n(context.args[0] if context.args else None))
         svc.close()
         await update.effective_message.reply_text(AnalyticsService._format_gas_answer(data, _parse_n(context.args[0] if context.args else None)))
     except Exception as exc:
@@ -155,7 +155,7 @@ async def powder_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         n = _parse_n(context.args[0] if context.args else None)
         svc = AnalyticsService()
-        data = svc.get_powder_stats(last_n=n)
+        data = svc.get_powder_stats(last_n_sessions=n)
         svc.close()
         await update.effective_message.reply_text(AnalyticsService._format_powder_answer(data, n))
     except Exception as exc:
@@ -185,7 +185,7 @@ async def defects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         n = _parse_n(context.args[0] if context.args else None)
         svc = AnalyticsService()
-        data = svc.get_print_quality_stats(last_n=n)
+        data = svc.get_print_quality_stats(last_n_sessions=n)
         svc.close()
         await update.effective_message.reply_text(AnalyticsService._format_quality_answer(data, n))
     except Exception as exc:

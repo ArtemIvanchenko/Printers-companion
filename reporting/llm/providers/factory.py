@@ -57,7 +57,19 @@ class LLMRouter:
             breaker = self.circuit_breakers[provider_name]
 
             try:
-                result = await breaker.async_call(provider.generate_markdown, evidence_json)
+                # Providers don't raise on failure — they return
+                # LLMResult(success=False). Translate that into an exception so
+                # the circuit breaker actually counts the failure and the loop
+                # fails over to the next provider (otherwise both failover and
+                # the breaker are dead — the first provider's failed result is
+                # returned immediately).
+                async def _call(p=provider) -> LLMResult:
+                    r = await p.generate_markdown(evidence_json)
+                    if not getattr(r, "success", False):
+                        raise RuntimeError(r.error or "provider returned unsuccessful result")
+                    return r
+
+                result = await breaker.async_call(_call)
                 logger.info(f"LLM generation succeeded with {provider_name}")
                 return result
             except CircuitBreakerError:
@@ -86,7 +98,13 @@ class LLMRouter:
             self.current_index = (self.current_index + 1) % len(keys)
             return [keys[self.current_index]] + [k for k in keys if k != keys[self.current_index]]
         else:  # priority
-            return self.settings.llm_providers_order.split(",")
+            # Strip whitespace and keep only registered providers, so a config
+            # like "lmstudio, openai" (space after comma) can't KeyError.
+            return [
+                n.strip()
+                for n in self.settings.llm_providers_order.split(",")
+                if n.strip() in self.providers
+            ]
 
     def get_status(self) -> dict:
         """Get status of all providers and their circuit breakers."""

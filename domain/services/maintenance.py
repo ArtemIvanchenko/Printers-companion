@@ -93,7 +93,10 @@ def _print_hours_since(sessions: list[BuildSession], since: datetime | None) -> 
         group = ctx.get("group", {}) or {}
         # Use payload classification; fall back to ORM column.
         cls = group.get("classification") or s.classification or ""
-        if cls != "REAL_PRINT":
+        # Both real-print classes consume machine wear; a resumed print still ran
+        # the blade/HEPA/glass. Excluding REAL_PRINT_WITH_RESUME undercounts wear
+        # and fires replacement warnings late.
+        if cls not in ("REAL_PRINT", "REAL_PRINT_WITH_RESUME"):
             continue
         if since and s.start_ts and s.start_ts < since:
             continue

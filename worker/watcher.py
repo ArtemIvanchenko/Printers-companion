@@ -123,6 +123,10 @@ def run_filesystem_events(incoming_path: Path) -> None:
             auto_confirm_import(resp)
         except Exception as exc:
             logger.error("Failed to handle import candidate %s: %s", path, exc)
+            # Release the key so the periodic scan can retry — otherwise a
+            # transient API outage permanently drops this candidate (the same
+            # discard-on-failure scan_existing_candidates already does).
+            seen.discard(key)
 
     scan_existing_candidates(incoming_path, seen)
     observer = Observer()

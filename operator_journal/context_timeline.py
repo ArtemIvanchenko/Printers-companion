@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -104,8 +104,13 @@ def calculate_context_features(context: dict[str, Any], session_start: datetime 
         if isinstance(state, dict) and session_start and state.get("updated_at"):
             try:
                 updated = datetime.fromisoformat(state["updated_at"])
-                features[f"{key}_age_hours"] = (session_start - updated).total_seconds() / 3600
-            except ValueError:
+                # Normalize both to UTC-aware so a stored naive 'updated_at' vs an
+                # aware session_start (or vice versa) can't raise TypeError on
+                # subtraction (which 'except ValueError' would NOT catch).
+                start = session_start if session_start.tzinfo else session_start.replace(tzinfo=timezone.utc)
+                upd = updated if updated.tzinfo else updated.replace(tzinfo=timezone.utc)
+                features[f"{key}_age_hours"] = (start - upd).total_seconds() / 3600
+            except (ValueError, TypeError):
                 features[f"{key}_age_hours"] = None
     return features
 
