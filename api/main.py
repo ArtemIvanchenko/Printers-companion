@@ -100,7 +100,7 @@ async def _startup_import(raw_logs_path: str) -> None:
                     {"files": [f.model_dump(mode="json") for f in group.files], "group": overview},
                 )
                 imported += 1
-            repo.commit()
+            # save_session_payload already commits each row; no extra commit needed
 
         logger.info("startup_import: done — %d new session(s) imported, %d already existed",
                     imported, len(groups) - imported)
