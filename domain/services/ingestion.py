@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
@@ -13,6 +14,8 @@ from parsers.base.base import ParserContext
 from parsers.base.registry import ParserRegistry
 from parsers.common.encoding import estimate_encoding, is_probably_binary
 from profiles.base.profile import PrinterProfilePlugin
+
+logger = logging.getLogger(__name__)
 
 
 class IngestedFile(BaseModel):
@@ -82,13 +85,16 @@ class IngestionService:
             result.diagnostics.append({"severity": "error", "code": "root_missing", "path": str(root)})
             return result
         for path in sorted(root.rglob("*")):
-            if not path.is_file():
-                continue
-            skip_reason = self._should_skip(path)
-            if skip_reason:
-                result.skipped.append({"path": str(path), "reason": skip_reason})
-                continue
             try:
+                if not path.is_file():
+                    continue
+                # _should_skip may stat() the file; a file deleted/rotated mid-scan
+                # would raise OSError here — keep it inside the guard so one
+                # vanishing file can't abort the whole scan.
+                skip_reason = self._should_skip(path)
+                if skip_reason:
+                    result.skipped.append({"path": str(path), "reason": skip_reason})
+                    continue
                 result.files.append(self._inspect_file(path, root))
             except OSError as exc:
                 result.skipped.append({"path": str(path), "reason": str(exc)})
@@ -105,7 +111,15 @@ class IngestionService:
                 profile_version=self.profile.version,
                 signal_mappings=self.profile.signal_mappings,
             )
-            item.parse_result = self.registry.parse(path, item.classification.family, context)
+            try:
+                item.parse_result = self.registry.parse(path, item.classification.family, context)
+            except Exception as exc:  # noqa: BLE001 - one bad file must not kill the batch
+                item.parse_result = None
+                result.diagnostics.append({
+                    "severity": "error", "code": "parse_failed",
+                    "path": str(path), "detail": str(exc),
+                })
+                logger.warning("Parsing failed for %s: %s", path, exc)
         return result
 
     def _inspect_file(self, path: Path, root: Path) -> IngestedFile:

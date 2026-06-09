@@ -1,8 +1,14 @@
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from domain.schemas.parsing import CanonicalEventDraft, StateTransitionDraft
+
+
+def _aware(dt: datetime) -> datetime:
+    """Force a datetime to UTC-aware so naive/aware values never mix in min/max
+    (mixing raises TypeError)."""
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def extract_layer_features(events: list[CanonicalEventDraft]) -> list[dict[str, Any]]:
@@ -13,7 +19,7 @@ def extract_layer_features(events: list[CanonicalEventDraft]) -> list[dict[str, 
     features: list[dict[str, Any]] = []
     previous_duration: float | None = None
     for layer in sorted(by_layer):
-        times = sorted(event.ts for event in by_layer[layer] if event.ts)
+        times = sorted(_aware(event.ts) for event in by_layer[layer] if event.ts)
         duration = (times[-1] - times[0]).total_seconds() if len(times) >= 2 else None
         delta = None if previous_duration is None or duration is None else duration - previous_duration
         features.append(
@@ -37,7 +43,10 @@ def extract_session_features(
 ) -> dict[str, Any]:
     event_counts = Counter(event.event_type for event in events)
     subsystem_counts = Counter(transition.subsystem or "unknown" for transition in transitions)
-    timestamps = [event.ts for event in events if event.ts] + [transition.ts_start for transition in transitions if transition.ts_start]
+    timestamps = (
+        [_aware(event.ts) for event in events if event.ts]
+        + [_aware(transition.ts_start) for transition in transitions if transition.ts_start]
+    )
     start = min(timestamps) if timestamps else None
     end = max(timestamps) if timestamps else None
     duration = (end - start).total_seconds() if start and end else None
