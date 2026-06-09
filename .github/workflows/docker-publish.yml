@@ -1,0 +1,94 @@
+name: Build & Push Docker images
+
+# Triggers:
+#   - git push tag v* (e.g. v0.2.5) → full release build
+#   - manual button in GitHub Actions UI
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      push_images:
+        description: 'Push images to Docker Hub'
+        type: boolean
+        default: true
+
+env:
+  REPO: artemivanchenko/printer-log-analytics
+
+jobs:
+  # ── Job 1: shared base image (heavy ML deps) ──────────────────────────────
+  base:
+    name: Build base image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push base
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.base
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' || inputs.push_images }}
+          tags: ${{ env.REPO }}:base
+          # GitHub Actions cache → rebuild base only when deps files change
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,scope=base,mode=max
+
+  # ── Job 2: service images (parallel matrix) ───────────────────────────────
+  services:
+    name: Build ${{ matrix.service }}
+    needs: base
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # api, worker, scheduler use FROM pla-base → fast (code only)
+        # telegram-bot, mcp use python:3.11-slim → independent
+        service: [api, worker, scheduler, telegram-bot, mcp]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.service }}
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' || inputs.push_images }}
+          tags: |
+            ${{ env.REPO }}:${{ matrix.service }}
+            ${{ env.REPO }}:${{ matrix.service }}-v${{ steps.version.outputs.version }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max

@@ -156,22 +156,58 @@ async def new_print(payload: dict) -> dict:
 
 # ── Step 4: STL volume + print-time estimation ─────────────────────────────────
 
-def _stl_volume_cm3(data: bytes) -> float:
-    """Calculate mesh volume from binary or ASCII STL in cubic centimetres.
+def _is_binary_stl(data: bytes) -> bool:
+    """Reliably detect binary STL vs ASCII STL.
 
-    Uses the signed-tetrahedron method (divergence theorem).
-    Assumes units are millimetres (standard for printer STL files).
+    Many binary STL files (e.g. MagicsX output) have "solid" in the 80-byte
+    header, so checking the first 5 bytes alone is not enough.
+    Binary STL has an exact size: 84 + 50 * triangle_count bytes.
     """
-    # Try binary STL (most common from slicers)
+    if len(data) < 84:
+        return True  # too small to be ASCII with any geometry
+    count = struct.unpack_from("<I", data, 80)[0]
+    expected = 84 + 50 * count
+    # Allow ±1 byte tolerance for edge cases
+    if abs(len(data) - expected) <= 1:
+        return True
+    # If first 5 bytes are not "solid", definitely binary
     if not data[:5].startswith(b"solid"):
-        return _binary_stl_volume(data) / 1000.0  # mm³ → cm³
+        return True
+    return False
 
-    # ASCII STL — parse vertices
+
+def _stl_volume_cm3(data: bytes) -> float:
+    """Calculate mesh volume in cm³ using the signed-tetrahedron method.
+
+    Assumes millimetre units (standard for SLM printer STL files).
+    """
+    if _is_binary_stl(data):
+        return _binary_stl_volume(data) / 1000.0  # mm³ → cm³
     try:
-        text = data.decode("utf-8", errors="replace")
-        return _ascii_stl_volume(text) / 1000.0
+        return _ascii_stl_volume(data.decode("utf-8", errors="replace")) / 1000.0
     except Exception:
         return _binary_stl_volume(data) / 1000.0
+
+
+# M350 build chamber: 350 × 350 × 330 mm → max possible part ~40 000 cm³
+_CHAMBER_MAX_CM3 = 40_000
+# Files from MagicsX slicer with supports often have "s_" prefix
+def _stl_warnings(filename: str, volume_cm3: float) -> list[str]:
+    warnings = []
+    name = filename.lower()
+    if name.startswith("s_") or "_support" in name or "_ex.stl" in name:
+        warnings.append(
+            "Файл похож на вывод слайсера с подержками (префикс s_ / суффикс _ex). "
+            "Для оценки используйте оригинальный STL без поддержек."
+        )
+    if volume_cm3 > _CHAMBER_MAX_CM3:
+        warnings.append(
+            f"Объём {volume_cm3:.0f} см³ превышает максимум камеры M350 (~40 000 см³). "
+            "Вероятно, файл содержит подержки или несколько деталей."
+        )
+    if volume_cm3 < 0.01:
+        warnings.append("Очень маленький объём — возможно, пустой или повреждённый файл.")
+    return warnings
 
 
 def _binary_stl_volume(data: bytes) -> float:
@@ -264,10 +300,13 @@ async def stl_estimate(file: UploadFile) -> dict:
     # Better: if we can't correlate volume→time yet, just show history avg duration
     est_hours = round(coef / 60, 1)  # avg session duration in hours
 
+    warnings = _stl_warnings(file.filename or "", volume_cm3)
+
     return {
         "filename": file.filename,
         "volume_cm3": round(volume_cm3, 2),
         "volume_mm3": round(volume_cm3 * 1000, 0),
+        "warnings": warnings,
         "historical": hist,
         "estimate": {
             "note": "На основе средней длительности предыдущих сессий" if hist["sessions_used"] else "Нет исторических данных",
