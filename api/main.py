@@ -28,6 +28,7 @@ from api.routes import (
     quality,
     realtime,
     sessions,
+    uploads,
     web,
 )
 from core.config.settings import get_settings
@@ -171,6 +172,7 @@ app.include_router(maintenance.router)
 app.include_router(powder.router)
 app.include_router(analysis.router)
 app.include_router(updater.router)
+app.include_router(uploads.router)
 
 
 @app.get("/alarm-demo", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)

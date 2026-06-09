@@ -111,6 +111,9 @@
         <a href="#" onclick="showPage('maintenance')" id="nav-maintenance">🔧 ТО</a>
         <a href="#" onclick="showPage('patterns')" id="nav-patterns">🔍 Анализ</a>
         <a href="#" onclick="showPage('chat')" id="nav-chat">💬 Чат</a>
+        <a href="#" onclick="showPage('upload')" id="nav-upload">📂 Загрузка</a>
+        <a href="#" onclick="showPage('newprint')" id="nav-newprint">🖨️ Новая печать</a>
+        <a href="#" onclick="showPage('estimate')" id="nav-estimate">⏱️ Оценка</a>
         <a href="#" onclick="showPage('update')" id="nav-update">⬆️ Обновление</a>
         <a href="#" onclick="showPage('logs')" id="nav-logs">📋 Логи системы</a>
     </nav>
@@ -457,6 +460,89 @@
             <div class="section" id="patterns-narrative-section" style="display:none;">
                 <h2 style="font-size:16px;margin-bottom:12px;">🤖 Интерпретация ИИ</h2>
                 <div id="patterns-narrative" style="color:#e2e8f0;line-height:1.7;white-space:pre-wrap;font-size:14px;"></div>
+            </div>
+        </div>
+
+        <!-- Upload Logs Page -->
+        <div id="page-upload" style="display:none;">
+            <div class="section" style="max-width:600px;margin:0 auto;">
+                <h2 style="margin-bottom:8px;">📂 Загрузка логов</h2>
+                <p style="color:#a0aec0;font-size:13px;margin-bottom:20px;">
+                    Перетащите файлы или нажмите для выбора. Файлы сохраняются в папку логов принтера и автоматически импортируются.
+                </p>
+                <div id="drop-zone"
+                    ondrop="handleDrop(event)" ondragover="event.preventDefault()" ondragleave="dropLeave(event)"
+                    ondragenter="dropEnter(event)"
+                    style="border:2px dashed #4a5568;border-radius:12px;padding:40px;text-align:center;cursor:pointer;transition:all .2s;background:#1a1f2e;">
+                    <div style="font-size:40px;margin-bottom:12px;">📁</div>
+                    <div style="color:#e2e8f0;font-weight:600;margin-bottom:8px;">Перетащите .log или .zip файлы сюда</div>
+                    <div style="color:#6b7280;font-size:13px;margin-bottom:16px;">или</div>
+                    <button onclick="document.getElementById('file-input').click()"
+                        style="background:#3b82f6;color:white;border:none;border-radius:8px;padding:10px 24px;font-size:14px;cursor:pointer;">
+                        Выбрать файлы
+                    </button>
+                    <input id="file-input" type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadFiles(this.files)">
+                </div>
+                <div id="upload-result" style="margin-top:16px;font-size:13px;"></div>
+            </div>
+        </div>
+
+        <!-- New Print Page -->
+        <div id="page-newprint" style="display:none;">
+            <div class="section" style="max-width:560px;margin:0 auto;">
+                <h2 style="margin-bottom:8px;">🖨️ Новая печать</h2>
+                <p style="color:#a0aec0;font-size:13px;margin-bottom:20px;">Заполните перед запуском печати.</p>
+                <div style="display:flex;flex-direction:column;gap:14px;">
+                    <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Оператор *</label>
+                        <input id="np-operator" type="text" placeholder="Иванов И.И."
+                            style="width:100%;box-sizing:border-box;background:#1e2433;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;color:#e2e8f0;font-size:14px;">
+                    </div>
+                    <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Материал</label>
+                        <input id="np-material" type="text" placeholder="AlSi10Mg"
+                            style="width:100%;box-sizing:border-box;background:#1e2433;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;color:#e2e8f0;font-size:14px;">
+                    </div>
+                    <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Модели (через запятую)</label>
+                        <input id="np-models" type="text" placeholder="Кронштейн ×4, Крышка ×2"
+                            style="width:100%;box-sizing:border-box;background:#1e2433;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;color:#e2e8f0;font-size:14px;">
+                    </div>
+                    <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Примечание</label>
+                        <textarea id="np-note" rows="3" placeholder="Доп. информация..."
+                            style="width:100%;box-sizing:border-box;background:#1e2433;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;color:#e2e8f0;font-size:14px;resize:vertical;"></textarea>
+                    </div>
+                    <button onclick="submitNewPrint()"
+                        style="background:#10b981;color:white;border:none;border-radius:10px;padding:14px;font-size:15px;font-weight:600;cursor:pointer;width:100%;">
+                        ✅ Зарегистрировать печать
+                    </button>
+                </div>
+                <div id="np-result" style="margin-top:14px;font-size:13px;text-align:center;"></div>
+            </div>
+        </div>
+
+        <!-- Time Estimate Page -->
+        <div id="page-estimate" style="display:none;">
+            <div class="section" style="max-width:560px;margin:0 auto;">
+                <h2 style="margin-bottom:8px;">⏱️ Оценка времени печати</h2>
+                <p style="color:#a0aec0;font-size:13px;margin-bottom:20px;">
+                    Загрузите STL — система рассчитает объём модели и оценит время на основе истории.
+                </p>
+                <div id="stl-drop"
+                    ondrop="handleStlDrop(event)" ondragover="event.preventDefault()"
+                    ondragenter="this.style.borderColor='#3b82f6'" ondragleave="this.style.borderColor='#4a5568'"
+                    style="border:2px dashed #4a5568;border-radius:12px;padding:40px;text-align:center;cursor:pointer;transition:all .2s;background:#1a1f2e;">
+                    <div style="font-size:40px;margin-bottom:12px;">🧊</div>
+                    <div style="color:#e2e8f0;font-weight:600;margin-bottom:8px;">Перетащите .stl файл сюда</div>
+                    <div style="color:#6b7280;font-size:13px;margin-bottom:16px;">или</div>
+                    <button onclick="document.getElementById('stl-input').click()"
+                        style="background:#3b82f6;color:white;border:none;border-radius:8px;padding:10px 24px;font-size:14px;cursor:pointer;">
+                        Выбрать STL
+                    </button>
+                    <input id="stl-input" type="file" accept=".stl" style="display:none" onchange="uploadStl(this.files[0])">
+                </div>
+                <div id="stl-result" style="margin-top:20px;"></div>
             </div>
         </div>
 
@@ -1091,6 +1177,99 @@
             if (s < 3600)  return `${Math.floor(s / 60)} мин назад`;
             if (s < 86400) return `${Math.floor(s / 3600)} ч назад`;
             return date.toLocaleDateString('ru');
+        }
+
+        // ── Upload logs ──────────────────────────────────────────────────────
+        function dropEnter(e) { document.getElementById('drop-zone').style.borderColor = '#3b82f6'; }
+        function dropLeave(e) { document.getElementById('drop-zone').style.borderColor = '#4a5568'; }
+        function handleDrop(e) {
+            e.preventDefault();
+            document.getElementById('drop-zone').style.borderColor = '#4a5568';
+            uploadFiles(e.dataTransfer.files);
+        }
+        async function uploadFiles(fileList) {
+            const res = document.getElementById('upload-result');
+            if (!fileList || !fileList.length) return;
+            res.innerHTML = '<span style="color:#60a5fa;">Загрузка…</span>';
+            const fd = new FormData();
+            for (const f of fileList) fd.append('files', f);
+            try {
+                const r = await fetch('/upload/logs', { method: 'POST', body: fd });
+                const d = await r.json();
+                const ok  = (d.saved  || []).map(f => `<div style="color:#10b981;">✅ ${f.name} (${(f.size_bytes/1024/1024).toFixed(1)} МБ)</div>`).join('');
+                const bad = (d.skipped|| []).map(f => `<div style="color:#ef4444;">❌ ${f.name} — ${f.reason}</div>`).join('');
+                res.innerHTML = ok + bad + (d.saved.length ? '<div style="color:#a0aec0;margin-top:8px;">Данные импортируются автоматически. Обновите страницу через минуту.</div>' : '');
+            } catch(e) {
+                res.innerHTML = '<span style="color:#ef4444;">Ошибка: ' + e + '</span>';
+            }
+        }
+
+        // ── New print form ───────────────────────────────────────────────────
+        async function submitNewPrint() {
+            const res = document.getElementById('np-result');
+            const op  = document.getElementById('np-operator').value.trim();
+            if (!op) { res.innerHTML = '<span style="color:#ef4444;">Укажите оператора</span>'; return; }
+            res.innerHTML = '<span style="color:#60a5fa;">Сохранение…</span>';
+            const models = document.getElementById('np-models').value.trim();
+            try {
+                const r = await fetch('/upload/new-print', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                        operator: op,
+                        material: document.getElementById('np-material').value.trim(),
+                        models: models ? models.split(',').map(s=>s.trim()) : [],
+                        note: document.getElementById('np-note').value.trim(),
+                    }),
+                });
+                const d = await r.json();
+                if (d.ok) {
+                    res.innerHTML = `<span style="color:#10b981;">✅ Зарегистрировано (${d.event_id})</span>`;
+                    ['np-operator','np-material','np-models','np-note'].forEach(id => document.getElementById(id).value = '');
+                } else {
+                    res.innerHTML = '<span style="color:#ef4444;">Ошибка сервера</span>';
+                }
+            } catch(e) {
+                res.innerHTML = '<span style="color:#ef4444;">Ошибка: ' + e + '</span>';
+            }
+        }
+
+        // ── STL estimate ─────────────────────────────────────────────────────
+        function handleStlDrop(e) {
+            e.preventDefault();
+            document.getElementById('stl-drop').style.borderColor = '#4a5568';
+            const f = e.dataTransfer.files[0];
+            if (f) uploadStl(f);
+        }
+        async function uploadStl(file) {
+            const res = document.getElementById('stl-result');
+            if (!file) return;
+            res.innerHTML = '<div style="color:#60a5fa;">Анализируем модель…</div>';
+            const fd = new FormData();
+            fd.append('file', file);
+            try {
+                const r = await fetch('/upload/stl-estimate', { method: 'POST', body: fd });
+                const d = await r.json();
+                const vol = d.volume_cm3;
+                const est = d.estimate;
+                res.innerHTML = `
+                    <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;">
+                        <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">${d.filename}</div>
+                        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px;">
+                            <div>
+                                <div style="font-size:28px;font-weight:700;color:#10b981;">${vol} <span style="font-size:14px;">см³</span></div>
+                                <div style="color:#6b7280;font-size:12px;">объём модели</div>
+                            </div>
+                            <div>
+                                <div style="font-size:28px;font-weight:700;color:#60a5fa;">${est.avg_session_hours} <span style="font-size:14px;">ч</span></div>
+                                <div style="color:#6b7280;font-size:12px;">средн. длительность</div>
+                            </div>
+                        </div>
+                        <div style="color:#a0aec0;font-size:12px;">${est.note} · ${est.sessions_used} сессий в истории</div>
+                    </div>`;
+            } catch(e) {
+                res.innerHTML = '<div style="color:#ef4444;">Ошибка: ' + e + '</div>';
+            }
         }
 
         async function loadImportStatus() {
