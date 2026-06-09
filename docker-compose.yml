@@ -24,7 +24,6 @@ services:
       - type: bind
         source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
-        read_only: true
       - app_logs:/app/logs
     read_only: true
     tmpfs:
