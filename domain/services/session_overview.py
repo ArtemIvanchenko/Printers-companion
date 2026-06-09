@@ -18,6 +18,7 @@ from typing import Any
 from domain.enums.common import SourceFileFamily
 from domain.services.ingestion import IngestedFile
 from domain.services.session_classification import SessionClassificationResult, classify_session
+from analytics.data_quality import assess_session_quality
 from analytics.features.extraction import extract_session_features
 from analytics.process_health import build_process_health
 
@@ -326,6 +327,11 @@ def build_group_overview(
     # Full-resolution signal stats from the complete sensors.log (all rows, not just 150).
     signal_stats = _compute_full_signal_stats(files)
 
+    # Data-reliability assessment: trust the inputs before analysing them.
+    data_quality = assess_session_quality(files, events, telemetry, signal_stats)
+    features["data_quality_score"] = data_quality["score"]
+    features["data_quality_grade"] = data_quality["grade"]
+
     return {
         "group_id": group_id,
         "classification": classification.classification.value,
@@ -335,6 +341,7 @@ def build_group_overview(
         "telemetry": telemetry,
         "health": health,
         "signal_stats": signal_stats,
+        "data_quality": data_quality,
         # Timestamps preserved in payload so save_session_payload can populate
         # BuildSession.start_ts / end_ts (dashboard ordering + charts). Use the
         # print span (monitor100 excluded) when available so the persisted times
