@@ -88,6 +88,66 @@ def parse_sensors_log(path: Path) -> dict[str, np.ndarray]:
             for sig, buf in buffers.items() if buf}
 
 
+def downsample_full_series(
+    path: Path,
+    columns: list[str],
+    time_column: str = "Time",
+    max_points: int = 150,
+) -> dict[str, list]:
+    """Return up to ``max_points`` rows spaced evenly across the ENTIRE file.
+
+    The chart series must span the whole print, not just the first N rows that
+    the bounded table sample (``parse_table_stream``) keeps — otherwise an
+    82-hour print only shows its first ~80 minutes. Two-pass over the file:
+    pass 1 counts data rows, pass 2 grabs only the evenly-spaced indices.
+
+    Returns ``{time_column: [str|None], col: [float|None], ...}`` for the columns
+    actually present in the header; ``{}`` if the file/columns can't be read.
+    """
+    from parsers.common.encoding import estimate_encoding
+
+    try:
+        enc = estimate_encoding(path)
+        with path.open(encoding=enc, errors="replace", buffering=1 << 20) as fh:
+            header = fh.readline()
+            names = [p.strip() for p in header.split("|")]
+            index_of = {name: i for i, name in enumerate(names)}
+            wanted = {c: index_of[c] for c in [*columns, time_column] if c in index_of}
+            if not wanted:
+                return {}
+            total = sum(1 for _ in fh)
+        if total <= 0:
+            return {}
+
+        n = min(max_points, total)
+        if n <= 1:
+            picks = {0}
+        else:
+            picks = {round(i * (total - 1) / (n - 1)) for i in range(n)}
+
+        out: dict[str, list] = {c: [] for c in wanted}
+        with path.open(encoding=enc, errors="replace", buffering=1 << 20) as fh:
+            fh.readline()  # skip header
+            for row_i, line in enumerate(fh):
+                if row_i not in picks:
+                    continue
+                cells = line.split("|")
+                for col, ci in wanted.items():
+                    raw = cells[ci].strip().replace(",", ".") if ci < len(cells) else ""
+                    if col == time_column:
+                        out[col].append(raw or None)
+                    else:
+                        try:
+                            val = float(raw)
+                            out[col].append(val if np.isfinite(val) else None)
+                        except (ValueError, OverflowError):
+                            out[col].append(None)
+        return out
+    except Exception as exc:
+        logger.warning("downsample_full_series failed for %s: %s", path, exc)
+        return {}
+
+
 def compute_full_signal_stats(
     path: Path,
     alarm_thresholds: dict[str, dict[str, float]] | None = None,
