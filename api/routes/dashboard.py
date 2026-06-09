@@ -43,6 +43,9 @@ def get_sessions_paginated(db: Session, skip: int = 0, limit: int = 100):
             'pause_count': features.get('pause_count', 0),
             'material': features.get('material', 'unknown'),
             'start_ts': s.start_ts.isoformat() if s.start_ts else None,
+            'data_quality_score': (group.get('data_quality') or {}).get('score'),
+            'data_quality_grade': (group.get('data_quality') or {}).get('grade'),
+            'data_quality_issues': len((group.get('data_quality') or {}).get('issues', [])),
         })
     return result
 
@@ -172,6 +175,16 @@ def _quality_table_rows(quality: list) -> str:
         for q in quality[:20]
     )
 
+def _data_quality_badge(score, issues: int) -> str:
+    """Colored data-reliability badge: green ≥85, amber ≥60, red below."""
+    if score is None:
+        return '<span style="color:#4a5568;">—</span>'
+    color = "#10b981" if score >= 85 else "#f59e0b" if score >= 60 else "#ef4444"
+    title = f"{issues} проблем(ы) данных" if issues else "проблем не найдено"
+    return (f'<span title="{title}" style="color:{color};font-weight:700;">{score}</span>'
+            f'<span style="color:#4a5568;font-size:11px;"> {"⚠"+str(issues) if issues else ""}</span>')
+
+
 def _session_table_rows(sessions: list) -> str:
     return "".join(
         f'''<tr>
@@ -180,6 +193,7 @@ def _session_table_rows(sessions: list) -> str:
                             <td><span class="type-badge {'type-real' if s['type']=='REAL_PRINT' else 'type-unknown'}">{s['type']}</span></td>
                             <td>{s['first_time']} - {s['last_time']}</td>
                             <td>{s['duration_min']} мин</td>
+                            <td>{_data_quality_badge(s.get('data_quality_score'), s.get('data_quality_issues', 0))}</td>
                             <td>{s['total_lines']:,}</td>
                             <td>{s['pause_count']}</td>
                         </tr>'''
