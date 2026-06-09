@@ -385,20 +385,6 @@ def _compute_full_signal_stats(files: list[IngestedFile]) -> dict[str, Any]:
 
 
 def _load_alarm_thresholds() -> dict[str, dict[str, float]]:
-    """Read alarm_high / alarm_low from signals.yaml for alarm_count tracking."""
-    try:
-        from profiles.base.profile import load_yaml
-        signals_path = Path(__file__).resolve().parents[2] / "profiles" / "m350" / "signals.yaml"
-        raw = load_yaml(signals_path)
-        result: dict[str, dict[str, float]] = {}
-        for sig_name, sig_data in (raw.get("signals") or {}).items():
-            entry: dict[str, float] = {}
-            if (ah := sig_data.get("alarm_high")) is not None:
-                entry["alarm_high"] = float(ah)
-            if (al := sig_data.get("alarm_low")) is not None:
-                entry["alarm_low"] = float(al)
-            if entry:
-                result[sig_name] = entry
-        return result
-    except Exception:
-        return {}
+    """Read alarm_high / alarm_low from signals.yaml (shared loader)."""
+    from analytics.thresholds import load_alarm_thresholds
+    return load_alarm_thresholds()

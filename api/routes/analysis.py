@@ -137,6 +137,102 @@ def refresh_patterns() -> dict[str, Any]:
     return get_patterns(force=True)
 
 
+def _load_session_groups(db) -> list[dict[str, Any]]:
+    """Full stored ``group`` payload per session (features+health+signal_stats+
+    data_quality), newest first — the input shape defect-risk expects."""
+    rows = db.execute(select(BuildSession).order_by(BuildSession.start_ts.desc())).scalars().all()
+    out = []
+    for row in rows:
+        group = ((row.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
+        if not group:
+            continue
+        out.append({
+            "session_id": row.session_id,
+            "start_ts": row.start_ts.isoformat() if row.start_ts else None,
+            "group": group,
+        })
+    return out
+
+
+def _load_quality_labels(db) -> dict[str, int]:
+    """{session_id: 1 defect / 0 good} from operator-entered QualityOutcome rows."""
+    from analytics.prediction.defect_risk import outcome_to_label
+    from domain.models.quality import QualityOutcome
+    labels: dict[str, int] = {}
+    for row in db.execute(select(QualityOutcome)).scalars().all():
+        if not row.session_id:
+            continue
+        lbl = outcome_to_label(row.result)
+        if lbl is not None:
+            labels[row.session_id] = lbl  # latest wins (no ordering guarantee needed)
+    return labels
+
+
+@router.get("/defect-risk")
+def defect_risk_all() -> dict[str, Any]:
+    """Defect-risk score for every session (learned model if enough labels, else
+    heuristic). Explainable: each result carries top contributing factors."""
+    from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
+    db = SessionLocal()
+    try:
+        sessions = _load_session_groups(db)
+        labels = _load_quality_labels(db)
+    finally:
+        db.close()
+
+    labelled = [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
+    model = train_defect_model(labelled)
+
+    results = []
+    for s in sessions:
+        pred = predict_defect_risk(s["group"], model)
+        results.append({
+            "session_id": s["session_id"], "start_ts": s["start_ts"],
+            "label": labels.get(s["session_id"]), **pred,
+        })
+    return {
+        "model_trained": model is not None,
+        "n_sessions": len(sessions),
+        "n_labeled": len(labelled),
+        "sessions": results,
+    }
+
+
+@router.get("/defect-risk/{session_id}")
+def defect_risk_one(session_id: str) -> dict[str, Any]:
+    """Defect-risk for a single session with explanation."""
+    from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
+    db = SessionLocal()
+    try:
+        sessions = _load_session_groups(db)
+        labels = _load_quality_labels(db)
+    finally:
+        db.close()
+
+    target = next((s for s in sessions if s["session_id"] == session_id), None)
+    if target is None:
+        return {"error": "session not found", "session_id": session_id}
+    labelled = [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
+    model = train_defect_model(labelled)
+    pred = predict_defect_risk(target["group"], model)
+    return {"session_id": session_id, "start_ts": target["start_ts"],
+            "label": labels.get(session_id), "model_trained": model is not None, **pred}
+
+
+@router.get("/maintenance-forecast")
+def maintenance_forecast() -> dict[str, Any]:
+    """Project per-signal drift toward alarm thresholds (predictive maintenance)."""
+    from analytics.prediction.maintenance import forecast_maintenance
+    from analytics.thresholds import load_alarm_thresholds
+    db = SessionLocal()
+    try:
+        sessions = _load_sessions(db)  # already chronological, carries signal_stats
+    finally:
+        db.close()
+    forecasts = forecast_maintenance(sessions, load_alarm_thresholds())
+    return {"n_sessions": len(sessions), "forecasts": forecasts}
+
+
 @router.get("/patterns/narrate")
 async def narrate_patterns() -> dict[str, Any]:
     """Return findings + LLM-generated narrative in Russian (if LLM available)."""
