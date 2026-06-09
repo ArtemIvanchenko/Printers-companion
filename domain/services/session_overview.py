@@ -119,29 +119,76 @@ def _series(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list]:
     return out
 
 
-def _build_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
+def _assemble_groups(time_axis: list, col_series: dict[str, list]) -> dict[str, Any]:
+    """Group a {column: [values]} dict into the chart's semantic groups."""
+    def grp(colnames: list[str]) -> dict[str, list]:
+        return {c: col_series[c] for c in colnames if c in col_series}
+    telemetry: dict[str, Any] = {"time": time_axis}
+    if (oxygen := grp(_OXYGEN_COLUMNS)):
+        telemetry["oxygen"] = oxygen
+    if (temps := grp(_TEMPERATURE_COLUMNS)):
+        telemetry["temperatures"] = temps
+    if (humidity := grp(_HUMIDITY_COLUMNS)):
+        telemetry["humidity"] = humidity
+    if (pressure := grp(_PRESSURE_COLUMNS)):
+        telemetry["pressure"] = pressure
+    return telemetry
+
+
+def _full_range_sensor_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
+    """Chart series sampled evenly across the ENTIRE sensors.log on disk.
+
+    The bounded table sample keeps only the first ~5000 rows, so for a long
+    print the chart would show only its first ~80 minutes. Reading the full
+    file (evenly downsampled) makes the chart span the whole run.
+    """
+    sensors_file = next(
+        (f for f in files
+         if f.classification and f.classification.family == SourceFileFamily.sensors_log),
+        None,
+    )
+    if sensors_file is None:
+        return {}
+    path = Path(sensors_file.path)
+    if not path.exists():
+        return {}
+    try:
+        from analytics.telemetry_parser import downsample_full_series
+        cols = _OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _HUMIDITY_COLUMNS + _PRESSURE_COLUMNS
+        raw = downsample_full_series(path, cols, time_column=_TIME_COLUMN, max_points=_MAX_TELEMETRY_POINTS)
+    except Exception as exc:
+        logger.warning("Full-range telemetry failed for %s: %s", path.name, exc)
+        return {}
+    # Keep only columns that actually carry numeric data.
+    col_series = {
+        c: vals for c, vals in raw.items()
+        if c != _TIME_COLUMN and any(isinstance(v, (int, float)) for v in vals)
+    }
+    if not col_series:
+        return {}
+    n = len(next(iter(col_series.values())))
+    time_axis = raw.get(_TIME_COLUMN) or list(range(n))
+    return _assemble_groups(time_axis, col_series)
+
+
+def _sample_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
+    """Fallback chart series from the bounded in-memory table sample."""
     table = _best_telemetry_table(files)
     if table is None:
         return {}
     rows = _downsample(table.rows, _MAX_TELEMETRY_POINTS)
-    # Probe for the Time column across sampled rows, not just rows[0] — the first
-    # row may be missing it even when the rest of the table carries timestamps.
     has_time = any(_TIME_COLUMN in r for r in rows[:20])
     time_axis = [r.get(_TIME_COLUMN) for r in rows] if has_time else list(range(len(rows)))
+    col_series: dict[str, list] = {}
+    for col_list in (_OXYGEN_COLUMNS, _TEMPERATURE_COLUMNS, _HUMIDITY_COLUMNS, _PRESSURE_COLUMNS):
+        col_series.update(_series(rows, col_list))
+    return _assemble_groups(time_axis, col_series)
 
-    telemetry: dict[str, Any] = {"time": time_axis}
-    oxygen = _series(rows, _OXYGEN_COLUMNS)
-    temps = _series(rows, _TEMPERATURE_COLUMNS)
-    humidity = _series(rows, _HUMIDITY_COLUMNS)
-    pressure = _series(rows, _PRESSURE_COLUMNS)
-    if oxygen:
-        telemetry["oxygen"] = oxygen
-    if temps:
-        telemetry["temperatures"] = temps
-    if humidity:
-        telemetry["humidity"] = humidity
-    if pressure:
-        telemetry["pressure"] = pressure
+
+def _build_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
+    # Prefer the full-range series (whole sensors.log); fall back to the bounded
+    # table sample when the raw file isn't on disk (e.g. re-analysed payloads).
+    telemetry = _full_range_sensor_telemetry(files) or _sample_telemetry(files)
     telemetry["layer_burn_times"] = _layer_burn_times(files)
     return telemetry
 

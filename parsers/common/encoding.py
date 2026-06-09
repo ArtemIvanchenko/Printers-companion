@@ -11,8 +11,16 @@ except Exception:  # pragma: no cover
 FALLBACK_ENCODINGS = ("utf-8-sig", "utf-8", "cp1251", "latin-1")
 
 
+def _read_head(path: Path, sample_size: int) -> bytes:
+    """Read only the first ``sample_size`` bytes — never the whole file.
+    ``path.read_bytes()[:N]`` loads the entire file (80 MB sensors logs!) just
+    to inspect a tiny prefix."""
+    with path.open("rb") as handle:
+        return handle.read(sample_size)
+
+
 def estimate_encoding(path: Path, sample_size: int = 65536) -> str:
-    sample = path.read_bytes()[:sample_size]
+    sample = _read_head(path, sample_size)
     if not sample:
         return "utf-8"
     # BOM must be checked explicitly: decode("utf-8-sig") succeeds for ANY valid UTF-8,
@@ -24,8 +32,13 @@ def estimate_encoding(path: Path, sample_size: int = 65536) -> str:
     try:
         sample.decode("utf-8")
         return "utf-8"
-    except UnicodeDecodeError:
-        pass
+    except UnicodeDecodeError as exc:
+        # A multibyte UTF-8 char can be split by the sample boundary. If the only
+        # error is within the last 3 bytes (max char is 4 bytes), it's a truncated
+        # tail, not a cp1251 file — still UTF-8. Avoids misdecoding a genuine
+        # UTF-8 file as cp1251 (which would silently mojibake the whole file).
+        if exc.start >= len(sample) - 3:
+            return "utf-8"
     # cp1251 is the dominant single-byte encoding for Russian industrial equipment.
     try:
         cp1251_text = sample.decode("cp1251")
@@ -61,7 +74,7 @@ def iter_text_lines(path: Path, encoding: str | None = None) -> Iterator[tuple[i
 
 
 def is_probably_binary(path: Path, sample_size: int = 8192) -> bool:
-    sample = path.read_bytes()[:sample_size]
+    sample = _read_head(path, sample_size)
     if not sample:
         return False
     if b"\x00" in sample:
