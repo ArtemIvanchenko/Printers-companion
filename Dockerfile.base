@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+# Shared base image — heavy Python dependencies that change rarely.
+# Built once; api / worker / scheduler inherit FROM this.
+# Rebuild only when requirements or pinned versions change.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=20
+
+RUN groupadd --system app && useradd --system --gid app --uid 10001 app
+WORKDIR /app
+
+# Copy only dependency manifests — source code is added by child images.
+COPY pyproject.toml README.md requirements.base.txt requirements.heavy.txt /app/
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 -r requirements.base.txt
+
+# Heavy ML/data packages pinned separately for cache efficiency.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 \
+        "polars==0.20.31" "duckdb==0.10.3"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 \
+        "scipy==1.13.1"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 \
+        "scikit-learn==1.4.2" "statsmodels==0.14.2"

@@ -128,6 +128,7 @@ docker buildx rm pla-builder 2>/dev/null || true
 docker buildx create --name pla-builder --driver docker-container --use
 info "Builder pla-builder ready"
 
+BASE_ARGS=(--platform linux/amd64)
 COMMON_ARGS=(
   --platform linux/amd64
   --build-arg "APP_VERSION=${NEW_VERSION}"
@@ -135,6 +136,28 @@ COMMON_ARGS=(
   --build-arg "BUILD_DATE=${BUILD_DATE}"
 )
 
+# Step 1: build shared base image first (heavy ML deps).
+# api / worker / scheduler inherit FROM this — their builds are then ~2 min.
+step "Building base image"
+if $PUSH; then
+  run docker buildx build \
+    "${BASE_ARGS[@]}" \
+    -t "${REPO}:base" \
+    -f Dockerfile.base \
+    --push \
+    .
+  info "Pushed ${REPO}:base"
+else
+  run docker buildx build \
+    "${BASE_ARGS[@]}" \
+    -t "${REPO}:base" \
+    -f Dockerfile.base \
+    --load \
+    .
+  info "Built ${REPO}:base (local only)"
+fi
+
+# Step 2: build each service image (source-code only, deps from base cache).
 for svc in "${SERVICES[@]}"; do
   step "Building $svc"
   TAGS=(
