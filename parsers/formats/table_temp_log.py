@@ -13,7 +13,10 @@ class TableTempLogParser(BaseParser):
     role = FileRole.secondary
 
     def parse(self, path: Path, context: ParserContext) -> ParseResult:
-        table, diagnostics, metadata = parse_table_stream(path, max_rows=5000)
+        # Pass known signal columns (+ Time) so genuine sensor columns are not
+        # all reported as unknown_columns.
+        known = set(context.signal_mappings.keys()) | {"Time"}
+        table, diagnostics, metadata = parse_table_stream(path, known_columns=known, max_rows=5000)
         return ParseResult(
             parser_name=self.name,
             parser_version=self.version,

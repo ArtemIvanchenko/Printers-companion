@@ -214,7 +214,10 @@ class StateFlowLogParser(BaseParser):
             role=self.role,
             transitions=transitions,
             diagnostics=diagnostics,
-            data_quality=["partial_recovery"] if malformed else ["ok"],
+            data_quality=(
+                (["partial_recovery"] if malformed else [])
+                + (["truncated"] if truncated else [])
+            ) or ["ok"],
             metadata={
                 "encoding": encoding,
                 "row_count": row_count,
