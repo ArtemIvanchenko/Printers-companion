@@ -124,6 +124,44 @@ async def get_version() -> dict:
 
 # ── Update history ────────────────────────────────────────────────────────────
 
+@router.get("/logs")
+async def get_logs(n: int = 200, level: str | None = None) -> list[dict]:
+    """Return the last *n* structured log lines from the rotating log file.
+
+    Query params:
+      n     – number of entries (max 1000, default 200)
+      level – filter by level: DEBUG / INFO / WARNING / ERROR
+    """
+    from core.logging.config import read_recent_logs
+    n = min(max(1, n), 1000)
+    return await asyncio.get_running_loop().run_in_executor(
+        None, read_recent_logs, n, level
+    )
+
+
+@router.get("/import/status")
+async def import_status() -> dict:
+    """Quick summary for the dashboard status card: session count + last import."""
+    from storage.db.session import SessionLocal
+    from storage.repositories.runtime import RuntimeRepository
+    try:
+        with SessionLocal() as db:
+            repo = RuntimeRepository(db)
+            sessions = repo.list_session_payloads()
+            jobs = repo.list_import_jobs()
+        last_job = max(jobs, key=lambda j: j.updated_at, default=None)
+        return {
+            "session_count": len(sessions),
+            "import_job_count": len(jobs),
+            "last_import_at": last_job.updated_at.isoformat() if last_job else None,
+            "last_import_status": last_job.status.value if last_job else None,
+            "last_import_name": last_job.source_name if last_job else None,
+        }
+    except Exception as exc:
+        logger.warning("import_status failed: %s", exc)
+        return {"session_count": 0, "import_job_count": 0}
+
+
 @router.get("/update/history")
 async def update_history() -> dict:
     """Last recorded update event (auto via Watchtower webhook or manual trigger)."""
