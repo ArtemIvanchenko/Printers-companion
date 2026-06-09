@@ -6,6 +6,7 @@ Pure Python, no external dependencies.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -77,7 +78,10 @@ def compute_signal_stats(telemetry: dict[str, Any]) -> dict[str, dict[str, Any]]
         if not isinstance(group_data, dict):
             continue
         for signal, raw_values in group_data.items():
-            clean = [float(v) for v in (raw_values or []) if isinstance(v, (int, float))]
+            clean = [
+                float(v) for v in (raw_values or [])
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
             if len(clean) < 5:
                 continue
             s = _stats(clean)

@@ -116,6 +116,10 @@ def compute_full_signal_stats(
     result: dict[str, dict[str, Any]] = {}
 
     for col, vals in arrays.items():
+        # Drop non-finite samples: a sensor disconnect can write "nan"/"inf"
+        # cells, which float() accepts silently — a single one would poison
+        # mean/std/quantile (NaN propagates) for the entire signal.
+        vals = vals[np.isfinite(vals)]
         n = len(vals)
         if n < 10:
             continue

@@ -11,7 +11,6 @@ so it is cheap enough to run inline during API ingest. Storage-agnostic — the
 result is a plain JSON-serializable dict persisted by the runtime repository.
 """
 import logging
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -146,35 +145,48 @@ def _build_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
     return telemetry
 
 
-_TIMELOG_LAYER = re.compile(r"L(\d+)_detailed")
-_TIMELOG_BURN_START = re.compile(r"Burn_Start:(\d+)")
-_TIMELOG_BURN_END = re.compile(r"Burn_End:(\d+)")
-
-
 def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
     """Per-layer burn duration.
 
-    Preferred source: the time.log ``NEW_STATS`` lines, which carry explicit
-    ``Burn_Start``/``Burn_End`` counters per layer (millisecond ticks) — the
-    accurate signal. Falls back to approximating from the burn table's N + Time
-    columns when time.log is unavailable.
+    Preferred source: the time.log ``OLD_STATS`` lines, parsed into
+    ``layer_timing_summary`` events whose payload carries ``burn_ms`` directly
+    (the machine's own per-layer burn duration). Second choice: derive it from
+    the ``NEW_STATS`` ``Burn_Start``/``Burn_End`` absolute-ms counters. Last
+    resort: approximate from a burn table's N + Time columns.
+
+    (Note: payloads are structured dicts — there is no ``raw_text`` field to
+    regex; reading the parsed numbers directly is both correct and cheaper.)
     """
     seen: dict[int, float] = {}
+    # NEW_STATS fallback accumulators (used only if OLD_STATS is absent).
+    burn_start: dict[int, int] = {}
+    burn_end: dict[int, int] = {}
+
     for file in files:
         pr = file.parse_result
         if not pr or pr.file_family != SourceFileFamily.time_log:
             continue
         for event in pr.events:
-            raw = (event.payload or {}).get("raw_text", "")
-            m_layer = _TIMELOG_LAYER.search(raw)
-            m_start = _TIMELOG_BURN_START.search(raw)
-            m_end = _TIMELOG_BURN_END.search(raw)
-            if not (m_layer and m_start and m_end):
+            payload = event.payload or {}
+            layer = payload.get("layer")
+            if not isinstance(layer, int):
                 continue
-            layer = int(m_layer.group(1))
-            duration_ms = int(m_end.group(1)) - int(m_start.group(1))
-            if duration_ms > 0 and layer not in seen:
-                seen[layer] = round(duration_ms / 1000.0, 1)  # ms ticks -> seconds
+            if event.event_type == "layer_timing_summary":
+                burn_ms = payload.get("burn_ms")
+                if isinstance(burn_ms, int) and burn_ms > 0 and layer not in seen:
+                    seen[layer] = round(burn_ms / 1000.0, 1)
+            elif event.event_type == "burn_start" and isinstance(payload.get("abs_ms"), int):
+                burn_start.setdefault(layer, payload["abs_ms"])
+            elif event.event_type == "burn_end" and isinstance(payload.get("abs_ms"), int):
+                burn_end[layer] = payload["abs_ms"]
+
+    # If no OLD_STATS summaries, derive from NEW_STATS start/end abs-ms counters.
+    if not seen:
+        for layer in burn_start.keys() & burn_end.keys():
+            dur_ms = burn_end[layer] - burn_start[layer]
+            if dur_ms > 0:
+                seen[layer] = round(dur_ms / 1000.0, 1)
+
     if seen:
         return [{"layer": layer, "duration_sec": dur} for layer, dur in sorted(seen.items())][:1000]
 
