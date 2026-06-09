@@ -1,6 +1,6 @@
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -55,6 +55,23 @@ def _file_temporal_anchor(file: IngestedFile) -> datetime:
     return _normalize_dt(file.mtime) if file.mtime else datetime.now(timezone.utc)
 
 
+def _deterministic_group_id(start_ts: datetime | None, files: list[IngestedFile]) -> str:
+    """Stable id for a session group: ``session_<date>_<hash>``.
+
+    The hash is derived from the sorted member file names, so re-grouping the
+    SAME set of files always yields the SAME id. This is what makes re-import
+    idempotent — the startup/watcher import skips a group whose id already
+    exists, instead of inserting a duplicate on every restart. (A random uuid
+    here would re-import every print on each scan.)
+    """
+    date = start_ts.strftime("%Y%m%d") if start_ts else "unknown"
+    names = sorted(
+        (f.classification.file_name or Path(f.relative_path).name) for f in files
+    )
+    digest = hashlib.sha256("|".join(names).encode("utf-8")).hexdigest()[:8]
+    return f"session_{date}_{digest}"
+
+
 def group_files_into_sessions(
     files: list[IngestedFile],
     max_gap: timedelta = timedelta(hours=36),
@@ -64,11 +81,10 @@ def group_files_into_sessions(
     sorted_files = sorted(files, key=_file_temporal_anchor)
     first_anchor = _file_temporal_anchor(sorted_files[0])
     groups: list[SessionGroup] = []
-    def _make_id(ts: datetime | None) -> str:
-        date = ts.strftime("%Y%m%d") if ts else "unknown"
-        return f"session_{date}_{uuid4().hex[:8]}"
 
-    current = SessionGroup(group_id=_make_id(first_anchor), files=[sorted_files[0]], start_ts=first_anchor)
+    # Build groups first (with placeholder ids), then assign deterministic ids
+    # once each group's full file membership is known.
+    current = SessionGroup(group_id="", files=[sorted_files[0]], start_ts=first_anchor)
     last_anchor = first_anchor
 
     for file in sorted_files[1:]:
@@ -85,7 +101,7 @@ def group_files_into_sessions(
             current.confidence = _confidence(current)
             groups.append(current)
             current = SessionGroup(
-                group_id=_make_id(anchor),
+                group_id="",
                 files=[file],
                 start_ts=anchor,
                 reasons=["new_gap_exceeded"],
@@ -94,6 +110,15 @@ def group_files_into_sessions(
     current.end_ts = last_anchor
     current.confidence = _confidence(current)
     groups.append(current)
+
+    # Assign stable ids; disambiguate the rare case of two same-day groups with
+    # identical file-name sets by appending an index.
+    seen: dict[str, int] = {}
+    for group in groups:
+        base = _deterministic_group_id(group.start_ts, group.files)
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        group.group_id = base if n == 0 else f"{base}_{n}"
     return groups
 
 

@@ -55,6 +55,17 @@ def test_same_print_files_stay_in_one_session() -> None:
     assert len(groups[0].files) == 2
 
 
+def test_group_id_is_deterministic_for_same_files() -> None:
+    # Re-grouping the same files (any order) must yield the SAME id — this is
+    # what makes re-import idempotent instead of duplicating every print.
+    a = _file("23.03.2026.log", "main_event_log", "primary", mtime=datetime(2026, 3, 23, 13, 0, tzinfo=timezone.utc))
+    b = _file("23.03.2026_sensors.log", "sensors_log", "secondary", mtime=datetime(2026, 3, 23, 13, 1, tzinfo=timezone.utc))
+    id1 = group_files_into_sessions([a, b])[0].group_id
+    id2 = group_files_into_sessions([b, a])[0].group_id
+    assert id1 == id2
+    assert id1.startswith("session_20260323_")
+
+
 def _file(name: str, family: str, role: str, mtime: datetime | None = None) -> IngestedFile:
     return IngestedFile(
         path=name,
