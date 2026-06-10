@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 import yaml
 
 
@@ -18,13 +17,8 @@ def test_compose_security_boundaries() -> None:
         assert "ALL" in services[service_name]["cap_drop"]
 
 
-@pytest.mark.xfail(
-    reason="Read-only root fs for the api container is desired hardening but is "
-    "not yet validated against the Windows Docker Desktop deployment (kaleido/"
-    "plotly and library caches may need writable paths). Enable once verified.",
-    strict=False,
-)
 def test_api_container_has_read_only_root_filesystem() -> None:
+    """Experimental hardening — see PR. Validate on the Windows stack before merge."""
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     assert compose["services"]["api"]["read_only"] is True
 

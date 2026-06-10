@@ -23,12 +23,19 @@ services:
       - storage_net
       - agent_net
     restart: unless-stopped
+    # EXPERIMENTAL: read-only root filesystem. Verify on the Windows Docker stack
+    # that nothing the API writes ends up outside /tmp or /app/logs (e.g. plotly
+    # static-image export, library caches) before relying on this in production.
+    read_only: true
     volumes:
       - type: bind
         source: ${RAW_LOGS_HOST_PATH:-./Logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
     tmpfs:
       - /tmp:size=256m,mode=1777
+      # read_only root: keep the rotating app log writable (ephemeral, lost on
+      # restart) so /admin/logs keeps working.
+      - /app/logs:size=64m,mode=1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
