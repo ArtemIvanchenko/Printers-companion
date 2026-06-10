@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <title>Printer Analytics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #0f1419; color: #fafafa; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
@@ -58,13 +61,6 @@
 
         @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
 
-        /* Live nav pulse */
-        @keyframes live-dot { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
-        #nav-live { position: relative; }
-        #nav-live::before { content:''; display:inline-block; width:7px; height:7px;
-            background:#ef4444; border-radius:50%; margin-right:4px;
-            animation: live-dot 1.4s ease-in-out infinite; }
-
         /* --- Alarm animation --- */
         @keyframes alarm-pulse {
             0%   { box-shadow: 0 0 0 0 rgba(239,68,68,0);  border-color: #ef4444; }
@@ -91,32 +87,151 @@
             z-index: 10;
             animation: alarm-pulse 2.4s ease-in-out infinite;
         }
+
+        /* Sub-navigation (charts tab) */
+        .subnav { background: #141920; padding: 8px 40px; display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid #1a1f2e; }
+        .subnav a { color: #a0aec0; padding: 6px 14px; text-decoration: none; border-radius: 6px; font-size: 13px; cursor: pointer; transition: all 0.2s; }
+        .subnav a:hover { background: #2d3748; color: #e2e8f0; }
+        .subnav a.active { background: #2d3748; color: #e2e8f0; font-weight: 600; }
+
+        /* Gear / dropdown shared */
+        .nav-more { position: relative; }
+        .nav-more > a { margin: 0 !important; }
+        .nav-more-menu {
+            display: none; position: absolute; top: calc(100% + 8px); right: 0;
+            background: #1a1f2e; border: 1px solid #2d3748; border-radius: 10px;
+            padding: 6px; z-index: 200; min-width: 210px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .nav-more-menu a {
+            display: block; color: #e2e8f0; padding: 10px 14px; border-radius: 7px;
+            text-decoration: none; font-size: 14px; white-space: nowrap; cursor: pointer;
+            transition: background 0.15s;
+        }
+        .nav-more-menu a:hover { background: #2d3748; }
+        .nav-more.open .nav-more-menu { display: block; }
+
+        /* Model gallery */
+        .model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 20px; }
+        .model-card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 12px; overflow: hidden; cursor: pointer; transition: all 0.2s; }
+        .model-card:hover { border-color: #4a5568; transform: translateY(-2px); }
+        .model-thumb { height: 160px; background: #0f1419; display: flex; align-items: center; justify-content: center; font-size: 48px; color: #2d3748; }
+        .model-info { padding: 14px; }
+        .model-name { font-weight: 600; color: #e2e8f0; margin-bottom: 6px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .model-meta { color: #6b7280; font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
+
+        /* 3D viewer modal */
+        .viewer-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; align-items: center; justify-content: center; }
+        .viewer-overlay.open { display: flex; }
+        .viewer-modal { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 16px; padding: 24px; width: 90vw; max-width: 900px; max-height: 90vh; display: flex; flex-direction: column; gap: 16px; }
+        .viewer-canvas-wrap { width: 100%; height: 460px; background: #0f1419; border-radius: 10px; overflow: hidden; }
+
+        /* Home page — printer status */
+        .printer-status-card { border-radius: 16px; padding: 24px 28px; margin-bottom: 24px; display: flex; align-items: center; gap: 20px; border: 1px solid #2d3748; }
+        .printer-status-card.idle    { background: linear-gradient(135deg, #1a1f2e, #1e2433); }
+        .printer-status-card.printing { background: linear-gradient(135deg, #0d2b1a, #0f3320); border-color: #10b981; }
+        .printer-status-card.error  { background: linear-gradient(135deg, #2b0f0f, #3b1111); border-color: #ef4444; }
+        .status-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+        .status-dot.idle    { background: #6b7280; }
+        .status-dot.printing { background: #10b981; animation: live-dot 1.4s ease-in-out infinite; }
+        .status-dot.error   { background: #ef4444; }
+        @keyframes live-dot { 0%,100%{opacity:1}50%{opacity:0.2} }
+
+        /* Home quick actions */
+        .quick-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+        .quick-btn { padding: 12px 20px; border-radius: 10px; border: 1px solid #2d3748; background: #1a1f2e; color: #e2e8f0; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
+        .quick-btn:hover { background: #2d3748; border-color: #4a5568; }
+        .quick-btn.primary { background: #3b82f6; border-color: #3b82f6; color: white; }
+        .quick-btn.primary:hover { background: #2563eb; }
+
+        /* Recent sessions cards */
+        .recent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .recent-card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 12px; padding: 18px; cursor: pointer; transition: all 0.2s; }
+        .recent-card:hover { border-color: #4a5568; }
+        .recent-card .rc-date { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+        .recent-card .rc-title { font-weight: 600; color: #e2e8f0; margin-bottom: 10px; font-size: 15px; }
+        .recent-card .rc-metrics { display: flex; gap: 14px; flex-wrap: wrap; }
+        .recent-card .rc-metric { font-size: 12px; color: #a0aec0; }
+        .recent-card .rc-metric span { color: #e2e8f0; font-weight: 600; }
+
+        /* Floating chat */
+        #chat-fab { position: fixed; bottom: 28px; right: 28px; width: 52px; height: 52px; border-radius: 50%; background: #3b82f6; border: none; color: white; font-size: 22px; cursor: pointer; box-shadow: 0 4px 16px rgba(59,130,246,0.5); z-index: 500; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+        #chat-fab:hover { background: #2563eb; transform: scale(1.08); }
+        #chat-panel { position: fixed; bottom: 92px; right: 28px; width: 360px; max-height: 500px; background: #1a1f2e; border: 1px solid #2d3748; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 500; display: none; flex-direction: column; overflow: hidden; }
+        #chat-panel.open { display: flex; }
+        #chat-panel-head { background: #2d3748; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; }
+        #chat-panel-msgs { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+        #chat-panel-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #2d3748; }
+        #chat-panel-input input { flex: 1; background: #2d3748; border: 1px solid #4a5568; border-radius: 8px; padding: 9px 12px; color: #fafafa; font-size: 14px; }
+        #chat-panel-input button { background: #3b82f6; border: none; border-radius: 8px; color: white; padding: 9px 14px; cursor: pointer; font-size: 14px; }
+
+        /* Changelog modal */
+        .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 900; align-items: center; justify-content: center; }
+        .modal-overlay.open { display: flex; }
+        .modal-box { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 16px; padding: 28px; width: 90vw; max-width: 680px; max-height: 80vh; overflow-y: auto; }
+
+        /* Changelog */
+        .changelog-entry { border-left: 3px solid #2d3748; padding: 0 0 24px 20px; position: relative; }
+        .changelog-entry:last-child { padding-bottom: 0; }
+        .changelog-entry::before { content: ''; position: absolute; left: -7px; top: 4px; width: 11px; height: 11px; border-radius: 50%; background: #2d3748; border: 2px solid #1a1f2e; }
+        .changelog-entry.latest::before { background: #10b981; }
+        .changelog-entry .ver { font-weight: 700; font-size: 16px; color: #e2e8f0; }
+        .changelog-entry .date { color: #6b7280; font-size: 12px; margin-left: 8px; }
+        .changelog-entry ul { margin-top: 8px; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+        .changelog-entry li { color: #a0aec0; font-size: 13px; line-height: 1.5; }
+        .changelog-entry .tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; margin-right: 4px; vertical-align: middle; }
+        .tag-fix { background: #451a03; color: #fcd34d; }
+        .tag-feat { background: #0d3b26; color: #34d399; }
+        .tag-deploy { background: #1e1b4b; color: #818cf8; }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🖨️ <span>Printer Analytics</span> Dashboard</h1>
-        <div style="font-size:13px;color:#a0aec0;margin-top:4px;">{!EXPR0!} &nbsp;·&nbsp; {!EXPR1!}</div>
+    <div class="header" style="display:flex;align-items:center;justify-content:space-between;gap:20px;">
+        <div>
+            <h1>🖨️ <span>Printer's Companion</span></h1>
+            <div style="font-size:13px;color:#a0aec0;margin-top:4px;">{!EXPR0!} &nbsp;·&nbsp; {!EXPR1!}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
+            <span id="hdr-version"
+                onclick="openChangelog()"
+                style="font-family:monospace;font-size:13px;background:#1e2433;border:1px solid #2d3748;
+                       padding:4px 12px;border-radius:20px;cursor:pointer;color:#10b981;white-space:nowrap;"
+                title="Журнал изменений">v…</span>
+            <div class="nav-more" id="gear-menu" style="position:relative;">
+                <button onclick="toggleGear(event)"
+                    style="background:#1e2433;border:1px solid #2d3748;color:#a0aec0;
+                           width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:16px;
+                           display:flex;align-items:center;justify-content:center;"
+                    title="Дополнительно">⚙</button>
+                <div class="nav-more-menu" id="gear-dropdown" style="right:0;min-width:200px;">
+                    <a onclick="showGearPage('upload',event)">📂 Загрузка логов</a>
+                    <a onclick="showGearPage('logs',event)">📋 Логи системы</a>
+                    <a onclick="showGearPage('update',event)">⬆️ Обновление</a>
+                </div>
+            </div>
+        </div>
     </div>
-    
-    <nav class="nav">
-        <a href="#" onclick="showPage('overview')" id="nav-overview" class="active">📊 Обзор</a>
-        <a href="#" onclick="showPage('live')" id="nav-live">🔴 Live</a>
-        <a href="#" onclick="showPage('telemetry')" id="nav-telemetry">🌡️ Телеметрия</a>
-        <a href="#" onclick="showPage('timeline')" id="nav-timeline">📈 Таймлайн</a>
-        <a href="#" onclick="showPage('quality')" id="nav-quality">✅ Качество</a>
-        <a href="#" onclick="showPage('sessions')" id="nav-sessions">📋 Сессии</a>
-        <a href="#" onclick="showPage('consumption')" id="nav-consumption">⛽ Расход</a>
-        <a href="#" onclick="showPage('powder')" id="nav-powder">🧪 Порошок</a>
-        <a href="#" onclick="showPage('maintenance')" id="nav-maintenance">🔧 ТО</a>
-        <a href="#" onclick="showPage('patterns')" id="nav-patterns">🔍 Анализ</a>
-        <a href="#" onclick="showPage('chat')" id="nav-chat">💬 Чат</a>
-        <a href="#" onclick="showPage('upload')" id="nav-upload">📂 Загрузка</a>
-        <a href="#" onclick="showPage('newprint')" id="nav-newprint">🖨️ Новая печать</a>
-        <a href="#" onclick="showPage('estimate')" id="nav-estimate">⏱️ Оценка</a>
-        <a href="#" onclick="showPage('update')" id="nav-update">⬆️ Обновление</a>
-        <a href="#" onclick="showPage('logs')" id="nav-logs">📋 Логи системы</a>
+
+    <nav class="nav" id="main-nav">
+        <a href="#" onclick="showMainTab('home',event)" id="nav-home" class="active">🏠 Главная</a>
+        <a href="#" onclick="showMainTab('analytics',event)" id="nav-analytics">📊 Аналитика</a>
+        <a href="#" onclick="showMainTab('models',event)" id="nav-models">🧊 Модели</a>
+        <a href="#" onclick="showMainTab('maintenance',event)" id="nav-maintenance">⚙️ Обслуживание</a>
     </nav>
+
+    <!-- Аналитика sub-nav -->
+    <div class="subnav" id="analytics-subnav" style="display:none;">
+        <a onclick="showAnalyticsPage('telemetry',event)" id="subnav-telemetry">🌡️ Телеметрия</a>
+        <a onclick="showAnalyticsPage('history',event)" id="subnav-history">📋 История</a>
+        <a onclick="showAnalyticsPage('quality',event)" id="subnav-quality">✅ Качество</a>
+        <a onclick="showAnalyticsPage('patterns',event)" id="subnav-patterns">🔍 Тренды</a>
+    </div>
+    <!-- Обслуживание sub-nav -->
+    <div class="subnav" id="maintenance-subnav" style="display:none;">
+        <a onclick="showMaintenancePage('powder',event)" id="subnav-powder">🧪 Порошок</a>
+        <a onclick="showMaintenancePage('maint',event)" id="subnav-maint">🔧 ТО</a>
+        <a onclick="showMaintenancePage('journal',event)" id="subnav-journal">📝 Журнал</a>
+    </div>
 
     <div id="import-status-bar" style="background:#1a1f2e;padding:8px 40px;border-bottom:1px solid #2d3748;display:none;">
         <div style="display:flex;align-items:center;gap:12px;font-size:13px;">
@@ -129,36 +244,81 @@
         </div>
     </div>
     
+    <!-- Changelog modal -->
+    <div class="modal-overlay" id="changelog-modal" onclick="if(event.target===this)closeChangelog()">
+        <div class="modal-box" onclick="event.stopPropagation()">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
+                <h2 style="margin:0;">📋 Журнал изменений</h2>
+                <button onclick="closeChangelog()" style="background:#2d3748;border:none;color:#e2e8f0;padding:8px 14px;border-radius:8px;cursor:pointer;">✕</button>
+            </div>
+            <div id="changelog-content"></div>
+        </div>
+    </div>
+
     <div class="content">
-        <!-- Overview Page -->
-        <div id="page-overview">
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="value" style="color: #60a5fa;">{!EXPR2!}</div>
-                    <div class="label">Всего сессий</div>
+        <!-- HOME PAGE -->
+        <div id="page-home">
+            <!-- Printer status -->
+            <div class="printer-status-card idle" id="printer-status-card">
+                <div class="status-dot idle" id="printer-status-dot"></div>
+                <div style="flex:1;">
+                    <div style="font-size:18px;font-weight:700;color:#e2e8f0;" id="printer-status-text">Простой</div>
+                    <div style="font-size:13px;color:#6b7280;margin-top:3px;" id="printer-status-sub">Нет активной печати</div>
                 </div>
+                <div id="printer-status-meta" style="text-align:right;font-size:13px;color:#6b7280;"></div>
+            </div>
+
+            <!-- Quick actions -->
+            <div class="quick-actions">
+                <button class="quick-btn primary" onclick="openNewPrint()">🖨️ Зарегистрировать печать</button>
+                <button class="quick-btn" onclick="document.getElementById('file-input-home').click()">📂 Загрузить логи
+                    <input id="file-input-home" type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadFiles(this.files)">
+                </button>
+                <button class="quick-btn" onclick="showMainTab('analytics',null);showAnalyticsPage('telemetry',null)">🌡️ Телеметрия</button>
+                <button class="quick-btn" onclick="showMainTab('analytics',null);showAnalyticsPage('patterns',null)">🔍 Тренды</button>
+            </div>
+
+            <!-- Key metrics -->
+            <div class="stats" style="margin-bottom:24px;">
                 <div class="stat-card">
-                    <div class="value" style="color: #10b981;">{!EXPR3!}</div>
+                    <div class="value" style="color:#10b981;">{!EXPR3!}</div>
                     <div class="label">Печатей</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" style="color: #f59e0b;">{!EXPR4!}</div>
+                    <div class="value" style="color:#f59e0b;">{!EXPR4!}</div>
                     <div class="label">Часов печати</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" style="color: #8b5cf6;">{!EXPR5!}</div>
-                    <div class="label">Строк логов</div>
+                    <div class="value" style="color:#ec4899;">{!EXPR6!}</div>
+                    <div class="label">Газ (бар)</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" style="color: #ec4899;">{!EXPR6!}</div>
-                    <div class="label">Расход газа (бар)</div>
+                    <div class="value" style="color:#06b6d4;">{!EXPR7!}</div>
+                    <div class="label">Порошок (кг)</div>
                 </div>
-                <div class="stat-card">
-                    <div class="value" style="color: #06b6d4;">{!EXPR7!}</div>
-                    <div class="label">Расход порошка (кг)</div>
+                <div class="stat-card" id="home-powder-card" style="cursor:pointer;" onclick="showMainTab('maintenance',null);showMaintenancePage('powder',null)">
+                    <div class="value" style="color:#10b981;" id="home-pow-remaining">—</div>
+                    <div class="label">Остаток порошка (кг)</div>
+                </div>
+                <div class="stat-card" id="home-maint-card" style="cursor:pointer;" onclick="showMainTab('maintenance',null);showMaintenancePage('maint',null)">
+                    <div class="value" style="color:#f59e0b;" id="home-maint-next">—</div>
+                    <div class="label">До ближ. ТО (ч)</div>
                 </div>
             </div>
-            
+
+            <!-- Recent sessions -->
+            <div class="section">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+                    <h2 style="margin:0;">Последние печати</h2>
+                    <a onclick="showMainTab('analytics',null);showAnalyticsPage('history',null)"
+                       style="color:#60a5fa;font-size:13px;cursor:pointer;text-decoration:none;">Все сессии →</a>
+                </div>
+                <div class="recent-grid" id="home-recent-sessions">
+                    <div style="color:#6b7280;font-size:13px;">Загрузка...</div>
+                </div>
+            </div>
+
+            <!-- Overview mini-charts -->
             <div class="charts-grid">
                 <div class="chart-container">
                     <h2>📊 Типы сессий</h2>
@@ -305,52 +465,6 @@
             </div>
         </div>
         
-        <!-- Live Page -->
-        <div id="page-live" style="display:none;">
-            <div class="section" style="margin-bottom:20px;">
-                <h2>🔴 Мониторинг в реальном времени
-                    <span id="live-status" style="font-size:13px;color:#6b7280;margin-left:12px;">● подключение...</span>
-                </h2>
-                <p style="color:#6b7280;font-size:13px;margin-top:6px;">
-                    При активной печати — данные из файла логов. Иначе — симуляция реалистичных значений.
-                </p>
-            </div>
-            <div class="stats" id="live-cards">
-                <div class="stat-card" id="live-card-o2">
-                    <div class="value" id="live-o2" style="color:#10b981;">—</div>
-                    <div class="label">O₂ % (предел {!EXPR38!})</div>
-                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
-                        <div id="live-bar-o2" style="height:100%;border-radius:2px;background:#10b981;width:0%;transition:width 0.5s;"></div>
-                    </div>
-                </div>
-                <div class="stat-card" id="live-card-temp">
-                    <div class="value" id="live-temp" style="color:#60a5fa;">—</div>
-                    <div class="label">Стол ST5 °C (предел {!EXPR39!})</div>
-                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
-                        <div id="live-bar-temp" style="height:100%;border-radius:2px;background:#60a5fa;width:0%;transition:width 0.5s;"></div>
-                    </div>
-                </div>
-                <div class="stat-card" id="live-card-press">
-                    <div class="value" id="live-press" style="color:#8b5cf6;">—</div>
-                    <div class="label">Давление SP4 бар (норма {!EXPR40!})</div>
-                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
-                        <div id="live-bar-press" style="height:100%;border-radius:2px;background:#8b5cf6;width:0%;transition:width 0.5s;"></div>
-                    </div>
-                </div>
-                <div class="stat-card" id="live-card-hum">
-                    <div class="value" id="live-hum" style="color:#06b6d4;">—</div>
-                    <div class="label">Влажность % (предел {!EXPR41!})</div>
-                    <div style="margin-top:8px;height:4px;background:#2d3748;border-radius:2px;">
-                        <div id="live-bar-hum" style="height:100%;border-radius:2px;background:#06b6d4;width:0%;transition:width 0.5s;"></div>
-                    </div>
-                </div>
-            </div>
-            <div class="section" style="margin-top:20px;">
-                <h2>📈 Последние 60 точек</h2>
-                <canvas id="liveChart" style="max-height:280px;"></canvas>
-            </div>
-        </div>
-
         <!-- Powder Page -->
         <div id="page-powder" style="display:none;">
             <div class="section" style="margin-bottom:20px;">
@@ -535,12 +649,12 @@
             </div>
         </div>
 
-        <!-- Time Estimate Page -->
-        <div id="page-estimate" style="display:none;">
-            <div class="section" style="max-width:560px;margin:0 auto;">
-                <h2 style="margin-bottom:8px;">⏱️ Оценка времени печати</h2>
+        <!-- STL Page -->
+        <div id="page-stl" style="display:none;">
+            <div class="section" style="max-width:600px;margin:0 auto;">
+                <h2 style="margin-bottom:8px;">🧊 Загрузка STL и расчёт времени</h2>
                 <p style="color:#a0aec0;font-size:13px;margin-bottom:20px;">
-                    Загрузите STL — система рассчитает объём модели и оценит время на основе истории.
+                    Загрузите STL — система рассчитает объём модели и оценит время печати на основе истории сессий.
                 </p>
                 <div id="stl-drop"
                     ondrop="handleStlDrop(event)" ondragover="event.preventDefault()"
@@ -553,14 +667,139 @@
                         style="background:#3b82f6;color:white;border:none;border-radius:8px;padding:10px 24px;font-size:14px;cursor:pointer;">
                         Выбрать STL
                     </button>
-                    <input id="stl-input" type="file" accept=".stl" style="display:none" onchange="uploadStl(this.files[0])">
+                    <input id="stl-input" type="file" accept=".stl" style="display:none" onchange="uploadStlAndSave(this.files[0])">
                 </div>
                 <div id="stl-result" style="margin-top:20px;"></div>
             </div>
         </div>
 
+        <!-- Models History Page -->
+        <div id="page-models" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                    <div>
+                        <h2 style="margin:0;">📦 История 3D моделей</h2>
+                        <p style="color:#6b7280;font-size:13px;margin-top:6px;">Загруженные STL-файлы с предпросмотром и расчётами времени печати.</p>
+                    </div>
+                    <div style="display:flex;gap:10px;align-items:center;">
+                        <button onclick="document.getElementById('stl-input-models').click()"
+                            style="background:#3b82f6;color:white;border:none;border-radius:8px;padding:10px 20px;font-size:14px;cursor:pointer;">
+                            + Добавить STL
+                        </button>
+                        <button onclick="clearModelHistory()" title="Очистить историю"
+                            style="background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:8px;padding:10px 14px;font-size:13px;cursor:pointer;">
+                            🗑
+                        </button>
+                        <input id="stl-input-models" type="file" accept=".stl" style="display:none" onchange="addModelFromFile(this.files[0])">
+                    </div>
+                </div>
+            </div>
+            <div id="models-empty" style="text-align:center;padding:60px 20px;color:#4a5568;">
+                <div style="font-size:52px;margin-bottom:16px;">🧊</div>
+                <div style="font-size:16px;font-weight:600;color:#6b7280;margin-bottom:8px;">Нет загруженных моделей</div>
+                <div style="color:#4a5568;font-size:13px;">Нажмите «+ Добавить STL» или перейдите на вкладку STL</div>
+            </div>
+            <div id="models-grid" class="model-grid"></div>
+        </div>
+
+        <!-- 3D Viewer Modal -->
+        <div class="viewer-overlay" id="viewer-overlay" onclick="closeViewer(event)">
+            <div class="viewer-modal" onclick="event.stopPropagation()">
+                <div style="display:flex;align-items:center;justify-content:space-between;">
+                    <h2 style="margin:0;font-size:18px;" id="viewer-title">Предпросмотр</h2>
+                    <button onclick="closeViewer(null)"
+                        style="background:#2d3748;border:none;color:#e2e8f0;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px;">
+                        ✕ Закрыть
+                    </button>
+                </div>
+                <div id="viewer-meta" style="color:#6b7280;font-size:13px;display:flex;gap:20px;flex-wrap:wrap;"></div>
+                <div class="viewer-canvas-wrap" id="viewer-canvas-wrap">
+                    <canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>
+                </div>
+                <div style="color:#4a5568;font-size:12px;text-align:center;">
+                    Перетащите для вращения · Колёсико для масштаба · ПКМ для перемещения
+                </div>
+            </div>
+        </div>
+
         <!-- Update Page -->
         <div id="page-update" style="display:none;">
+
+            <!-- Changelog -->
+            <div class="section" style="max-width:760px;margin:0 auto 28px;">
+                <h2 style="margin-bottom:24px;">📋 Журнал изменений</h2>
+                <div style="padding-left:4px;">
+
+                    <div class="changelog-entry latest">
+                        <div><span class="ver">v1.3.0</span><span class="date">10.06.2026 — текущая</span></div>
+                        <ul>
+                            <li><span class="tag tag-feat">feat</span>Новая навигация: Графики / STL / Модели / Обновление / Другое</li>
+                            <li><span class="tag tag-feat">feat</span>Вкладка истории 3D моделей с интерактивным предпросмотром (Three.js)</li>
+                            <li><span class="tag tag-feat">feat</span>Журнал изменений на странице Обновление</li>
+                        </ul>
+                    </div>
+
+                    <div class="changelog-entry">
+                        <div><span class="ver">v1.2.1</span><span class="date">10.06.2026 — Windows-запуск</span></div>
+                        <ul>
+                            <li><span class="tag tag-fix">fix</span>Драйвер БД исправлен на psycopg2 (образы не имеют psycopg3)</li>
+                            <li><span class="tag tag-fix">fix</span>Redis URL исправлен на имя контейнера (было localhost)</li>
+                            <li><span class="tag tag-fix">fix</span>Добавлены недостающие POSTGRES_DB/USER/PASSWORD в .env</li>
+                            <li><span class="tag tag-fix">fix</span>Rate limit agent-эндпоинтов повышен 30→200 req/min</li>
+                            <li><span class="tag tag-fix">fix</span>Дедупликация импорта по имени + checksum (Mac→Windows)</li>
+                            <li><span class="tag tag-fix">fix</span>Защита от повторного запуска завершённых import jobs</li>
+                        </ul>
+                    </div>
+
+                    <div class="changelog-entry">
+                        <div><span class="ver">v1.2.0</span><span class="date">июнь 2026</span></div>
+                        <ul>
+                            <li><span class="tag tag-fix">fix</span>Telegram-бот: экспоненциальный backoff, обработка таймаутов, graceful shutdown</li>
+                            <li><span class="tag tag-fix">fix</span>Backfill телеметрии для сессий без признаков (rehydrate events)</li>
+                            <li><span class="tag tag-fix">fix</span>Исправлено хранение событий — убрано ~96 МБ JSON на сессию в БД</li>
+                            <li><span class="tag tag-feat">feat</span>Self-hosted GitHub Actions CI/CD + Windows auto-update скрипт</li>
+                        </ul>
+                    </div>
+
+                    <div class="changelog-entry">
+                        <div><span class="ver">v1.1.0</span><span class="date">май–июнь 2026</span></div>
+                        <ul>
+                            <li><span class="tag tag-feat">feat</span>Структурированные JSON-логи с ротацией (LOG_RETENTION_DAYS)</li>
+                            <li><span class="tag tag-feat">feat</span>Пагинация всех list-эндпоинтов</li>
+                            <li><span class="tag tag-feat">feat</span>LLM multi-provider: LM Studio / любой OpenAI-совместимый</li>
+                            <li><span class="tag tag-feat">feat</span>Circuit breaker, rate limiting, CORS, preflight-проверки</li>
+                            <li><span class="tag tag-feat">feat</span>Объяснимый риск брака + предиктивное обслуживание (ML)</li>
+                            <li><span class="tag tag-feat">feat</span>Оценка качества входных данных (reliability badge)</li>
+                            <li><span class="tag tag-fix">fix</span>10 логических ошибок в pipeline: телеметрия, слои, длительность</li>
+                        </ul>
+                    </div>
+
+                    <div class="changelog-entry">
+                        <div><span class="ver">v0.3.0</span><span class="date">апрель 2026</span></div>
+                        <ul>
+                            <li><span class="tag tag-feat">feat</span>Drag-drop загрузка логов, форма новой печати, оценщик времени STL</li>
+                            <li><span class="tag tag-feat">feat</span>Авто-импорт при старте API из /incoming</li>
+                            <li><span class="tag tag-feat">feat</span>Multi-stage Docker build с общим базовым образом pla-base</li>
+                            <li><span class="tag tag-feat">feat</span>Авто-обновление через Watchtower + панель версии</li>
+                        </ul>
+                    </div>
+
+                    <div class="changelog-entry">
+                        <div><span class="ver">v0.1.0</span><span class="date">март 2026 — первый запуск</span></div>
+                        <ul>
+                            <li><span class="tag tag-feat">feat</span>Аналитика логов принтера M-350 (Ti-6Al-4V / AlSi10Mg)</li>
+                            <li><span class="tag tag-feat">feat</span>FastAPI + PostgreSQL + Redis + MinIO + Docker Compose</li>
+                            <li><span class="tag tag-feat">feat</span>Импорт ZIP/LOG из /incoming, автогруппировка в сессии</li>
+                            <li><span class="tag tag-feat">feat</span>Телеметрия: O₂, температура, давление, влажность, слои</li>
+                            <li><span class="tag tag-feat">feat</span>ИИ-анализ сессий через LM Studio (локальный LLM)</li>
+                            <li><span class="tag tag-feat">feat</span>Telegram-бот для оповещений оператора</li>
+                        </ul>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- System update controls -->
             <div class="section" style="max-width:560px;margin:0 auto;">
                 <h2 style="margin-bottom:20px;">⬆️ Обновление системы</h2>
                 <p style="color:#a0aec0;font-size:14px;margin-bottom:24px;line-height:1.6;">
@@ -677,7 +916,6 @@
     </div>
     
     <script>
-        const THRESHOLDS = {!EXPR42!};
         const chartColors = {
             blue: '#60a5fa',
             green: '#10b981',
@@ -962,93 +1200,93 @@
             });
         }
 
-        // Navigation
-        function showPage(page) {
+        // =========================================================
+        // NAVIGATION — 5-tab structure
+        // =========================================================
+        const CHART_PAGES = ['overview','telemetry','timeline','quality','sessions','consumption','patterns'];
+        const OTHER_PAGES  = ['chat','upload','newprint','powder','maintenance','logs'];
+        let _activeChartPage = 'overview';
+
+        function _hideAllPages() {
             document.querySelectorAll('[id^="page-"]').forEach(el => el.style.display = 'none');
+        }
+
+        function _setMainActive(tab) {
+            document.querySelectorAll('#main-nav > a').forEach(a => a.classList.remove('active'));
+            document.getElementById('nav-more-btn')?.classList.remove('active');
+            const el = document.getElementById('nav-' + tab);
+            if (el) el.classList.add('active');
+            else if (tab === 'more') document.getElementById('nav-more-btn')?.classList.add('active');
+        }
+
+        function showMainTab(tab, evt) {
+            if (evt) evt.preventDefault();
+            document.getElementById('nav-more')?.classList.remove('open');
+            _hideAllPages();
+            document.getElementById('charts-subnav').style.display = tab === 'charts' ? 'flex' : 'none';
+            _setMainActive(tab);
+
+            if (tab === 'charts') {
+                document.getElementById('page-' + _activeChartPage).style.display = 'block';
+                _onChartPageShown(_activeChartPage);
+            } else if (tab === 'stl') {
+                document.getElementById('page-stl').style.display = 'block';
+            } else if (tab === 'models') {
+                document.getElementById('page-models').style.display = 'block';
+                loadModelHistory();
+            } else if (tab === 'update') {
+                document.getElementById('page-update').style.display = 'block';
+                checkWatchtower(); loadVersionInfo(); loadImportStatus();
+            }
+        }
+
+        function showChartPage(page, evt) {
+            if (evt) evt.preventDefault();
+            _hideAllPages();
+            _activeChartPage = page;
             document.getElementById('page-' + page).style.display = 'block';
-            document.querySelectorAll('.nav a').forEach(a => a.classList.remove('active'));
-            document.getElementById('nav-' + page).classList.add('active');
-            if (page === 'live') initLive();
-            if (page === 'powder') loadPowder();
+            document.querySelectorAll('#charts-subnav a').forEach(a => a.classList.remove('active'));
+            document.getElementById('subnav-' + page)?.classList.add('active');
+            _onChartPageShown(page);
+        }
+
+        function _onChartPageShown(page) {
+            if (page === 'powder')      loadPowder();
             if (page === 'maintenance') loadMaintenance();
-            if (page === 'patterns') loadPatterns();
-            if (page === 'update') { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
-            if (page === 'logs')   { loadLogs(); }
+            if (page === 'patterns')    loadPatterns();
         }
 
-        // =========================================================
-        // LIVE — WebSocket real-time telemetry
-        // =========================================================
-        let liveWs = null, liveChart = null;
-        const liveO2 = [], liveTemp = [], livePress = [], liveLabels = [];
-        const LIVE_MAX = 60;
-
-        function initLive() {
-            if (liveWs && liveWs.readyState < 2) return; // already open
-            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-            liveWs = new WebSocket(proto + '://' + location.host + '/ws/realtime');
-            liveWs.onopen = () => document.getElementById('live-status').textContent = '● подключено';
-            liveWs.onclose = () => document.getElementById('live-status').textContent = '● отключено';
-            liveWs.onerror = () => document.getElementById('live-status').textContent = '● ошибка';
-            liveWs.onmessage = (e) => {
-                const d = JSON.parse(e.data);
-                const to = THRESHOLDS;
-                updateLiveCard('o2',    d.SO1 ?? d.SO2, d.SO1 > to.oxygen.alarm_high || d.SO2 > to.oxygen.alarm_high, '#ef4444', '#10b981', d.SO1 / to.oxygen.max * 100);
-                updateLiveCard('temp',  d.ST5,           d.ST5 > to.temperature.alarm_high,                            '#ef4444', '#60a5fa', d.ST5 / to.temperature.max * 100);
-                updateLiveCard('press', d.SP4,           d.SP4 > to.pressure.alarm_high || d.SP4 < to.pressure.alarm_low, '#ef4444', '#8b5cf6', (d.SP4 - to.pressure.min) / (to.pressure.max - to.pressure.min) * 100);
-                updateLiveCard('hum',   d.Flow_H,        d.Flow_H > to.humidity.alarm_high,                          '#ef4444', '#06b6d4', d.Flow_H / to.humidity.max * 100);
-                const src = d.source === 'sim' ? '🔵 симуляция' : '🟢 live';
-                document.getElementById('live-status').textContent = src + ' · ' + (d.ts || '');
-
-                // rolling chart
-                liveLabels.push(d.ts || '');
-                liveO2.push(d.SO1 ?? null);
-                liveTemp.push(d.ST5 ?? null);
-                livePress.push(d.SP4 ?? null);
-                if (liveLabels.length > LIVE_MAX) { liveLabels.shift(); liveO2.shift(); liveTemp.shift(); livePress.shift(); }
-                if (liveChart) liveChart.update();
-                else buildLiveChart();
-            };
+        function showMorePage(page, evt) {
+            if (evt) { evt.preventDefault(); evt.stopPropagation(); }
+            _hideAllPages();
+            document.getElementById('charts-subnav').style.display = 'none';
+            document.getElementById('nav-more')?.classList.remove('open');
+            _setMainActive('more');
+            const el = document.getElementById('page-' + page);
+            if (el) el.style.display = 'block';
+            if (page === 'logs')        loadLogs();
+            if (page === 'powder')      loadPowder();
+            if (page === 'maintenance') loadMaintenance();
         }
 
-        function updateLiveCard(id, val, alarm, alarmColor, okColor, barPct) {
-            if (val == null) return;
-            const fmt = val < 10 ? val.toFixed(2) : val.toFixed(1);
-            document.getElementById('live-' + id).textContent = fmt;
-            const color = alarm ? alarmColor : okColor;
-            document.getElementById('live-' + id).style.color = color;
-            document.getElementById('live-bar-' + id).style.width = Math.min(100, Math.max(1, barPct)) + '%';
-            document.getElementById('live-bar-' + id).style.background = color;
-            const card = document.getElementById('live-card-' + id);
-            if (alarm) { card.classList.add('alarm-active'); if (!card.querySelector('.alarm-badge')) { const b = document.createElement('div'); b.className = 'alarm-badge'; b.textContent = '!'; card.appendChild(b); } }
-            else { card.classList.remove('alarm-active'); const b = card.querySelector('.alarm-badge'); if (b) b.remove(); }
+        function toggleMore(evt) {
+            evt.preventDefault();
+            evt.stopPropagation();
+            document.getElementById('nav-more').classList.toggle('open');
         }
 
-        function buildLiveChart() {
-            const ctx = document.getElementById('liveChart');
-            if (!ctx) return;
-            liveChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: liveLabels,
-                    datasets: [
-                        { label: 'O₂ %', data: liveO2, borderColor: '#ef4444', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yO2' },
-                        { label: 'Стол °C', data: liveTemp, borderColor: '#60a5fa', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yT' },
-                        { label: 'Давление бар', data: livePress, borderColor: '#8b5cf6', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'yP' },
-                    ]
-                },
-                options: {
-                    responsive: true, animation: false,
-                    interaction: { mode: 'index', intersect: false },
-                    plugins: { legend: { position: 'bottom' } },
-                    scales: {
-                        x: { ticks: { maxTicksLimit: 8 } },
-                        yO2: { position: 'left',  title: { display: true, text: 'O₂ %' }, suggestedMax: 3 },
-                        yT:  { position: 'right', title: { display: true, text: '°C' },  grid: { drawOnChartArea: false } },
-                        yP:  { display: false },
-                    }
-                }
-            });
+        document.addEventListener('click', function(e) {
+            const nm = document.getElementById('nav-more');
+            if (nm && !nm.contains(e.target)) nm.classList.remove('open');
+        });
+
+        // Legacy compat — some inline onclick still call showPage()
+        function showPage(page) {
+            if (CHART_PAGES.includes(page)) { showMainTab('charts',null); showChartPage(page,null); }
+            else if (OTHER_PAGES.includes(page)) showMorePage(page,null);
+            else if (page === 'stl' || page === 'estimate') showMainTab('stl',null);
+            else if (page === 'models') showMainTab('models',null);
+            else if (page === 'update') showMainTab('update',null);
         }
 
         // =========================================================
@@ -1252,9 +1490,16 @@
             e.preventDefault();
             document.getElementById('stl-drop').style.borderColor = '#4a5568';
             const f = e.dataTransfer.files[0];
-            if (f) uploadStl(f);
+            if (f) uploadStlAndSave(f);
         }
-        async function uploadStl(file) {
+        async function uploadStlAndSave(file) {
+            if (!file) return;
+            // Read into memory for 3D preview, then upload
+            const buf = await file.arrayBuffer();
+            _stlFileBuffers[file.name] = buf;
+            await uploadStl(file, buf);
+        }
+        async function uploadStl(file, _buf) {
             const res = document.getElementById('stl-result');
             if (!file) return;
             res.innerHTML = '<div style="color:#60a5fa;">Анализируем модель…</div>';
@@ -1283,7 +1528,13 @@
                         </div>
                         <div style="color:#a0aec0;font-size:12px;">${est.note} · ${est.sessions_used} сессий</div>
                         ${warns}
+                        <button onclick="showMainTab('models',null)"
+                            style="margin-top:14px;background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
+                            📦 Открыть в истории моделей
+                        </button>
                     </div>`;
+                // Save to model history
+                _saveModelEntry(file.name, vol, est.avg_session_hours);
             } catch(e) {
                 res.innerHTML = `<div style="color:#ef4444;">Ошибка загрузки: ${e.message || e}<br><small style="color:#6b7280;">Убедитесь что API запущен (docker compose up)</small></div>`;
             }
@@ -1643,6 +1894,195 @@
                     `<span style="color:#ef4444;font-size:13px;">Ошибка: ${e}</span>`;
             }
         }
+        // =========================================================
+        // MODELS — history + Three.js 3D preview
+        // =========================================================
+        const _MODEL_KEY = 'pla_models_v1';
+        const _stlFileBuffers = {}; // session memory: filename → ArrayBuffer
+        let _viewerRenderer = null, _viewerScene = null, _viewerCamera = null;
+        let _viewerControls = null, _viewerAnimId = null;
+
+        function _getModels() {
+            try { return JSON.parse(localStorage.getItem(_MODEL_KEY) || '[]'); } catch { return []; }
+        }
+        function _setModels(arr) { localStorage.setItem(_MODEL_KEY, JSON.stringify(arr)); }
+
+        function _saveModelEntry(name, volume_cm3, est_hours) {
+            const models = _getModels();
+            const idx = models.findIndex(m => m.name === name);
+            const entry = { name, volume_cm3, est_hours: est_hours ?? '—', added_at: new Date().toISOString() };
+            if (idx >= 0) models[idx] = entry;
+            else models.unshift(entry);
+            _setModels(models);
+        }
+
+        function loadModelHistory() {
+            const models = _getModels();
+            const grid  = document.getElementById('models-grid');
+            const empty = document.getElementById('models-empty');
+            if (!models.length) {
+                empty.style.display = 'block';
+                grid.innerHTML = '';
+                return;
+            }
+            empty.style.display = 'none';
+            grid.innerHTML = models.map((m, i) => {
+                const inMem = !!_stlFileBuffers[m.name];
+                const date  = new Date(m.added_at).toLocaleDateString('ru');
+                return `<div class="model-card" onclick="openViewer(${i})">
+                    <div class="model-thumb">${inMem ? '🔵' : '🧊'}</div>
+                    <div class="model-info">
+                        <div class="model-name" title="${m.name}">${m.name}</div>
+                        <div class="model-meta">
+                            <span>📦 ${m.volume_cm3} см³</span>
+                            <span>⏱️ ~${m.est_hours} ч</span>
+                            <span>${date}</span>
+                        </div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        async function addModelFromFile(file) {
+            if (!file) return;
+            const buf = await file.arrayBuffer();
+            _stlFileBuffers[file.name] = buf;
+            const fd = new FormData();
+            fd.append('file', file);
+            try {
+                const r = await fetch('/upload/stl-estimate', { method: 'POST', body: fd });
+                const d = await r.json();
+                _saveModelEntry(file.name, d.volume_cm3, d.estimate?.avg_session_hours);
+                loadModelHistory();
+                openViewer(0);
+            } catch(e) {
+                _saveModelEntry(file.name, '?', '?');
+                loadModelHistory();
+                openViewer(0);
+            }
+        }
+
+        function clearModelHistory() {
+            if (!confirm('Очистить историю моделей?')) return;
+            _setModels([]);
+            loadModelHistory();
+        }
+
+        function openViewer(idx) {
+            const models = _getModels();
+            const m = models[idx];
+            if (!m) return;
+
+            document.getElementById('viewer-title').textContent = m.name;
+            document.getElementById('viewer-meta').innerHTML =
+                `<span>📦 ${m.volume_cm3} см³</span>` +
+                `<span>⏱️ ~${m.est_hours} ч</span>` +
+                `<span style="color:#4a5568;">${new Date(m.added_at).toLocaleString('ru')}</span>`;
+
+            document.getElementById('viewer-overlay').classList.add('open');
+
+            const buf = _stlFileBuffers[m.name];
+            const wrap = document.getElementById('viewer-canvas-wrap');
+            if (buf) {
+                wrap.innerHTML = '<canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>';
+                _initThreeViewer(buf);
+            } else {
+                wrap.innerHTML = `
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;color:#6b7280;">
+                        <div style="font-size:48px;">📂</div>
+                        <div style="font-size:14px;">Файл не в памяти — загрузите ещё раз для 3D-просмотра</div>
+                        <label style="background:#3b82f6;color:white;border:none;border-radius:8px;padding:10px 20px;cursor:pointer;font-size:14px;">
+                            Открыть файл
+                            <input type="file" accept=".stl" style="display:none"
+                                onchange="_reloadForViewer(this.files[0])">
+                        </label>
+                    </div>`;
+            }
+        }
+
+        async function _reloadForViewer(file) {
+            if (!file) return;
+            const buf = await file.arrayBuffer();
+            _stlFileBuffers[file.name] = buf;
+            const wrap = document.getElementById('viewer-canvas-wrap');
+            wrap.innerHTML = '<canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>';
+            _initThreeViewer(buf);
+        }
+
+        function closeViewer(e) {
+            if (e && e.target !== document.getElementById('viewer-overlay')) return;
+            document.getElementById('viewer-overlay').classList.remove('open');
+            if (_viewerAnimId) { cancelAnimationFrame(_viewerAnimId); _viewerAnimId = null; }
+            if (_viewerRenderer) { _viewerRenderer.dispose(); _viewerRenderer = null; }
+        }
+
+        function _initThreeViewer(buf) {
+            if (typeof THREE === 'undefined') {
+                document.getElementById('viewer-canvas-wrap').innerHTML =
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;">Three.js не загружен (нет интернета?)</div>';
+                return;
+            }
+            const canvas = document.getElementById('viewer-canvas');
+            if (!canvas) return;
+            const W = canvas.parentElement.clientWidth  || 800;
+            const H = canvas.parentElement.clientHeight || 460;
+
+            // Scene + lighting
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0f1419);
+            scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+            const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+            sun.position.set(1, 2, 2);
+            scene.add(sun);
+            const fill = new THREE.DirectionalLight(0x60a5fa, 0.35);
+            fill.position.set(-2, -1, -1);
+            scene.add(fill);
+
+            // Camera
+            const camera = new THREE.PerspectiveCamera(45, W / H, 0.001, 100000);
+
+            // Renderer
+            const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+            renderer.setSize(W, H);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            _viewerRenderer = renderer;
+
+            // Controls
+            const controls = new THREE.OrbitControls(camera, canvas);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.08;
+            _viewerControls = controls;
+
+            // Parse STL
+            const loader = new THREE.STLLoader();
+            const geometry = loader.parse(buf);
+            geometry.computeBoundingBox();
+            geometry.center();
+            const size = new THREE.Vector3();
+            geometry.boundingBox.getSize(size);
+            const maxDim = Math.max(size.x, size.y, size.z) || 1;
+
+            const mat  = new THREE.MeshPhongMaterial({ color: 0x3b82f6, specular: 0x334155, shininess: 40 });
+            const mesh = new THREE.Mesh(geometry, mat);
+            scene.add(mesh);
+
+            // Grid helper
+            const grid = new THREE.GridHelper(maxDim * 3, 10, 0x2d3748, 0x1e2433);
+            grid.position.y = -size.z / 2;
+            scene.add(grid);
+
+            camera.position.set(maxDim * 1.5, maxDim * 1.2, maxDim * 1.5);
+            camera.lookAt(0, 0, 0);
+            controls.update();
+
+            function animate() {
+                _viewerAnimId = requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+            }
+            animate();
+        }
+
     </script>
 </body>
 </html>"""

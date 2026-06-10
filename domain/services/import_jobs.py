@@ -192,6 +192,10 @@ def mark_import_job_confirmed(
     API and agent endpoints use this to preserve the security boundary: only the
     worker has the read-only raw-log mount and performs stability/import work.
     """
+    # Guard: already terminal — re-confirming a done/ignored/needs_context job must not requeue it.
+    # Use /imports/{id}/retry to intentionally reprocess.
+    if job.status in (ImportJobStatus.done, ImportJobStatus.ignored, ImportJobStatus.needs_operator_context):
+        return _result(job, [])
     now = now or datetime.now(timezone.utc)
     job.confirmed_by = actor
     job.confirmed_at = now

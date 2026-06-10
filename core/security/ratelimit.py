@@ -30,7 +30,8 @@ class SlidingWindowRateLimiter:
 
 
 chat_limiter = SlidingWindowRateLimiter(max_requests=20, window_sec=60)
-agent_limiter = SlidingWindowRateLimiter(max_requests=30, window_sec=60)
+# Internal service-to-service: watcher sends 2 req/file × N files on startup
+agent_limiter = SlidingWindowRateLimiter(max_requests=200, window_sec=60)
 
 
 def resolve_client_key(request: Request) -> str:
