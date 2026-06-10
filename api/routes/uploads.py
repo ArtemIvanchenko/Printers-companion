@@ -81,35 +81,14 @@ def _trigger_rescan(path: str) -> None:
 
     async def _run() -> None:
         try:
-            from domain.services.ingestion import IngestionService
-            from domain.services.session_grouping import group_files_into_sessions
-            from domain.services.session_overview import build_group_overview
-            from profiles.m350.profile import build_registry, get_profile
+            from domain.services.session_import import import_new_sessions
             from storage.db.session import SessionLocal
             from storage.repositories.runtime import RuntimeRepository
 
-            folder = Path(path)
-            result = IngestionService(build_registry(), get_profile()).parse(folder)
-            groups = group_files_into_sessions(result.files)
             with SessionLocal() as db:
-                repo = RuntimeRepository(db)
-                existing = {sid for sid, _ in repo.list_session_payloads()}
-                for group in groups:
-                    if group.group_id in existing:
-                        continue
-                    overview = build_group_overview(
-                        group.group_id, group.files,
-                        start_ts=group.start_ts, end_ts=group.end_ts,
-                        grouping_confidence=group.confidence,
-                    )
-                    repo.save_session_payload(
-                        group.group_id,
-                        # Strip parse_result (events): tiny payload; events re-read
-                        # from disk on demand (avoids ~96 MB/session in the DB).
-                        {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
-                    )
-                repo.commit()
-            logger.info("upload rescan: complete, %d groups", len(groups))
+                # save_session_payload commits each row internally.
+                stats = import_new_sessions(Path(path), RuntimeRepository(db))
+            logger.info("upload rescan: complete, %d groups (%d new)", stats["found"], stats["imported"])
         except Exception:
             logger.exception("upload rescan: failed")
 

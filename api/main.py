@@ -63,50 +63,19 @@ async def _startup_import(raw_logs_path: str) -> None:
     logger.info("startup_import: scanning %s for unimported sessions …", path)
     try:
         # Lazy imports — avoid loading heavy ML deps at module level.
-        from domain.services.ingestion import IngestionService
-        from domain.services.session_grouping import group_files_into_sessions
-        from domain.services.session_overview import build_group_overview
-        from profiles.m350.profile import build_registry, get_profile
+        from domain.services.session_import import import_new_sessions
         from storage.db.session import SessionLocal
         from storage.repositories.runtime import RuntimeRepository
 
-        registry = build_registry()
-        profile = get_profile()
-        result = IngestionService(registry, profile).parse(path)
-        groups = group_files_into_sessions(result.files)
+        with SessionLocal() as db:
+            # save_session_payload commits each row; no extra commit needed.
+            stats = import_new_sessions(path, RuntimeRepository(db))
 
-        if not groups:
+        if not stats["found"]:
             logger.info("startup_import: no log groups found in %s", path)
             return
-
-        logger.info("startup_import: found %d session group(s)", len(groups))
-
-        with SessionLocal() as db:
-            repo = RuntimeRepository(db)
-            existing = {sid for sid, _ in repo.list_session_payloads()}
-            imported = 0
-            for group in groups:
-                session_id = group.group_id
-                if session_id in existing:
-                    continue
-                overview = build_group_overview(
-                    group.group_id,
-                    group.files,
-                    start_ts=group.start_ts,
-                    end_ts=group.end_ts,
-                    grouping_confidence=group.confidence,
-                )
-                repo.save_session_payload(
-                    session_id,
-                    # Strip parse_result (events): keeps the payload tiny; events
-                    # are re-read from disk on demand. Avoids ~96 MB/session.
-                    {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
-                )
-                imported += 1
-            # save_session_payload already commits each row; no extra commit needed
-
         logger.info("startup_import: done — %d new session(s) imported, %d already existed",
-                    imported, len(groups) - imported)
+                    stats["imported"], stats["found"] - stats["imported"])
     except Exception:
         logger.exception("startup_import: failed (non-fatal)")
 

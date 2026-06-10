@@ -421,8 +421,8 @@ def execute_confirmed_import(
 
         job.status = ImportJobStatus.analyzing
         job.updated_at = now
-        # Lazy import: build_group_overview pulls the analytics stack.
-        from domain.services.session_overview import build_group_overview
+        # Lazy import: overview_for_group pulls the analytics stack.
+        from domain.services.session_import import overview_for_group, slim_session_payload
         for group in groups:
             # Use the deterministic group id so this (watcher/confirmation) path
             # converges with the startup/upload import paths — same print → same
@@ -443,18 +443,13 @@ def execute_confirmed_import(
             analysis_jobs_created = create_analysis_jobs_for_session(session_id, now=now)
             logger.info("Created %d analysis jobs for session %s", analysis_jobs_created, session_id)
 
-            # Enrich exactly like the startup/upload paths: features, telemetry,
-            # health, classification, data_quality. Storing the bare group stub
-            # (the old behaviour) made the dashboard show these sessions as
-            # INCOMPLETE/empty — this was the root cause of "half the graphs
-            # are empty" when the watcher import path was active.
-            overview = build_group_overview(
-                session_id, group.files,
-                start_ts=group.start_ts, end_ts=group.end_ts,
-                grouping_confidence=float(group.confidence) if group.confidence else 0.0,
-            )
-            stripped_files = [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files]
-            sessions[session_id] = {"files": stripped_files, "group": overview}
+            # Enrich exactly like the startup/upload paths (shared helper):
+            # features, telemetry, health, classification, data_quality. Storing
+            # the bare group stub (the old behaviour) made the dashboard show
+            # these sessions as INCOMPLETE/empty — the root cause of "half the
+            # graphs are empty" when the watcher import path was active.
+            overview = overview_for_group(group)
+            sessions[session_id] = slim_session_payload(group, overview)
             report = generate_session_json_report(session_id, group.files)
             report["markdown"] = generate_markdown_report(report)
             reports[report["report_id"]] = report
