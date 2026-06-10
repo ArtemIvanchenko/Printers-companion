@@ -1,6 +1,8 @@
-# Printer Log Analytics
+# Printer's Companion 🖨️
 
-Production-oriented backend framework for long-lived industrial analysis of metal 3D printer logs.
+**Companion analytics system for 3D metal laser sintering printers**
+
+Production-oriented backend framework for long-lived industrial analysis of metal printer logs.
 
 The first profile is **Laser Systems M-450-M**, with legacy **M-350** treated as the same printer class. The primary profile name is not M450-S.
 
