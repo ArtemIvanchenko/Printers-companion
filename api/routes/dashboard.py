@@ -139,14 +139,10 @@ def get_latest_print_telemetry(db: Session):
 
 # ---- Template rendering ----
 
-_TEMPLATE_CACHE: str | None = None
+_TEMPLATE_PATH = Path(__file__).resolve().parent.parent.parent / "web_templates" / "dashboard.html"
 
 def _load_template() -> str:
-    global _TEMPLATE_CACHE
-    if _TEMPLATE_CACHE is None:
-        path = Path(__file__).resolve().parent.parent.parent / "web_templates" / "dashboard.html"
-        _TEMPLATE_CACHE = path.read_text(encoding="utf-8")
-    return _TEMPLATE_CACHE
+    return _TEMPLATE_PATH.read_text(encoding="utf-8")
 
 def _render_template(context: dict) -> str:
     import re

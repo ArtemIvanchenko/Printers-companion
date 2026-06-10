@@ -98,9 +98,19 @@ def retry_import(
 
 
 def create_detected_import(source_path: str, repo: RuntimeRepository) -> ImportExecutionResult:
+    incoming = Path(source_path)
+    incoming_name = incoming.name
     for existing in repo.list_import_jobs():
+        # Exact path match (same machine)
         if existing.source_path == source_path:
             return ImportExecutionResult(job=existing, notifications=[])
+        # Name + checksum match: same file arrived from a different path (e.g. Mac→Windows)
+        if existing.source_name == incoming_name and existing.status in ("done", "needs_operator_context"):
+            if existing.checksum_manifest and incoming.exists():
+                from domain.services.import_jobs import calculate_checksum_manifest
+                incoming_manifest = calculate_checksum_manifest(incoming)
+                if incoming_manifest == existing.checksum_manifest:
+                    return ImportExecutionResult(job=existing, notifications=[])
     result = detect_import_candidate(Path(source_path), settings=get_settings())
     _persist_result(result, repo)
     return result
