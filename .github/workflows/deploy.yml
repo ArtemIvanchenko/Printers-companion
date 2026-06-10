@@ -15,8 +15,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Restart services
-        shell: powershell
+        shell: cmd
         run: |
-          docker compose pull --quiet
-          docker compose up -d --build --remove-orphans
-          docker compose ps
+          powershell -ExecutionPolicy Bypass -Command "docker compose pull --quiet"
+          powershell -ExecutionPolicy Bypass -Command "docker compose up -d --build --remove-orphans"
+          powershell -ExecutionPolicy Bypass -Command "docker compose ps"
