@@ -7,7 +7,10 @@ services:
     env_file: .env
     command: uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4
     ports:
-      - "8000:8000"
+      # Publish only to the printer PC's loopback by default. The operator's
+      # browser uses http://localhost:8000; inter-container traffic uses the
+      # docker network (unaffected). Set BIND_HOST=0.0.0.0 to expose on the LAN.
+      - "${BIND_HOST:-127.0.0.1}:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -22,7 +25,7 @@ services:
     restart: unless-stopped
     volumes:
       - type: bind
-        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        source: ${RAW_LOGS_HOST_PATH:-./Logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
     tmpfs:
       - /tmp:size=256m,mode=1777
@@ -51,7 +54,7 @@ services:
     command: python -m worker.tasks
     volumes:
       - type: bind
-        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        source: ${RAW_LOGS_HOST_PATH:-./Logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
         read_only: true
     depends_on:
@@ -86,7 +89,7 @@ services:
     command: python -m worker.watcher
     volumes:
       - type: bind
-        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        source: ${RAW_LOGS_HOST_PATH:-./Logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
         read_only: true
     depends_on:
@@ -184,8 +187,9 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # MinIO S3 API + console — keep off the LAN (object store + admin creds).
+      - "${BIND_HOST:-127.0.0.1}:9000:9000"
+      - "${BIND_HOST:-127.0.0.1}:9001:9001"
     networks:
       - storage_net
     restart: unless-stopped
@@ -246,7 +250,8 @@ services:
       dockerfile: Dockerfile.mcp
     env_file: .env
     ports:
-      - "8100:8100"
+      # MCP exposes a raw DB query tool — must never be reachable from the LAN.
+      - "${BIND_HOST:-127.0.0.1}:8100:8100"
     depends_on:
       postgres:
         condition: service_healthy
@@ -303,7 +308,7 @@ services:
       WATCHTOWER_NOTIFICATION_URL: "generic+http://api:8000/admin/update/notify"
       WATCHTOWER_NOTIFICATIONS_LEVEL: "info"
     ports:
-      - "8888:8080"    # expose only on localhost; UI calls localhost:8888 internally
+      - "${BIND_HOST:-127.0.0.1}:8888:8080"    # expose only on localhost; UI calls localhost:8888 internally
     networks:
       - backend_net
     restart: unless-stopped

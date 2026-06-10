@@ -39,17 +39,55 @@ def rows_to_dicts(rows: list[Any]) -> list[dict[str, Any]]:
     return [dict(r._mapping) for r in rows]
 
 
+# Only read-only statements are allowed through the MCP query tool. The tool is
+# meant for inspection/debugging, never for mutating the platform database.
+_READ_ONLY_LEADING = ("select", "with", "explain", "show")
+_FORBIDDEN_KEYWORDS = (
+    "insert", "update", "delete", "drop", "alter", "create", "truncate",
+    "grant", "revoke", "merge", "replace", "attach", "detach", "vacuum",
+    "pragma", "copy", "call",
+)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Remove -- line comments and /* */ block comments before validation."""
+    import re
+    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    sql = re.sub(r"--[^\n]*", " ", sql)
+    return sql
+
+
+def _assert_read_only(sql: str) -> None:
+    cleaned = _strip_sql_comments(sql).strip().rstrip(";").strip()
+    if not cleaned:
+        raise ValueError("Empty query")
+    # Reject batches: a second statement after ';' could smuggle a write.
+    if ";" in cleaned:
+        raise ValueError("Multiple statements are not allowed; submit a single SELECT.")
+    lowered = cleaned.lower()
+    if not lowered.startswith(_READ_ONLY_LEADING):
+        raise ValueError("Only read-only queries (SELECT/WITH/EXPLAIN/SHOW) are allowed.")
+    # Word-boundary check so e.g. a column named 'created_at' isn't flagged.
+    import re
+    for kw in _FORBIDDEN_KEYWORDS:
+        if re.search(rf"\b{kw}\b", lowered):
+            raise ValueError(f"Statement keyword '{kw}' is not allowed in the read-only query tool.")
+
+
 def _query(sql: str, params: dict[str, Any] | None = None) -> str:
+    try:
+        _assert_read_only(sql)
+    except ValueError as e:
+        return f"Error: {e}"
     try:
         db = get_db()
         try:
+            # Defence in depth: even a validated query runs in a transaction we
+            # always roll back, so nothing it touches is ever persisted.
             result = db.execute(text(sql), params or {})
-            if result.returns_rows:
-                data = rows_to_dicts(result.fetchall())
-            else:
-                db.commit()
-                data = [{"affected_rows": result.rowcount}]
+            data = rows_to_dicts(result.fetchall()) if result.returns_rows else []
         finally:
+            db.rollback()
             db.close()
         return _json.dumps(data, default=str, indent=2, ensure_ascii=False)
     except Exception as e:
@@ -58,7 +96,9 @@ def _query(sql: str, params: dict[str, Any] | None = None) -> str:
 
 @mcp.tool()
 def query_database(sql: str) -> str:
-    """Execute a raw SQL query against the platform database and return JSON.
+    """Execute a read-only SQL query (SELECT/WITH/EXPLAIN/SHOW) and return JSON.
+
+    Writes are rejected and the query always runs in a rolled-back transaction.
 
     Tables: import_jobs, sessions, source_files, canonical_events,
             operator_events, operator_journal_entries, quality_outcomes,

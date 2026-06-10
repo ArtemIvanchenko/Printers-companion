@@ -95,10 +95,20 @@ class Settings(BaseSettings):
             "AGENT_API_TOKEN": ("change-me-agent-token", self.agent_api_token),
             "API_SERVICE_TOKEN": ("change-me-service-token", self.api_service_token),
         }
+        stale = [name for name, (default, actual) in defaults.items() if actual == default]
+        if not stale:
+            return self
+        # In a hardened deployment, shipping with the documented placeholder
+        # tokens is a real auth hole — fail fast instead of merely warning.
+        # `local` keeps the warning so the single-PC operator setup still boots.
+        if self.app_env in ("production", "prod", "staging"):
+            raise ValueError(
+                f"{', '.join(stale)} still set to the default placeholder. "
+                "Set unique values in .env before running in production."
+            )
         import warnings
-        for name, (default, actual) in defaults.items():
-            if actual == default:
-                warnings.warn(f"{name} is still set to default '{default}'. Set a unique value in .env for production.")
+        for name in stale:
+            warnings.warn(f"{name} is still set to its default. Set a unique value in .env for production.")
         return self
 
     @model_validator(mode="after")
@@ -114,43 +124,6 @@ class Settings(BaseSettings):
                 )
         return self
 
-    @model_validator(mode="after")
-    def _discover_llm(self):
-        # Skip blocking network discovery in tests: probing candidate URLs at
-        # settings-construction time makes imports slow and non-deterministic.
-        if self.llm_provider == "null" or self.app_env == "test":
-            return self
-        import json
-        import urllib.request
-
-        empty_server: str | None = None
-        for url in LMSTUDIO_CANDIDATE_URLS:
-            try:
-                req = urllib.request.Request(
-                    f"{url.rstrip('/')}/models",
-                    method="GET",
-                    headers={"User-Agent": "printer-log-analytics/1.0"},
-                )
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    if resp.status != 200:
-                        continue
-                    body = json.loads(resp.read().decode("utf-8"))
-            except Exception:
-                continue
-            models = [m.get("id") for m in body.get("data", []) if m.get("id")]
-            if not models:
-                # Server is up but no model is loaded — remember it but keep looking
-                # for a candidate that actually has a usable model.
-                empty_server = empty_server or url
-                continue
-            self.llm_base_url = url
-            if self.llm_model not in models:
-                self.llm_model = models[0]
-            return self
-        if empty_server:
-            self.llm_base_url = empty_server
-        return self
-
     @property
     def repo_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
@@ -159,3 +132,46 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def discover_and_apply_llm(settings: Settings | None = None) -> Settings:
+    """Probe candidate LM Studio URLs and update the settings in place.
+
+    Moved out of the Settings validator so that merely *constructing* settings
+    (CLI, worker import, tests) does no blocking network I/O. Entry points that
+    actually use the LLM call this explicitly at startup (e.g. the API lifespan).
+    Best-effort and idempotent: leaves values unchanged when nothing answers.
+    """
+    settings = settings or get_settings()
+    if settings.llm_provider == "null" or settings.app_env == "test":
+        return settings
+    import json
+    import urllib.request
+
+    empty_server: str | None = None
+    for url in LMSTUDIO_CANDIDATE_URLS:
+        try:
+            req = urllib.request.Request(
+                f"{url.rstrip('/')}/models",
+                method="GET",
+                headers={"User-Agent": "printer-log-analytics/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status != 200:
+                    continue
+                body = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            continue
+        models = [m.get("id") for m in body.get("data", []) if m.get("id")]
+        if not models:
+            # Server is up but no model is loaded — remember it but keep looking
+            # for a candidate that actually has a usable model.
+            empty_server = empty_server or url
+            continue
+        settings.llm_base_url = url
+        if settings.llm_model not in models:
+            settings.llm_model = models[0]
+        return settings
+    if empty_server:
+        settings.llm_base_url = empty_server
+    return settings

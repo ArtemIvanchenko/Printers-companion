@@ -17,14 +17,14 @@ The first profile is **Laser Systems M-450-M**, with legacy **M-350** treated as
 - Папка проекта скопирована с флешки на диск, например в `C:\printer-log-analytics`.
 
 ### 1. Папка для логов принтера
-**Складывай новые логи сюда:**
+**Складывай новые логи сюда** — в папку `Logs` внутри папки проекта:
 
 ```
-C:\PrinterLogs
+C:\printer-log-analytics\Logs
 ```
 
-> ⚠️ Именно в `C:\PrinterLogs` напрямую — **без** подпапки `\incoming` (раньше была `incoming`, теперь не нужна).
-> Если папки нет — создай её: `New-Item -ItemType Directory C:\PrinterLogs`.
+> ⚠️ Кладём прямо в `Logs` — **без** подпапки `\incoming` (раньше была `incoming`, теперь не нужна).
+> Папка `Logs` уже есть в проекте; если вдруг нет — создай её: `New-Item -ItemType Directory C:\printer-log-analytics\Logs`.
 > Можно класть файлы как есть (`23.03.2026.log`, `23.03.2026_sensors.log`, `23.03.2026_time.log` и т.д.)
 > или сразу всю папку с флешки. Система сама сгруппирует файлы по печатям.
 > Альтернатива: перетащить файлы прямо в дашборде на странице «Загрузка» — попадут в ту же папку.
@@ -36,10 +36,12 @@ cd C:\printer-log-analytics
 Copy-Item .env.example .env
 ```
 
-В `.env` для Windows оставить:
+В `.env` для Windows оставить (значения по умолчанию уже подходят):
 
 ```env
-RAW_LOGS_HOST_PATH=C:\PrinterLogs
+# Логи лежат в папке Logs внутри проекта. Можно указать и абсолютный путь,
+# например RAW_LOGS_HOST_PATH=C:\PrinterLogs
+RAW_LOGS_HOST_PATH=./Logs
 RAW_LOGS_CONTAINER_PATH=/mnt/raw_logs
 LLM_BASE_URL=http://host.docker.internal:1234/v1
 ```
@@ -60,11 +62,11 @@ docker compose up -d
 http://localhost:8000
 ```
 
-Через ~15 секунд после старта система сама просканирует `C:\PrinterLogs` и подтянет
+Через ~15 секунд после старта система сама просканирует папку `Logs` и подтянет
 новые печати. Графики и таблицы заполнятся автоматически.
 
 ### 5. Как добавлять новые логи потом
-Просто **докладывай новые файлы** в `C:\PrinterLogs` (или перетаскивай в дашборде).
+Просто **докладывай новые файлы** в папку `Logs` (или перетаскивай в дашборде).
 Система раз в час и при каждом старте проверяет папку и импортирует **только новое**.
 Ничего вручную запускать не нужно.
 
@@ -107,10 +109,11 @@ Copy `.env.example` to `.env` and adjust secrets and paths:
 Copy-Item .env.example .env
 ```
 
-For Windows Docker Desktop, keep:
+For Windows Docker Desktop, the defaults already work (logs live in the
+project's `Logs/` folder):
 
 ```env
-RAW_LOGS_HOST_PATH=C:\PrinterLogs
+RAW_LOGS_HOST_PATH=./Logs
 RAW_LOGS_CONTAINER_PATH=/mnt/raw_logs
 LLM_BASE_URL=http://host.docker.internal:1234/v1
 ```
@@ -127,28 +130,29 @@ Routine log import does not require terminal commands.
 
 Normal workflow:
 
-1. Operator copies a log folder or ZIP from USB into `C:\PrinterLogs\incoming`.
-2. The `watcher` service sees the new folder/ZIP and creates an `ImportJob`.
-3. The watcher sends a restricted API notification for Telegram/OpenClaw:
+1. Operator copies a log folder, ZIP or individual files from USB into the
+   project's `Logs/` folder (the raw-logs root — no `\incoming` subfolder).
+2. The `watcher` service sees the new folder/ZIP/files and creates an `ImportJob`.
+   With the bundled configuration the watcher then auto-confirms it, so import
+   starts automatically — no operator action is required.
+3. The system checks that files are readable and stable, calculates checksums,
+   ingests logs, groups sessions, runs analysis, generates reports, and (when a
+   Telegram chat is connected) sends a summary with report links and
+   missing-context questions.
+4. If files are still copying, the import is retried automatically until the
+   files are stable.
 
-   `Найдена новая папка логов: <name>. Начать импорт?`
-
-   Buttons:
-
-   - `Импортировать`
-   - `Игнорировать`
-   - `Проверить позже`
-
-4. Nothing is parsed or analyzed until the operator presses `Импортировать`.
-5. After confirmation, the system checks that files are readable and stable, calculates checksums, ingests logs, groups sessions, runs analysis, generates reports, and sends a summary with report links and missing-context questions.
-6. If files are still copying, the operator receives:
-
-   `Файлы еще копируются. Повторю проверку через N секунд.`
+A manual confirmation flow also exists (Telegram/OpenClaw buttons
+`Импортировать` / `Игнорировать` / `Проверить позже`, backed by the
+`/imports/{id}/confirm` API). The bundled `watcher` auto-confirms detected
+imports, so on the standard single-PC setup these buttons are informational;
+the supervised flow is intended for deployments that run without the
+auto-confirming watcher.
 
 Import configuration:
 
 ```env
-INCOMING_PATH=/mnt/raw_logs/incoming
+INCOMING_PATH=/mnt/raw_logs
 WATCH_MODE=filesystem_events
 REQUIRE_OPERATOR_IMPORT_CONFIRMATION=true
 FILE_STABILITY_SECONDS=60
@@ -302,8 +306,8 @@ X-API-Token: <AGENT_API_TOKEN>
 From inside the app container or local Python environment:
 
 ```powershell
-pla ingest-session C:\PrinterLogs
-pla generate-report auto_session --folder C:\PrinterLogs
+pla ingest-session .\Logs
+pla generate-report auto_session --folder .\Logs
 pla add-operator-event "Поставили новый баллон аргона, баллон AG-042, давление 180 бар"
 pla run-background-analysis --window 90d --max-iterations 10
 pla llm-test
