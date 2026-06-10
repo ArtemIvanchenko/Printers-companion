@@ -17,7 +17,9 @@ dependencies = [
   "polars>=0.20",
   "duckdb>=0.10",
   "sqlalchemy>=2.0",
-  "psycopg[binary]>=3.1",
+  # psycopg2 driver — matches requirements.base.txt and the postgresql+psycopg2
+  # DATABASE_URL the images actually run with.
+  "psycopg2-binary>=2.9",
   "alembic>=1.13",
   "redis>=5.0",
   "minio>=7.2",
@@ -33,10 +35,13 @@ dependencies = [
   "rq>=1.16",
   "apscheduler>=3.10",
   "watchdog>=4.0",
+  # Used by worker/watcher.py for retrying the import-detected API call.
+  "tenacity>=8.0",
 ]
 
 [project.optional-dependencies]
 telegram = ["python-telegram-bot>=21.0"]
+mcp = ["mcp>=1.0.0"]
 dev = ["pytest>=8.2", "pytest-cov>=5.0", "ruff>=0.5"]
 
 [project.scripts]
