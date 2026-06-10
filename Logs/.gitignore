@@ -1,0 +1,4 @@
+# Raw printer logs are dropped here at runtime and bind-mounted into the
+# containers. Keep the folder in git, but never commit the logs themselves.
+*
+!.gitignore

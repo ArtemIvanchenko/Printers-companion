@@ -1,5 +1,8 @@
 .git
 .pytest_cache
+# Raw printer logs live here on the host (bind-mounted at runtime) — never bake
+# them into the image via `COPY . /app`.
+Logs/
 **/__pycache__
 **/*.py[cod]
 .env

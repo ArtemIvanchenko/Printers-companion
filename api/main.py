@@ -114,6 +114,10 @@ async def _startup_import(raw_logs_path: str) -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if settings.app_env == "local":
         create_all()
+    # LLM endpoint discovery moved out of Settings construction (it did blocking
+    # network I/O at import time). Run it here, once, on the interactive path.
+    from core.config.settings import discover_and_apply_llm
+    discover_and_apply_llm(settings)
     report = run_preflight(settings, component="api")
     for warn in report.warnings:
         logging.getLogger("preflight").warning(warn)
@@ -139,10 +143,14 @@ app = FastAPI(
 app.add_middleware(RequestIDMiddleware)
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+# allow_credentials=True is incompatible with a wildcard origin (the browser
+# rejects it, and mirroring arbitrary origins enables CSRF). Only send
+# credentials when an explicit allow-list is configured; otherwise fall back to
+# a wildcard origin with credentials disabled.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins or ["*"],
-    allow_credentials=True,
+    allow_credentials=bool(origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
