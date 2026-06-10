@@ -7,7 +7,7 @@ from api.deps.repositories import get_runtime_repository
 from api.pagination import LimitParam, PaginatedResponse, SkipParam
 from domain.services.ingestion import IngestionService
 from domain.services.session_grouping import group_files_into_sessions
-from domain.services.session_overview import build_group_overview
+from domain.services.session_import import overview_for_group, slim_session_payload
 from profiles.m350.profile import build_registry, get_profile
 from reporting.json_report.generator import _timeline_preview, generate_session_json_report
 from reporting.markdown_report.generator import generate_markdown_report
@@ -50,19 +50,8 @@ def ingest_session(payload: dict, repo: RuntimeRepository = Depends(get_runtime_
         session_id = payload.get("session_id") or group.group_id
         # Enrich the stored group with classification + dashboard features + telemetry,
         # so the persisted payload is directly renderable by the web dashboard.
-        overview = build_group_overview(
-            group.group_id,
-            group.files,
-            start_ts=group.start_ts,
-            end_ts=group.end_ts,
-            grouping_confidence=group.confidence,
-        )
-        repo.save_session_payload(
-            session_id,
-            # Strip parse_result (events): tiny payload; events re-read from disk
-            # on demand (avoids ~96 MB/session of monitor events in the DB).
-            {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
-        )
+        overview = overview_for_group(group)
+        repo.save_session_payload(session_id, slim_session_payload(group, overview))
         response_groups.append({"session_id": session_id, **overview})
     repo.commit()
     return {"root": result.root, "groups": response_groups, "skipped": result.skipped, "diagnostics": result.diagnostics}
