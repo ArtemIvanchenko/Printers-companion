@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.routes import (
@@ -185,8 +186,7 @@ app.include_router(updater.router)
 app.include_router(uploads.router)
 
 
-@app.get("/alarm-demo", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)
+@app.get("/alarm-demo", response_class=HTMLResponse)
 async def alarm_demo():
-    from pathlib import Path
     html = (Path(__file__).parent.parent / "alarm_demo.html").read_text(encoding="utf-8")
     return html

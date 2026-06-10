@@ -34,20 +34,39 @@ async def upload_logs(files: list[UploadFile]) -> dict:
         raise HTTPException(500, f"Папка логов не найдена: {dest}")
 
     saved, skipped = [], []
+    max_bytes = _MAX_FILE_MB * 1024 * 1024
     for f in files:
+        # Path(...).name strips any directory components in the client-supplied
+        # filename, so a crafted name can't escape the raw-logs folder.
         name = Path(f.filename or "unknown").name
         suffix = Path(name).suffix.lower()
         if suffix not in _ALLOWED_SUFFIXES:
             skipped.append({"name": name, "reason": "неподдерживаемый тип файла"})
             continue
         target = dest / name
-        data = await f.read()
-        if len(data) > _MAX_FILE_MB * 1024 * 1024:
+        # Stream to disk in 1 MB chunks instead of f.read() (which would pull the
+        # whole 600 MB file into the 1 GB-capped container's RAM and can OOM it).
+        # Enforce the size limit mid-stream and clean up a partial/oversized file.
+        total = 0
+        too_big = False
+        try:
+            with target.open("wb") as out:
+                while chunk := await f.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        too_big = True
+                        break
+                    out.write(chunk)
+        except OSError as exc:
+            target.unlink(missing_ok=True)
+            skipped.append({"name": name, "reason": f"ошибка записи: {exc}"})
+            continue
+        if too_big:
+            target.unlink(missing_ok=True)
             skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
             continue
-        target.write_bytes(data)
-        logger.info("upload_logs: saved %s (%d bytes) → %s", name, len(data), target)
-        saved.append({"name": name, "size_bytes": len(data)})
+        logger.info("upload_logs: saved %s (%d bytes) → %s", name, total, target)
+        saved.append({"name": name, "size_bytes": total})
 
     # Trigger re-scan so new files are imported without waiting for next restart
     if saved:

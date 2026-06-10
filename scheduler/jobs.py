@@ -1,3 +1,5 @@
+import logging
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -7,6 +9,8 @@ from core.config.settings import get_settings
 from scheduler.schedules import configured_schedules
 from storage.db.session import SessionLocal
 from storage.repositories.runtime import RuntimeRepository
+
+logger = logging.getLogger(__name__)
 
 
 def run_daily_review() -> dict:
@@ -46,10 +50,13 @@ def _load_session_features() -> list[dict[str, object]]:
 
 
 def main() -> None:
-    scheduler = BlockingScheduler()
+    from core.logging.config import configure_logging
+
     settings = get_settings()
+    configure_logging(settings.log_level)
+    scheduler = BlockingScheduler()
     schedules = configured_schedules()
-    print(f"Scheduler configured: {schedules}")
+    logger.info("Scheduler configured: %s", schedules)
     # Honor the configured cron strings instead of hardcoding the hours, so
     # DAILY_REVIEW_CRON / HISTORICAL_REANALYSIS_CRON in .env actually take effect.
     scheduler.add_job(
@@ -62,7 +69,11 @@ def main() -> None:
         CronTrigger.from_crontab(settings.historical_reanalysis_cron),
         id="historical_reanalysis",
     )
-    print(f"Cron schedules: daily_review={settings.daily_review_cron}, historical_reanalysis={settings.historical_reanalysis_cron}")
+    logger.info(
+        "Cron schedules: daily_review=%s, historical_reanalysis=%s",
+        settings.daily_review_cron,
+        settings.historical_reanalysis_cron,
+    )
     scheduler.start()
 
 
