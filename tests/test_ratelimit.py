@@ -7,7 +7,13 @@ semantics so the security guard can't silently regress.
 import pytest
 from fastapi import HTTPException
 
-from core.security.ratelimit import SlidingWindowRateLimiter
+from core.security.ratelimit import SlidingWindowRateLimiter, resolve_client_key
+
+
+class _FakeRequest:
+    def __init__(self, headers: dict, client_host: str | None = None):
+        self.headers = headers
+        self.client = type("Client", (), {"host": client_host})() if client_host else None
 
 
 def _limiter() -> SlidingWindowRateLimiter:
@@ -41,3 +47,15 @@ def test_reset_clears_the_window() -> None:
         lim.check("client-a")
     lim.reset("client-a")
     lim.check("client-a")  # must not raise after reset
+
+
+def test_token_is_not_stored_raw_in_client_key() -> None:
+    # The client key ends up in a (persistent) Redis key, so the raw secret must
+    # never appear in it.
+    secret = "super-secret-agent-token-abc123"
+    key = resolve_client_key(_FakeRequest({"X-API-Token": secret}))
+    assert key.startswith("token:")
+    assert secret not in key
+    # Same token → same bucket (stable hash), different token → different bucket.
+    assert key == resolve_client_key(_FakeRequest({"X-API-Token": secret}))
+    assert key != resolve_client_key(_FakeRequest({"X-API-Token": secret + "x"}))

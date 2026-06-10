@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import time
 import uuid
@@ -8,6 +9,26 @@ from fastapi import HTTPException, Request
 from starlette.status import HTTP_429_TOO_MANY_REQUESTS
 
 logger = logging.getLogger(__name__)
+
+# Prune the window, count it, and (only if under the limit) record the new hit —
+# all in one server-side step so concurrent workers can't each read a stale
+# below-limit count and over-admit a burst. Returns 1 when rate-limited, else 0.
+_SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window_start = tonumber(ARGV[2])
+local max_requests = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttl = tonumber(ARGV[5])
+redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+local count = redis.call('ZCARD', key)
+if count >= max_requests then
+  return 1
+end
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, ttl)
+return 0
+"""
 
 
 class SlidingWindowRateLimiter:
@@ -67,17 +88,17 @@ class SlidingWindowRateLimiter:
         key = f"{self.namespace}:{client_key}"
         now = time.time()
         window_start = now - self.window_sec
-        redis_client.zremrangebyscore(key, 0, window_start)
-        count = redis_client.zcard(key)
-        if count >= self.max_requests:
+        member = f"{now}-{uuid.uuid4().hex}"
+        # Single atomic EVAL — prune + count + conditional add happen together,
+        # so two workers can't both observe the same below-limit count.
+        rejected = redis_client.eval(
+            _SLIDING_WINDOW_LUA, 1, key, now, window_start, self.max_requests, member, self.window_sec
+        )
+        if rejected:
             raise HTTPException(
                 status_code=HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Rate limit exceeded: {self.max_requests} requests per {self.window_sec}s",
             )
-        pipe = redis_client.pipeline()
-        pipe.zadd(key, {f"{now}-{uuid.uuid4().hex}": now})
-        pipe.expire(key, self.window_sec)
-        pipe.execute()
 
     def _check_local(self, client_key: str) -> None:
         now = time.monotonic()
@@ -109,7 +130,10 @@ agent_limiter = SlidingWindowRateLimiter(max_requests=200, window_sec=60, namesp
 def resolve_client_key(request: Request) -> str:
     token = request.headers.get("X-API-Token", "")
     if token:
-        return f"token:{token}"
+        # Never put the raw secret in a key: Redis here is persistent (AOF +
+        # volume), so the token could leak via key listing or backups. A SHA-256
+        # digest still uniquely (and irreversibly) identifies the caller.
+        return f"token:{hashlib.sha256(token.encode('utf-8')).hexdigest()[:32]}"
     forwarded = request.headers.get("X-Forwarded-For", "")
     if forwarded:
         return f"ip:{forwarded.split(',')[0].strip()}"
