@@ -1201,11 +1201,10 @@
         }
 
         // =========================================================
-        // NAVIGATION — 5-tab structure
+        // NAVIGATION
         // =========================================================
-        const CHART_PAGES = ['overview','telemetry','timeline','quality','sessions','consumption','patterns'];
-        const OTHER_PAGES  = ['chat','upload','newprint','powder','maintenance','logs'];
-        let _activeChartPage = 'overview';
+        let _activeAnalyticsPage = 'telemetry';
+        let _activeMaintenancePage = 'powder';
 
         function _hideAllPages() {
             document.querySelectorAll('[id^="page-"]').forEach(el => el.style.display = 'none');
@@ -1213,80 +1212,125 @@
 
         function _setMainActive(tab) {
             document.querySelectorAll('#main-nav > a').forEach(a => a.classList.remove('active'));
-            document.getElementById('nav-more-btn')?.classList.remove('active');
             const el = document.getElementById('nav-' + tab);
             if (el) el.classList.add('active');
-            else if (tab === 'more') document.getElementById('nav-more-btn')?.classList.add('active');
+        }
+
+        function _showSubnav(name) {
+            ['analytics-subnav', 'maintenance-subnav'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = 'none';
+            });
+            if (name) {
+                const el = document.getElementById(name + '-subnav');
+                if (el) el.style.display = 'flex';
+            }
         }
 
         function showMainTab(tab, evt) {
             if (evt) evt.preventDefault();
-            document.getElementById('nav-more')?.classList.remove('open');
+            document.getElementById('gear-dropdown')?.classList.remove('open');
             _hideAllPages();
-            document.getElementById('charts-subnav').style.display = tab === 'charts' ? 'flex' : 'none';
             _setMainActive(tab);
-
-            if (tab === 'charts') {
-                document.getElementById('page-' + _activeChartPage).style.display = 'block';
-                _onChartPageShown(_activeChartPage);
-            } else if (tab === 'stl') {
-                document.getElementById('page-stl').style.display = 'block';
+            if (tab === 'home') {
+                _showSubnav(null);
+                document.getElementById('page-home').style.display = 'block';
+                loadHomeData();
+            } else if (tab === 'analytics') {
+                _showSubnav('analytics');
+                _showAnalyticsPageInner(_activeAnalyticsPage);
             } else if (tab === 'models') {
+                _showSubnav(null);
                 document.getElementById('page-models').style.display = 'block';
                 loadModelHistory();
-            } else if (tab === 'update') {
-                document.getElementById('page-update').style.display = 'block';
-                checkWatchtower(); loadVersionInfo(); loadImportStatus();
+            } else if (tab === 'maintenance') {
+                _showSubnav('maintenance');
+                _showMaintenancePageInner(_activeMaintenancePage);
             }
         }
 
-        function showChartPage(page, evt) {
-            if (evt) evt.preventDefault();
-            _hideAllPages();
-            _activeChartPage = page;
-            document.getElementById('page-' + page).style.display = 'block';
-            document.querySelectorAll('#charts-subnav a').forEach(a => a.classList.remove('active'));
+        function _showAnalyticsPageInner(page) {
+            const pageId = page === 'history' ? 'timeline' : page;
+            const el = document.getElementById('page-' + pageId);
+            if (el) el.style.display = 'block';
+            document.querySelectorAll('#analytics-subnav a').forEach(a => a.classList.remove('active'));
             document.getElementById('subnav-' + page)?.classList.add('active');
-            _onChartPageShown(page);
+            if (page === 'patterns') loadPatterns();
         }
 
-        function _onChartPageShown(page) {
-            if (page === 'powder')      loadPowder();
-            if (page === 'maintenance') loadMaintenance();
-            if (page === 'patterns')    loadPatterns();
-        }
-
-        function showMorePage(page, evt) {
+        function showAnalyticsPage(page, evt) {
             if (evt) { evt.preventDefault(); evt.stopPropagation(); }
             _hideAllPages();
-            document.getElementById('charts-subnav').style.display = 'none';
-            document.getElementById('nav-more')?.classList.remove('open');
-            _setMainActive('more');
-            const el = document.getElementById('page-' + page);
-            if (el) el.style.display = 'block';
-            if (page === 'logs')        loadLogs();
-            if (page === 'powder')      loadPowder();
-            if (page === 'maintenance') loadMaintenance();
+            _activeAnalyticsPage = page;
+            _showAnalyticsPageInner(page);
         }
 
-        function toggleMore(evt) {
+        function _showMaintenancePageInner(page) {
+            const pageId = page === 'maint' ? 'maintenance' : page === 'journal' ? 'newprint' : page;
+            const el = document.getElementById('page-' + pageId);
+            if (el) el.style.display = 'block';
+            document.querySelectorAll('#maintenance-subnav a').forEach(a => a.classList.remove('active'));
+            document.getElementById('subnav-' + page)?.classList.add('active');
+            if (page === 'powder') loadPowder();
+            if (page === 'maint')  loadMaintenance();
+        }
+
+        function showMaintenancePage(page, evt) {
+            if (evt) { evt.preventDefault(); evt.stopPropagation(); }
+            _hideAllPages();
+            _activeMaintenancePage = page;
+            _showMaintenancePageInner(page);
+        }
+
+        function showGearPage(page, evt) {
+            if (evt) { evt.preventDefault(); evt.stopPropagation(); }
+            document.getElementById('gear-dropdown')?.classList.remove('open');
+            _hideAllPages();
+            _showSubnav(null);
+            document.querySelectorAll('#main-nav > a').forEach(a => a.classList.remove('active'));
+            const el = document.getElementById('page-' + page);
+            if (el) el.style.display = 'block';
+            if (page === 'logs')   loadLogs();
+            if (page === 'update') { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
+        }
+
+        function toggleGear(evt) {
             evt.preventDefault();
             evt.stopPropagation();
-            document.getElementById('nav-more').classList.toggle('open');
+            document.getElementById('gear-dropdown')?.classList.toggle('open');
+        }
+
+        function openChangelog() {
+            document.getElementById('changelog-modal').style.display = 'flex';
+        }
+
+        function closeChangelog() {
+            document.getElementById('changelog-modal').style.display = 'none';
         }
 
         document.addEventListener('click', function(e) {
-            const nm = document.getElementById('nav-more');
-            if (nm && !nm.contains(e.target)) nm.classList.remove('open');
+            const gm = document.getElementById('gear-menu');
+            if (gm && !gm.contains(e.target)) {
+                document.getElementById('gear-dropdown')?.classList.remove('open');
+            }
         });
 
-        // Legacy compat — some inline onclick still call showPage()
+        // Legacy compat
         function showPage(page) {
-            if (CHART_PAGES.includes(page)) { showMainTab('charts',null); showChartPage(page,null); }
-            else if (OTHER_PAGES.includes(page)) showMorePage(page,null);
-            else if (page === 'stl' || page === 'estimate') showMainTab('stl',null);
-            else if (page === 'models') showMainTab('models',null);
-            else if (page === 'update') showMainTab('update',null);
+            if (['telemetry','timeline','quality','patterns'].includes(page)) {
+                showMainTab('analytics', null);
+                _activeAnalyticsPage = page === 'timeline' ? 'history' : page;
+                showAnalyticsPage(_activeAnalyticsPage, null);
+            } else if (['powder','maintenance'].includes(page)) {
+                showMainTab('maintenance', null);
+                const p = page === 'maintenance' ? 'maint' : page;
+                _activeMaintenancePage = p;
+                showMaintenancePage(p, null);
+            } else if (page === 'models') {
+                showMainTab('models', null);
+            } else if (['upload','logs','update'].includes(page)) {
+                showGearPage(page, null);
+            }
         }
 
         // =========================================================
@@ -2082,6 +2126,57 @@
             }
             animate();
         }
+
+        // =========================================================
+        // HOME PAGE DATA
+        // =========================================================
+        async function loadHomeData() {
+            loadVersionInfo();
+            try {
+                const r = await fetch('/sessions?limit=6');
+                const d = await r.json();
+                const items = d.items ?? d ?? [];
+                const grid = document.getElementById('home-recent-sessions');
+                if (!grid) return;
+                if (!items.length) {
+                    grid.innerHTML = '<div style="color:#6b7280;font-size:13px;padding:12px;">Нет сессий</div>';
+                    return;
+                }
+                grid.innerHTML = items.map(s => {
+                    const dur = s.duration_seconds ? (s.duration_seconds / 3600).toFixed(1) + ' ч' : '—';
+                    const typeClass = s.session_type === 'real_print' ? 'type-real'
+                        : s.session_type === 'idle' ? 'type-idle' : 'type-unknown';
+                    return `<div class="recent-session-card">
+                        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+                            <span style="font-size:12px;color:#a0aec0;font-family:monospace;">${s.session_id?.slice(-8) ?? '—'}</span>
+                            <span class="type-badge ${typeClass}" style="font-size:10px;">${s.session_type ?? '?'}</span>
+                        </div>
+                        <div style="margin-top:6px;font-size:13px;color:#e2e8f0;">${s.start_time ? new Date(s.start_time).toLocaleDateString('ru') : '—'}</div>
+                        <div style="font-size:12px;color:#6b7280;margin-top:2px;">${dur}</div>
+                    </div>`;
+                }).join('');
+            } catch(e) { console.warn('home sessions:', e); }
+            try {
+                const r = await fetch('/powder/status');
+                const d = await r.json();
+                if (d.has_batch) {
+                    const el = document.getElementById('home-powder-card');
+                    if (el) el.querySelector('.value').textContent = d.remaining_kg.toFixed(1) + ' кг';
+                }
+            } catch(e) {}
+            try {
+                const r = await fetch('/analysis/maintenance-forecast');
+                const d = await r.json();
+                const el = document.getElementById('home-maint-next');
+                if (el && d.length) el.textContent = d[0].eta_sessions + ' сес.';
+            } catch(e) {}
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadHomeData();
+            loadImportStatus();
+            setInterval(loadImportStatus, 15000);
+        });
 
     </script>
 </body>
