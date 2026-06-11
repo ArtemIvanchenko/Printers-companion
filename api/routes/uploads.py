@@ -217,6 +217,9 @@ def _binary_stl_volume(data: bytes) -> float:
     if len(data) < 84:
         return 0.0
     count = struct.unpack_from("<I", data, 80)[0]
+    # Clamp to triangles that actually fit in the file so a crafted header
+    # (e.g. count=0xFFFFFFFF) can't spin the loop for minutes.
+    count = min(count, (len(data) - 84) // 50)
     vol = 0.0
     offset = 84
     for _ in range(count):
@@ -238,17 +241,20 @@ def _binary_stl_volume(data: bytes) -> float:
 
 def _ascii_stl_volume(text: str) -> float:
     import re
-    verts = re.findall(r"vertex\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s+([\d.e+\-]+)", text)
     vol = 0.0
-    for i in range(0, len(verts) - 2, 3):
-        v1 = tuple(float(x) for x in verts[i])
-        v2 = tuple(float(x) for x in verts[i + 1])
-        v3 = tuple(float(x) for x in verts[i + 2])
-        vol += (
-            v1[0] * (v2[1] * v3[2] - v2[2] * v3[1])
-            + v2[0] * (v3[1] * v1[2] - v3[2] * v1[1])
-            + v3[0] * (v1[1] * v2[2] - v1[2] * v2[1])
-        ) / 6.0
+    buf: list[tuple[str, str, str]] = []
+    for m in re.finditer(r"vertex\s+([\d.e+\-]+)\s+([\d.e+\-]+)\s+([\d.e+\-]+)", text):
+        buf.append(m.groups())  # type: ignore[arg-type]
+        if len(buf) == 3:
+            v1 = tuple(float(x) for x in buf[0])
+            v2 = tuple(float(x) for x in buf[1])
+            v3 = tuple(float(x) for x in buf[2])
+            vol += (
+                v1[0] * (v2[1] * v3[2] - v2[2] * v3[1])
+                + v2[0] * (v3[1] * v1[2] - v3[2] * v1[1])
+                + v3[0] * (v1[1] * v2[2] - v1[2] * v2[1])
+            ) / 6.0
+            buf = []
     return abs(vol)
 
 
@@ -294,7 +300,8 @@ async def stl_estimate(file: UploadFile) -> dict:
     if len(data) > 200 * 1024 * 1024:
         raise HTTPException(413, "Файл > 200 МБ")
 
-    volume_cm3 = _stl_volume_cm3(data)
+    import asyncio
+    volume_cm3 = await asyncio.get_running_loop().run_in_executor(None, _stl_volume_cm3, data)
     hist = _historical_rate()
 
     # Average past session duration (hours). Fallback 45 min when no history.
