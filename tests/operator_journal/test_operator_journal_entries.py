@@ -23,6 +23,12 @@ def test_operator_journal_entry_roundtrip_and_export_payload() -> None:
     assert entry["export_payload"]["schema"] == "operator_journal_entry.v1"
     assert entry["export_payload"]["raw_text"] == "Поставили новый баллон аргона AG-042"
 
+    # operator_event_id is a FK — the referenced row must exist first
+    client.post(
+        "/operator-events",
+        json={"event_id": "op_event_1", "event_type": "note", "raw_text": "test"},
+    )
+
     patched = client.patch(
         f"/operator-journal/{entry['journal_entry_id']}",
         json={"status": "submitted", "operator_event_id": "op_event_1"},

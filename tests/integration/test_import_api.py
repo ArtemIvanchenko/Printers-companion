@@ -1,3 +1,4 @@
+import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -7,7 +8,8 @@ from core.config.settings import get_settings
 
 
 def test_agent_import_callback_uses_buttons_without_terminal(tmp_path: Path) -> None:
-    folder = tmp_path / "incoming" / "button_logs"
+    # Use a UUID suffix so the path never collides with a previous run's DB record
+    folder = tmp_path / "incoming" / f"button_logs_{uuid.uuid4().hex[:8]}"
     folder.mkdir(parents=True)
     (folder / "job.log").write_text("2026-04-27 10:00:00 Старт печати\n", encoding="utf-8")
     client = TestClient(app)
