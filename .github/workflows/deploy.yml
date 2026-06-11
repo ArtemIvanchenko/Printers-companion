@@ -17,6 +17,6 @@ jobs:
       - name: Restart services
         shell: cmd
         run: |
-          powershell -ExecutionPolicy Bypass -Command "docker compose pull --quiet"
-          powershell -ExecutionPolicy Bypass -Command "docker compose up -d --build --remove-orphans"
-          powershell -ExecutionPolicy Bypass -Command "docker compose ps"
+          docker compose pull --quiet
+          docker compose up -d --build --remove-orphans
+          docker compose ps
