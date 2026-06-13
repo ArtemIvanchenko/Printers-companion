@@ -6,8 +6,8 @@ def test_m350_profile_loads_with_legacy_name_and_parsers() -> None:
     profile = get_profile()
     registry = build_registry()
 
-    assert profile.model_family == "M-350"
-    assert "M-450-M" in profile.legacy_names
+    assert profile.model_family == "M-450M"
+    assert "M-350" in profile.legacy_names
     assert SourceFileFamily.stateflow_log in registry.families()
     assert "SO1" in profile.signal_mappings
 

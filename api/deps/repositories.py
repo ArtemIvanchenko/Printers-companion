@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from core.config.settings import get_settings
 from storage.db.init_db import create_all
 from storage.db.session import get_db
+from storage.repositories.prints_repo import PrintsRepository
 from storage.repositories.runtime import RuntimeRepository
 
 
@@ -19,3 +20,8 @@ def ensure_local_schema() -> None:
 def get_runtime_repository(db: Session = Depends(get_db)) -> Generator[RuntimeRepository, None, None]:
     ensure_local_schema()
     yield RuntimeRepository(db)
+
+
+def get_prints_repository(db: Session = Depends(get_db)) -> Generator[PrintsRepository, None, None]:
+    ensure_local_schema()
+    yield PrintsRepository(db)
