@@ -89,6 +89,9 @@ def _trigger_rescan(path: str) -> None:
                         # from disk on demand (avoids ~96 MB/session in the DB).
                         {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
                     )
+                from domain.services.print_linking import auto_link_print_records
+
+                auto_link_print_records(db)
                 repo.commit()
             logger.info("upload rescan: complete, %d groups", len(groups))
         except Exception:
@@ -280,17 +283,77 @@ def _historical_rate() -> dict:
         return {"sessions_used": 0, "avg_duration_min": None}
 
 
-@router.post("/stl-estimate")
-async def stl_estimate(file: UploadFile) -> dict:
-    """Upload an STL file → get its volume (cm³) and a rough time reference.
+def _geometry_prediction(data: bytes, material: str, mode: str = "excel") -> dict:
+    """Slice the STL and predict time + cost from machine parameters.
 
-    NOTE: we do not yet store the printed volume of past sessions, so a true
-    volume→time rate (min/cm³) cannot be computed. Until that data exists, the
-    time reference is simply the historical *average session duration* — it is
-    NOT a function of this STL's volume. The response says so explicitly.
+    Returns the response "prediction" field; degrades to
+    {"available": False, "reason": ...} instead of failing the request.
+    """
+    from storage.db.session import SessionLocal
+    from storage.repositories.prints_repo import PrintsRepository
+
+    try:
+        with SessionLocal() as db:
+            repo = PrintsRepository(db)
+            params = repo.get_machine_params()
+            powder_cost = repo.last_powder_cost()
+    except Exception:
+        logger.exception("stl_estimate: machine params unavailable")
+        return {"available": False, "reason": "База параметров машины недоступна"}
+
+    from api.routes.machine_settings import params_configured
+
+    if not params_configured(params):
+        return {
+            "available": False,
+            "reason": "Заполните параметры машины (вкладка Архив → Параметры машины)",
+        }
+
+    try:
+        from analytics.prediction.cost_estimator import estimate_cost
+        from analytics.prediction.print_time import EstimationError, estimate_print_time
+        from analytics.prediction.stl_slicer import slice_stl
+
+        slices = slice_stl(data, float(params["layer_thickness_mm"]))
+        time_est = estimate_print_time(slices, params, material, stl_bytes=data, mode=mode)
+        cost_est = estimate_cost(slices, params, material, time_est, powder_cost_override=powder_cost)
+    except EstimationError as exc:
+        return {"available": False, "reason": str(exc)}
+    except Exception:
+        logger.exception("stl_estimate: geometry prediction failed")
+        return {"available": False, "reason": "Не удалось нарезать модель — проверьте файл"}
+
+    return {
+        "available": True,
+        "material": material,
+        "method": time_est.method,
+        "layer_count": slices.layer_count,
+        "height_mm": round(slices.height_mm, 2),
+        "scan_hours": round(time_est.scan_hours, 2),
+        "recoat_hours": round(time_est.recoat_hours, 2),
+        "print_hours": round(time_est.print_hours, 2),
+        "total_days": round(time_est.total_days, 2),
+        "time_breakdown": time_est.breakdown,
+        "cost_total_rub": cost_est.total_rub,
+        "cost_breakdown": cost_est.breakdown,
+        "powder_kg": cost_est.powder_kg,
+        "powder_cost_rub_per_kg": powder_cost,
+        "warnings": time_est.warnings + cost_est.warnings,
+    }
+
+
+@router.post("/stl-estimate")
+async def stl_estimate(file: UploadFile, material: str = "steel", method: str = "fast") -> dict:
+    """Upload an STL file → volume, historical reference and (when machine
+    parameters are configured) a geometry-based time + cost prediction.
+
+    method=fast     → операторская Excel-формула («рассчитать быстро»)
+    method=accurate → PySLM, реальные траектории лазера («рассчитать точно»)
     """
     if not (file.filename or "").lower().endswith(".stl"):
         raise HTTPException(422, "Ожидается файл .stl")
+    if method not in ("fast", "accurate"):
+        raise HTTPException(422, "method должен быть 'fast' или 'accurate'")
 
     data = await file.read()
     if len(data) > 200 * 1024 * 1024:
@@ -304,6 +367,8 @@ async def stl_estimate(file: UploadFile) -> dict:
     est_hours = round(avg_duration_min / 60, 1)
 
     warnings = _stl_warnings(file.filename or "", volume_cm3)
+    mode = "pyslm" if method == "accurate" else "excel"
+    prediction = _geometry_prediction(data, (material or "steel").strip().lower(), mode=mode)
 
     return {
         "filename": file.filename,
@@ -316,4 +381,5 @@ async def stl_estimate(file: UploadFile) -> dict:
             "avg_session_hours": est_hours,
             "sessions_used": hist["sessions_used"],
         },
+        "prediction": prediction,
     }
