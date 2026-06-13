@@ -67,6 +67,12 @@ from domain.models.insights import (
     PatternInsight,
 )
 
+from domain.models.prints import (
+    MachineParams,
+    PrintRecord,
+    PrintRecordFile,
+)
+
 __all__ = [
     # Sessions
     "BuildSession",
@@ -113,6 +119,10 @@ __all__ = [
     "Hypothesis",
     "CausalLink",
     "LLMRun",
+    # Prints archive
+    "PrintRecord",
+    "PrintRecordFile",
+    "MachineParams",
 ]
 
 

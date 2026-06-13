@@ -1,7 +1,7 @@
 version: m350-signals-0.3.0
 profile_id: laser-systems-m350
 machine:
-  model: M-350
+  model: M-450M
   serial_number: M003-005
   vendor: АО «Лазерные системы»
   passport: САЦН.681749.002ПС
