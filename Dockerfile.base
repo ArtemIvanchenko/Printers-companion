@@ -34,3 +34,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --progress-bar off --retries 20 --timeout 120 \
         "scikit-learn==1.4.2" "statsmodels==0.14.2"
+
+# 3D geometry + SLM build-time estimation + mesh repair
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 \
+        "trimesh==4.12.2" "shapely==2.1.2" "PythonSLM==0.6.1" "pymeshfix==0.18.1"
+
+# Change-point detection + gradient boosting (Фаза 3)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 \
+        "ruptures==1.1.10" "lightgbm==4.6.0"
