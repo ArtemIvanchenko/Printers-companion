@@ -3,3 +3,9 @@ duckdb==0.10.3
 scipy==1.13.1
 scikit-learn==1.4.2
 statsmodels==0.14.2
+trimesh==4.12.2
+shapely==2.1.2
+PythonSLM==0.6.1
+pymeshfix==0.18.1
+ruptures==1.1.10
+lightgbm==4.6.0

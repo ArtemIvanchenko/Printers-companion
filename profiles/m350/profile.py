@@ -30,8 +30,8 @@ class M350Profile(PrinterProfilePlugin):
         super().__init__(
             profile_id=PROFILE_ID,
             vendor=machine_meta.get("vendor", "АО «Лазерные системы»"),
-            model_family=machine_meta.get("model", "M-350"),
-            legacy_names=["M-450-M", "M-350"],
+            model_family=machine_meta.get("model", "M-450M"),
+            legacy_names=["M-350", "M-450-M"],
             version=PROFILE_VERSION,
             serial_number=machine_meta.get("serial_number", ""),
             passport=machine_meta.get("passport", ""),

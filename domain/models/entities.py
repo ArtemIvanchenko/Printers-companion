@@ -60,6 +60,12 @@ from domain.models.quality import (
     QualityOutcome,
 )
 
+from domain.models.prints import (
+    MachineParams,
+    PrintRecord,
+    PrintRecordFile,
+)
+
 from domain.models.insights import (
     CausalLink,
     ConfirmedKnowledge,
@@ -111,6 +117,9 @@ __all__ = [
     "Hypothesis",
     "CausalLink",
     "LLMRun",
+    "PrintRecord",
+    "PrintRecordFile",
+    "MachineParams",
 ]
 
 
