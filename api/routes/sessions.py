@@ -64,8 +64,13 @@ def ingest_session(payload: dict, repo: RuntimeRepository = Depends(get_runtime_
             {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
         )
         response_groups.append({"session_id": session_id, **overview})
+
+    from domain.services.print_linking import auto_link_print_records
+
+    links = auto_link_print_records(repo.db)
     repo.commit()
-    return {"root": result.root, "groups": response_groups, "skipped": result.skipped, "diagnostics": result.diagnostics}
+    return {"root": result.root, "groups": response_groups, "skipped": result.skipped,
+            "diagnostics": result.diagnostics, "print_record_links": links}
 
 
 @router.get("")
