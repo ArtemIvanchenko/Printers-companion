@@ -102,6 +102,9 @@ def process_due_import_jobs() -> int:
                 repo.save_notifications(result.notifications)
                 repo.save_sessions(result.sessions)
                 repo.save_reports(result.reports)
+                from domain.services.print_linking import auto_link_print_records
+
+                auto_link_print_records(db)
                 repo.commit()
                 processed += 1
                 logger.info("Successfully processed import job %s", job.import_job_id)

@@ -21,6 +21,18 @@ class ObjectStore:
         if not self.client.bucket_exists(bucket):
             self.client.make_bucket(bucket)
 
+    def ensure_all_buckets(self) -> None:
+        """Create every bucket the application uses (idempotent, best-effort)."""
+        for bucket in (
+            self.settings.minio_bucket_raw,
+            self.settings.minio_bucket_reports,
+            self.settings.minio_bucket_stls,
+            self.settings.minio_bucket_magics,
+            self.settings.minio_bucket_photos,
+            self.settings.minio_bucket_docs,
+        ):
+            self.ensure_bucket(bucket)
+
     def put_file(self, bucket: str, object_name: str, path: Path) -> str:
         self.ensure_bucket(bucket)
         self.client.fput_object(bucket, object_name, str(path))
@@ -48,6 +60,14 @@ class ObjectStore:
                 response.release_conn()
         except Exception:
             return None
+
+    def remove_object(self, bucket: str, object_name: str) -> bool:
+        """Delete an object; True on success, False if missing/unavailable."""
+        try:
+            self.client.remove_object(bucket, object_name)
+            return True
+        except Exception:
+            return False
 
     def is_available(self) -> bool:
         try:

@@ -20,10 +20,12 @@ from api.routes import (
     insights,
     knowledge,
     llm,
+    machine_settings,
     maintenance,
     operator_events,
     operator_journal,
     powder,
+    prints,
     profiles,
     quality,
     realtime,
@@ -104,8 +106,14 @@ async def _startup_import(raw_logs_path: str) -> None:
                 imported += 1
             # save_session_payload already commits each row; no extra commit needed
 
-        logger.info("startup_import: done — %d new session(s) imported, %d already existed",
-                    imported, len(groups) - imported)
+            from domain.services.print_linking import auto_link_print_records
+
+            links = auto_link_print_records(db)
+            if links:
+                db.commit()
+
+        logger.info("startup_import: done — %d new session(s) imported, %d already existed, %d linked to print records",
+                    imported, len(groups) - imported, len(links))
     except Exception:
         logger.exception("startup_import: failed (non-fatal)")
 
@@ -117,6 +125,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     report = run_preflight(settings, component="api")
     for warn in report.warnings:
         logging.getLogger("preflight").warning(warn)
+
+    # Best-effort: create all MinIO buckets so file uploads work immediately.
+    try:
+        from storage.object_store.minio_client import ObjectStore
+
+        store = ObjectStore()
+        if store.is_available():
+            store.ensure_all_buckets()
+        else:
+            logger.warning("startup: MinIO unavailable — buckets not ensured")
+    except Exception:
+        logger.exception("startup: ensure_all_buckets failed (non-fatal)")
 
     # Kick off background import of existing log files.
     task = asyncio.create_task(_startup_import(settings.raw_logs_container_path))
@@ -175,6 +195,8 @@ app.include_router(powder.router)
 app.include_router(analysis.router)
 app.include_router(updater.router)
 app.include_router(uploads.router)
+app.include_router(prints.router)
+app.include_router(machine_settings.router)
 
 
 @app.get("/alarm-demo", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)

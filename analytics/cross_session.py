@@ -1,9 +1,10 @@
 """Cross-session pattern recognition engine — pure Polars + SciPy.
 
-Three detectors:
+Four detectors:
   1. detect_signal_trends       — Theil-Sen slope across session means
   2. correlate_events_with_signals — before/after maintenance events
   3. detect_session_anomalies   — modified-z-score outlier sessions
+  4. detect_signal_shifts       — step changes (change-point detection, ruptures)
 
 All inputs are small (2–50 sessions with pre-aggregated stats),
 so plain Polars expressions are cleaner and faster than embedded SQL.
@@ -28,6 +29,8 @@ MIN_SESSIONS_FOR_ANOMALY = 3
 MIN_SESSIONS_EACH_SIDE   = 1
 SLOPE_THRESHOLD_PCT      = 5.0   # % of mean per session to call it a trend
 ZSCORE_THRESHOLD         = 2.5
+MIN_SESSIONS_FOR_SHIFT   = 6     # change-point detection needs history on both sides
+SHIFT_THRESHOLD_PCT      = 10.0  # % level jump to call it a shift
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -257,18 +260,86 @@ def detect_session_anomalies(
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
+# ── 4. Step-change detector (change-point detection) ────────────────────────
+
+def detect_signal_shifts(
+    sessions: list[dict[str, Any]],
+    shift_threshold_pct: float = SHIFT_THRESHOLD_PCT,
+) -> list[dict[str, Any]]:
+    """Detect abrupt level shifts in per-session signal means.
+
+    Complements the Theil-Sen trend detector: a slow drift is a *trend*,
+    a sudden jump (filter replaced, recoater knocked, lens contaminated)
+    is a *shift*. Uses the ruptures library (PELT, L2 cost).
+    """
+    if len(sessions) < MIN_SESSIONS_FOR_SHIFT:
+        return []
+    try:
+        import ruptures as rpt
+    except ImportError:
+        logger.warning("ruptures not installed — shift detection skipped")
+        return []
+
+    df = sessions_to_polars(sessions)
+    if df.is_empty():
+        return []
+
+    findings: list[dict[str, Any]] = []
+    session_ids = df["session_id"].to_list()
+
+    for sig in _signal_columns(df):
+        col = f"{sig}__mean"
+        if col not in df.columns:
+            continue
+        vals = df[col].drop_nulls().to_numpy()
+        if len(vals) < MIN_SESSIONS_FOR_SHIFT:
+            continue
+
+        # PELT with L2 cost: optimal segmentation, penalty scaled to variance
+        sigma2 = float(np.var(vals)) or 1e-12
+        algo = rpt.Pelt(model="l2", min_size=2).fit(vals.reshape(-1, 1))
+        breakpoints = algo.predict(pen=3.0 * sigma2)  # BIC-style penalty
+
+        prev = 0
+        for bp in breakpoints[:-1]:  # last breakpoint is len(vals)
+            before = float(np.mean(vals[prev:bp]))
+            after = float(np.mean(vals[bp:]))
+            prev = bp
+            if abs(before) < 1e-9:
+                continue
+            jump_pct = abs((after - before) / before * 100)
+            if jump_pct < shift_threshold_pct:
+                continue
+            findings.append({
+                "type":             "shift",
+                "signal":           sig,
+                "group":            _group_for(sessions, sig),
+                "direction":        "up" if after > before else "down",
+                "at_session":       session_ids[bp] if bp < len(session_ids) else session_ids[-1],
+                "session_index":    bp,
+                "level_before":     round(before, 6),
+                "level_after":      round(after, 6),
+                "jump_pct":         round(jump_pct, 1),
+                "n_sessions":       len(vals),
+                "confidence":       _confidence(len(vals), jump_pct),
+            })
+
+    return sorted(findings, key=lambda f: -f["confidence"])
+
+
 def run_cross_session_analysis(
     sessions: list[dict[str, Any]],
     operator_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Run all three detectors and return a combined result dict."""
+    """Run all four detectors and return a combined result dict."""
     events     = operator_events or []
     trends     = detect_signal_trends(sessions)
     before_aft = correlate_events_with_signals(sessions, events)
     anomalies  = detect_session_anomalies(sessions)
+    shifts     = detect_signal_shifts(sessions)
 
     n = len(sessions)
-    n_findings = len(trends) + len(before_aft) + len(anomalies)
+    n_findings = len(trends) + len(before_aft) + len(anomalies) + len(shifts)
 
     if n_findings == 0:
         summary = f"Анализ {n} сессий: отклонений не обнаружено."
@@ -281,6 +352,9 @@ def run_cross_session_analysis(
             parts.append(f"{len(before_aft)} корреляций с ТО")
         if anomalies:
             parts.append(f"{len(anomalies)} аномальных сессий")
+        if shifts:
+            sigs = ", ".join(f["signal"] for f in shifts[:2])
+            parts.append(f"ступенчатые сдвиги по {sigs}")
         summary = f"Анализ {n} сессий: {'; '.join(parts)}."
 
     return {
@@ -288,5 +362,6 @@ def run_cross_session_analysis(
         "trends":              trends,
         "before_after":        before_aft,
         "anomalies":           anomalies,
+        "shifts":              shifts,
         "summary":             summary,
     }

@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     minio_root_password: str = "change-me-minio"
     minio_bucket_raw: str = "raw-logs"
     minio_bucket_reports: str = "reports"
+    minio_bucket_stls: str = "stls"
+    minio_bucket_magics: str = "magics"
+    minio_bucket_photos: str = "photos"
+    minio_bucket_docs: str = "docs"
     minio_secure: bool = False
 
     raw_logs_host_path: str = r"C:\PrinterLogs"
@@ -43,6 +47,8 @@ class Settings(BaseSettings):
     file_stability_retry_seconds: int = 30
     file_stability_max_retries: int = 10  # Max 10 retries = ~5 minutes with 30s intervals
     import_confirmation_timeout_hours: int = 24
+    # Auto-link window: |session.start_ts − print_record date| ≤ this many hours
+    print_link_window_hours: float = 24.0
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
