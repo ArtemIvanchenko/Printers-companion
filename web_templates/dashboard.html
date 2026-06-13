@@ -93,6 +93,13 @@
         .subnav a { color: #a0aec0; padding: 6px 14px; text-decoration: none; border-radius: 6px; font-size: 13px; cursor: pointer; transition: all 0.2s; }
         .subnav a:hover { background: #2d3748; color: #e2e8f0; }
         .subnav a.active { background: #2d3748; color: #e2e8f0; font-weight: 600; }
+        .mp-label { color: #a0aec0; font-size: 12px; display: block; margin-bottom: 4px; }
+        .mp-input { width: 100%; box-sizing: border-box; background: #1e2433; border: 1px solid #2d3748; border-radius: 8px; padding: 8px 10px; color: #e2e8f0; font-size: 13px; }
+        .archive-row td { padding: 10px; border-bottom: 1px solid #1e2433; color: #a0aec0; }
+        .archive-row:hover td { background: #1a1f2e; }
+        .archive-files td { padding: 0 10px 14px; border-bottom: 1px solid #1e2433; }
+        .file-chip { display: inline-flex; align-items: center; gap: 6px; background: #1e2433; border: 1px solid #2d3748; border-radius: 6px; padding: 4px 10px; margin: 3px 4px 0 0; font-size: 12px; color: #a0aec0; }
+        .file-chip a { color: #60a5fa; text-decoration: none; cursor: pointer; }
 
         /* Gear / dropdown shared */
         .nav-more { position: relative; }
@@ -216,6 +223,7 @@
         <a href="#" onclick="showMainTab('home',event)" id="nav-home" class="active">🏠 Главная</a>
         <a href="#" onclick="showMainTab('analytics',event)" id="nav-analytics">📊 Аналитика</a>
         <a href="#" onclick="showMainTab('models',event)" id="nav-models">🧊 Модели</a>
+        <a href="#" onclick="showMainTab('archive',event)" id="nav-archive">📦 Архив</a>
         <a href="#" onclick="showMainTab('maintenance',event)" id="nav-maintenance">⚙️ Обслуживание</a>
     </nav>
 
@@ -653,9 +661,14 @@
         <div id="page-stl" style="display:none;">
             <div class="section" style="max-width:600px;margin:0 auto;">
                 <h2 style="margin-bottom:8px;">🧊 Загрузка STL и расчёт времени</h2>
-                <p style="color:#a0aec0;font-size:13px;margin-bottom:20px;">
-                    Загрузите STL — система рассчитает объём модели и оценит время печати на основе истории сессий.
+                <p style="color:#a0aec0;font-size:13px;margin-bottom:14px;">
+                    Загрузите STL — система нарежет модель на слои и рассчитает время печати
+                    и себестоимость по параметрам машины.
                 </p>
+                <div style="margin-bottom:14px;max-width:240px;">
+                    <label class="mp-label">Материал</label>
+                    <select id="stl-material" class="mp-input" style="padding:10px 12px;font-size:14px;"></select>
+                </div>
                 <div id="stl-drop"
                     ondrop="handleStlDrop(event)" ondragover="event.preventDefault()"
                     ondragenter="this.style.borderColor='#3b82f6'" ondragleave="this.style.borderColor='#4a5568'"
@@ -700,6 +713,163 @@
                 <div style="color:#4a5568;font-size:13px;">Нажмите «+ Добавить STL» или перейдите на вкладку STL</div>
             </div>
             <div id="models-grid" class="model-grid"></div>
+        </div>
+
+        <!-- Archive Page -->
+        <div id="page-archive" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                    <div>
+                        <h2 style="margin:0;">📦 Архив печатей</h2>
+                        <p style="color:#6b7280;font-size:13px;margin-top:6px;">Карточки печатей: STL, Magics, фото, документы и привязанные логи — всё в одном месте.</p>
+                    </div>
+                    <div style="display:flex;gap:10px;">
+                        <button onclick="toggleArchiveForm()"
+                            style="background:#10b981;color:white;border:none;border-radius:8px;padding:10px 20px;font-size:14px;cursor:pointer;">
+                            + Новая печать
+                        </button>
+                        <button onclick="toggleMachineParams()"
+                            style="background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:8px;padding:10px 14px;font-size:13px;cursor:pointer;">
+                            ⚙️ Параметры машины
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- New record form (hidden until + clicked) -->
+            <div class="section" id="archive-form" style="display:none;max-width:560px;margin:0 auto 20px;">
+                <h2 style="margin-bottom:16px;font-size:16px;">Новая карточка печати</h2>
+                <div style="display:flex;flex-direction:column;gap:12px;">
+                    <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Название изделия *</label>
+                        <input id="ar-name" type="text" placeholder="Кронштейн левый"
+                            style="width:100%;box-sizing:border-box;background:#1e2433;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;color:#e2e8f0;font-size:14px;">
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div>
+                            <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Материал</label>
+                            <select id="ar-material" class="mp-input" style="padding:10px 12px;font-size:14px;"></select>
+                        </div>
+                        <div>
+                            <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Дата печати</label>
+                            <input id="ar-printed-at" type="date" class="mp-input" style="padding:10px 12px;font-size:14px;"
+                                title="Если не указана — будет взята из названия или привязанных логов">
+                        </div>
+                    </div>
+                    <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Цена порошка (руб/кг) — фиксируется в карточке</label>
+                        <input id="ar-powder-cost" type="number" min="0" step="any" class="mp-input" style="padding:10px 12px;font-size:14px;"
+                            placeholder="по умолчанию — последняя использованная">
+                    </div>
+                    <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Примечание</label>
+                        <textarea id="ar-notes" rows="2" placeholder="Доп. информация..."
+                            style="width:100%;box-sizing:border-box;background:#1e2433;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;color:#e2e8f0;font-size:14px;resize:vertical;"></textarea>
+                    </div>
+                    <button onclick="createPrintRecord()"
+                        style="background:#10b981;color:white;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:600;cursor:pointer;">
+                        ✅ Создать карточку
+                    </button>
+                    <div id="ar-form-result" style="font-size:13px;text-align:center;"></div>
+                </div>
+            </div>
+
+            <!-- Machine params form (hidden until gear clicked) -->
+            <div class="section" id="machine-params-form" style="display:none;max-width:760px;margin:0 auto 20px;">
+                <h2 style="margin-bottom:6px;font-size:16px;">⚙️ Параметры машины M-450M</h2>
+                <p style="color:#6b7280;font-size:12px;margin-bottom:16px;">
+                    Используются для расчёта времени печати и себестоимости. Пустое поле — параметр не задан.
+                </p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;" id="mp-grid">
+                    <div><label class="mp-label">Скорость штриховки (мм/с)</label><input class="mp-input" id="mp-hatch_speed_mm_s" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Скорость контуров (мм/с)</label><input class="mp-input" id="mp-contour_speed_mm_s" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label" title="Если задан — скорость штриховки трактуется как реальная скорость лазера (мм/с) и включается PySLM-расчёт. Если пуст — как площадная скорость (мм²/с), формула из Excel.">Шаг штриховки (мм) ⓘ</label><input class="mp-input" id="mp-hatch_distance_mm" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Толщина слоя (мм)</label><input class="mp-input" id="mp-layer_thickness_mm" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Количество лазеров</label><input class="mp-input" id="mp-laser_count" type="number" min="1" step="1"></div>
+                    <div><label class="mp-label">Время нанесения слоя (мс)</label><input class="mp-input" id="mp-recoat_time_ms" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Порошок (руб/кг)</label><input class="mp-input" id="mp-powder_cost_rub_per_kg" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Газ (руб/атм)</label><input class="mp-input" id="mp-gas_cost_rub_per_atm" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Газ на печать (атм)</label><input class="mp-input" id="mp-gas_atm_per_print" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Фильтр (руб/шт)</label><input class="mp-input" id="mp-filter_cost_rub" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Ресурс фильтра (ч)</label><input class="mp-input" id="mp-filter_lifetime_hours" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Платформа (руб/шт)</label><input class="mp-input" id="mp-platform_cost_rub" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Площадь стола (см²)</label><input class="mp-input" id="mp-build_area_cm2" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label" title="Множитель к точному (PySLM) расчёту времени. Калибруется по истории прогноз/факт.">Поправка времени ⓘ</label><input class="mp-input" id="mp-time_correction_factor" type="number" min="0" step="any" placeholder="1.0"></div>
+                </div>
+                <div id="mp-calibration" style="margin-top:14px;font-size:12px;color:#a0aec0;"></div>
+                <h3 style="color:#a0aec0;font-size:13px;margin:18px 0 10px;">По материалам</h3>
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                        <thead><tr style="color:#6b7280;text-align:left;">
+                            <th style="padding:6px 10px;">Материал</th>
+                            <th style="padding:6px 10px;">Плотность (г/см³)</th>
+                            <th style="padding:6px 10px;">Скорость штриховки (мм/с)</th>
+                        </tr></thead>
+                        <tbody id="mp-materials"></tbody>
+                    </table>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+                    <input id="mp-new-material" type="text" class="mp-input" placeholder="новый материал (латиницей, напр. inconel)"
+                        style="max-width:280px;">
+                    <button onclick="addMpMaterial()"
+                        style="background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;">
+                        + Добавить материал
+                    </button>
+                </div>
+                <div style="display:flex;align-items:center;gap:14px;margin-top:16px;">
+                    <button onclick="saveMachineParams()"
+                        style="background:#3b82f6;color:white;border:none;border-radius:10px;padding:12px 28px;font-size:14px;font-weight:600;cursor:pointer;">
+                        💾 Сохранить
+                    </button>
+                    <span id="mp-status" style="font-size:13px;color:#6b7280;"></span>
+                </div>
+            </div>
+
+            <!-- Records list -->
+            <div id="archive-empty" style="display:none;text-align:center;padding:60px 20px;color:#4a5568;">
+                <div style="font-size:52px;margin-bottom:16px;">📦</div>
+                <div style="font-size:16px;font-weight:600;color:#6b7280;margin-bottom:8px;">Архив пуст</div>
+                <div style="color:#4a5568;font-size:13px;">Нажмите «+ Новая печать», чтобы создать первую карточку</div>
+            </div>
+            <div class="section" id="archive-list-wrap" style="display:none;">
+                <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;align-items:flex-end;">
+                    <div style="flex:1;min-width:180px;">
+                        <label class="mp-label">Поиск по названию</label>
+                        <input id="ar-search" type="text" class="mp-input" placeholder="кронштейн…"
+                            oninput="clearTimeout(window._arSearchT);window._arSearchT=setTimeout(()=>loadArchive(0),350)">
+                    </div>
+                    <div style="min-width:140px;">
+                        <label class="mp-label">Материал</label>
+                        <select id="ar-filter-material" class="mp-input" onchange="loadArchive(0)">
+                            <option value="">Все</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="mp-label">С даты</label>
+                        <input id="ar-date-from" type="date" class="mp-input" onchange="loadArchive(0)">
+                    </div>
+                    <div>
+                        <label class="mp-label">По дату</label>
+                        <input id="ar-date-to" type="date" class="mp-input" onchange="loadArchive(0)">
+                    </div>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                        <thead><tr style="color:#6b7280;text-align:left;border-bottom:1px solid #2d3748;">
+                            <th style="padding:10px;">Дата печати</th>
+                            <th style="padding:10px;">Название</th>
+                            <th style="padding:10px;">Материал</th>
+                            <th style="padding:10px;">Порошок (руб/кг)</th>
+                            <th style="padding:10px;">Статус</th>
+                            <th style="padding:10px;">Сессия логов</th>
+                            <th style="padding:10px;">Файлы</th>
+                            <th style="padding:10px;"></th>
+                        </tr></thead>
+                        <tbody id="archive-table-body"></tbody>
+                    </table>
+                </div>
+                <div id="archive-pagination" style="display:flex;justify-content:center;gap:10px;margin-top:14px;"></div>
+            </div>
         </div>
 
         <!-- 3D Viewer Modal -->
@@ -1201,11 +1371,13 @@
         }
 
         // =========================================================
-        // NAVIGATION — 5-tab structure
+        // NAVIGATION — Главная / Аналитика / Модели / Архив / Обслуживание
         // =========================================================
-        const CHART_PAGES = ['overview','telemetry','timeline','quality','sessions','consumption','patterns'];
-        const OTHER_PAGES  = ['chat','upload','newprint','powder','maintenance','logs'];
-        let _activeChartPage = 'overview';
+        // Subnav item → page-... element id
+        const ANALYTICS_PAGES = { telemetry: 'telemetry', history: 'sessions', quality: 'quality', patterns: 'patterns' };
+        const MAINT_PAGES     = { powder: 'powder', maint: 'maintenance', journal: 'logs' };
+        let _activeAnalyticsPage = 'telemetry';
+        let _activeMaintPage     = 'powder';
 
         function _hideAllPages() {
             document.querySelectorAll('[id^="page-"]').forEach(el => el.style.display = 'none');
@@ -1213,80 +1385,126 @@
 
         function _setMainActive(tab) {
             document.querySelectorAll('#main-nav > a').forEach(a => a.classList.remove('active'));
-            document.getElementById('nav-more-btn')?.classList.remove('active');
-            const el = document.getElementById('nav-' + tab);
-            if (el) el.classList.add('active');
-            else if (tab === 'more') document.getElementById('nav-more-btn')?.classList.add('active');
+            document.getElementById('nav-' + tab)?.classList.add('active');
+        }
+
+        function _showSubnav(tab) {
+            document.getElementById('analytics-subnav').style.display   = tab === 'analytics'   ? 'flex' : 'none';
+            document.getElementById('maintenance-subnav').style.display = tab === 'maintenance' ? 'flex' : 'none';
         }
 
         function showMainTab(tab, evt) {
             if (evt) evt.preventDefault();
-            document.getElementById('nav-more')?.classList.remove('open');
+            document.getElementById('gear-menu')?.classList.remove('open');
             _hideAllPages();
-            document.getElementById('charts-subnav').style.display = tab === 'charts' ? 'flex' : 'none';
+            _showSubnav(tab);
             _setMainActive(tab);
 
-            if (tab === 'charts') {
-                document.getElementById('page-' + _activeChartPage).style.display = 'block';
-                _onChartPageShown(_activeChartPage);
-            } else if (tab === 'stl') {
-                document.getElementById('page-stl').style.display = 'block';
+            if (tab === 'home') {
+                document.getElementById('page-home').style.display = 'block';
+            } else if (tab === 'analytics') {
+                showAnalyticsPage(_activeAnalyticsPage, null);
+            } else if (tab === 'maintenance') {
+                showMaintenancePage(_activeMaintPage, null);
             } else if (tab === 'models') {
                 document.getElementById('page-models').style.display = 'block';
                 loadModelHistory();
+            } else if (tab === 'archive') {
+                document.getElementById('page-archive').style.display = 'block';
+                loadArchive(); loadMachineParams(); loadPrintDefaults();
+            } else if (tab === 'stl') {
+                document.getElementById('page-stl').style.display = 'block';
+                loadStlMaterials();
             } else if (tab === 'update') {
                 document.getElementById('page-update').style.display = 'block';
                 checkWatchtower(); loadVersionInfo(); loadImportStatus();
             }
         }
 
-        function showChartPage(page, evt) {
+        function _showSubPage(subnavId, pageId, subId) {
+            _hideAllPages();
+            document.getElementById('page-' + pageId).style.display = 'block';
+            document.querySelectorAll('#' + subnavId + ' a').forEach(a => a.classList.remove('active'));
+            document.getElementById('subnav-' + subId)?.classList.add('active');
+        }
+
+        function showAnalyticsPage(page, evt) {
             if (evt) evt.preventDefault();
-            _hideAllPages();
-            _activeChartPage = page;
-            document.getElementById('page-' + page).style.display = 'block';
-            document.querySelectorAll('#charts-subnav a').forEach(a => a.classList.remove('active'));
-            document.getElementById('subnav-' + page)?.classList.add('active');
-            _onChartPageShown(page);
+            _activeAnalyticsPage = page;
+            _showSubnav('analytics');
+            _setMainActive('analytics');
+            _showSubPage('analytics-subnav', ANALYTICS_PAGES[page] || page, page);
+            if (page === 'patterns') loadPatterns();
         }
 
-        function _onChartPageShown(page) {
-            if (page === 'powder')      loadPowder();
-            if (page === 'maintenance') loadMaintenance();
-            if (page === 'patterns')    loadPatterns();
+        function showMaintenancePage(page, evt) {
+            if (evt) evt.preventDefault();
+            _activeMaintPage = page;
+            _showSubnav('maintenance');
+            _setMainActive('maintenance');
+            _showSubPage('maintenance-subnav', MAINT_PAGES[page] || page, page);
+            if (page === 'powder')  loadPowder();
+            if (page === 'maint')   loadMaintenance();
+            if (page === 'journal') loadLogs();
         }
 
-        function showMorePage(page, evt) {
-            if (evt) { evt.preventDefault(); evt.stopPropagation(); }
-            _hideAllPages();
-            document.getElementById('charts-subnav').style.display = 'none';
-            document.getElementById('nav-more')?.classList.remove('open');
-            _setMainActive('more');
-            const el = document.getElementById('page-' + page);
-            if (el) el.style.display = 'block';
-            if (page === 'logs')        loadLogs();
-            if (page === 'powder')      loadPowder();
-            if (page === 'maintenance') loadMaintenance();
-        }
-
-        function toggleMore(evt) {
+        // ── Gear menu (⚙ — Загрузка логов / Логи системы / Обновление) ──
+        function toggleGear(evt) {
             evt.preventDefault();
             evt.stopPropagation();
-            document.getElementById('nav-more').classList.toggle('open');
+            document.getElementById('gear-menu').classList.toggle('open');
+        }
+
+        function showGearPage(page, evt) {
+            if (evt) { evt.preventDefault(); evt.stopPropagation(); }
+            document.getElementById('gear-menu')?.classList.remove('open');
+            _hideAllPages();
+            _showSubnav(null);
+            _setMainActive(null);
+            document.getElementById('page-' + page).style.display = 'block';
+            if (page === 'logs')   loadLogs();
+            if (page === 'update') { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
         }
 
         document.addEventListener('click', function(e) {
-            const nm = document.getElementById('nav-more');
-            if (nm && !nm.contains(e.target)) nm.classList.remove('open');
+            const gm = document.getElementById('gear-menu');
+            if (gm && !gm.contains(e.target)) gm.classList.remove('open');
         });
+
+        // ── Misc top-bar handlers ──
+        function openNewPrint() {
+            _hideAllPages();
+            _showSubnav(null);
+            _setMainActive(null);
+            document.getElementById('page-newprint').style.display = 'block';
+        }
+
+        function openChangelog() {
+            // Single source of truth: the changelog block on the update page
+            const entries = document.querySelector('#page-update .changelog-entry');
+            document.getElementById('changelog-content').innerHTML =
+                entries ? entries.parentElement.innerHTML : 'Нет данных';
+            document.getElementById('changelog-modal').classList.add('open');
+        }
+
+        function closeChangelog() {
+            document.getElementById('changelog-modal').classList.remove('open');
+        }
 
         // Legacy compat — some inline onclick still call showPage()
         function showPage(page) {
-            if (CHART_PAGES.includes(page)) { showMainTab('charts',null); showChartPage(page,null); }
-            else if (OTHER_PAGES.includes(page)) showMorePage(page,null);
-            else if (page === 'stl' || page === 'estimate') showMainTab('stl',null);
-            else if (page === 'models') showMainTab('models',null);
-            else if (page === 'update') showMainTab('update',null);
+            if (page in ANALYTICS_PAGES)            showAnalyticsPage(page, null);
+            else if (page in MAINT_PAGES)           showMaintenancePage(page, null);
+            else if (page === 'maintenance')        showMaintenancePage('maint', null);
+            else if (page === 'logs')               showGearPage('logs', null);
+            else if (page === 'upload')             showGearPage('upload', null);
+            else if (page === 'update')             showMainTab('update', null);
+            else if (page === 'newprint')           openNewPrint();
+            else if (page === 'stl' || page === 'estimate') showMainTab('stl', null);
+            else {
+                const el = document.getElementById('page-' + page);
+                if (el) { _hideAllPages(); el.style.display = 'block'; }
+            }
         }
 
         // =========================================================
@@ -1492,24 +1710,109 @@
             const f = e.dataTransfer.files[0];
             if (f) uploadStlAndSave(f);
         }
+        let _pendingStlFile = null;
+
         async function uploadStlAndSave(file) {
             if (!file) return;
-            // Read into memory for 3D preview, then upload
+            // Read into memory for 3D preview
             const buf = await file.arrayBuffer();
             _stlFileBuffers[file.name] = buf;
-            await uploadStl(file, buf);
+            _pendingStlFile = file;
+            // Файл выбран — оператор выбирает метод расчёта
+            document.getElementById('stl-result').innerHTML = `
+                <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;">
+                    <div style="font-size:13px;color:#e2e8f0;margin-bottom:4px;">🧊 ${file.name}</div>
+                    <div style="font-size:12px;color:#6b7280;margin-bottom:16px;">${(file.size / 1024 / 1024).toFixed(1)} МБ · выберите метод расчёта</div>
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                        <button onclick="runStlEstimate('fast')"
+                            style="flex:1;min-width:200px;background:#3b82f6;color:white;border:none;border-radius:10px;padding:14px;font-size:14px;font-weight:600;cursor:pointer;">
+                            ⚡ Рассчитать быстро
+                            <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">формула предприятия (Excel)</div>
+                        </button>
+                        <button onclick="runStlEstimate('accurate')"
+                            style="flex:1;min-width:200px;background:#10b981;color:white;border:none;border-radius:10px;padding:14px;font-size:14px;font-weight:600;cursor:pointer;">
+                            🎯 Рассчитать точно
+                            <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">PySLM — реальные траектории лазера</div>
+                        </button>
+                    </div>
+                </div>`;
         }
-        async function uploadStl(file, _buf) {
+
+        async function runStlEstimate(method) {
+            if (!_pendingStlFile) return;
+            await uploadStl(_pendingStlFile, null, method);
+        }
+        function _renderPrediction(p) {
+            if (!p) return '';
+            if (!p.available) {
+                return `<div style="background:#1a2332;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;font-size:12px;color:#a0aec0;margin-top:12px;">
+                    ℹ️ Расчёт по геометрии недоступен: ${p.reason}</div>`;
+            }
+            const cost = Object.entries(p.cost_breakdown || {})
+                .map(([k, v]) => `<span style="margin-right:14px;">${k}: <b style="color:#e2e8f0;">${v.toLocaleString('ru')} ₽</b></span>`)
+                .join('');
+            const warns = (p.warnings || []).map(w =>
+                `<div style="color:#fcd34d;font-size:11px;margin-top:4px;">⚠️ ${w}</div>`).join('');
+            const methodLabel = {
+                pyslm: 'PySLM — реальные траектории лазера',
+                physics: 'физическая формула (PySLM недоступен)',
+                excel: 'формула предприятия (Excel)',
+            }[p.method] || p.method;
+            return `
+                <div style="background:#0f2438;border:1px solid #1a5276;border-radius:12px;padding:16px;margin-top:14px;">
+                    <div style="color:#60a5fa;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">
+                        Расчёт по геометрии · ${p.material} · ${methodLabel}</div>
+                    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:10px;">
+                        <div>
+                            <div style="font-size:26px;font-weight:700;color:#10b981;">${p.print_hours} <span style="font-size:13px;">ч</span></div>
+                            <div style="color:#6b7280;font-size:12px;">время печати (${p.total_days} сут)</div>
+                        </div>
+                        <div>
+                            <div style="font-size:26px;font-weight:700;color:#f59e0b;">${p.cost_total_rub.toLocaleString('ru')} <span style="font-size:13px;">₽</span></div>
+                            <div style="color:#6b7280;font-size:12px;">себестоимость</div>
+                        </div>
+                        <div>
+                            <div style="font-size:26px;font-weight:700;color:#8b5cf6;">${p.layer_count}</div>
+                            <div style="color:#6b7280;font-size:12px;">слоёв (${p.height_mm} мм)</div>
+                        </div>
+                        ${p.powder_kg != null ? `<div>
+                            <div style="font-size:26px;font-weight:700;color:#06b6d4;">${p.powder_kg} <span style="font-size:13px;">кг</span></div>
+                            <div style="color:#6b7280;font-size:12px;">порошок (${p.powder_cost_rub_per_kg ?? '—'} ₽/кг)</div>
+                        </div>` : ''}
+                    </div>
+                    <div style="color:#6b7280;font-size:12px;">
+                        сканирование ${p.scan_hours} ч · нанесение слоёв ${p.recoat_hours} ч</div>
+                    ${cost ? `<div style="color:#6b7280;font-size:12px;margin-top:6px;">${cost}</div>` : ''}
+                    ${warns}
+                </div>`;
+        }
+
+        async function loadStlMaterials() {
+            const sel = document.getElementById('stl-material');
+            if (!sel || sel.options.length) return;
+            try {
+                const d = await fetch('/prints/defaults').then(r => r.json());
+                sel.innerHTML = d.materials.map(m => `<option value="${m}">${_materialRu(m)}</option>`).join('');
+            } catch (e) {
+                sel.innerHTML = '<option value="steel">Сталь</option>';
+            }
+        }
+
+        async function uploadStl(file, _buf, method = 'fast') {
             const res = document.getElementById('stl-result');
             if (!file) return;
-            res.innerHTML = '<div style="color:#60a5fa;">Анализируем модель…</div>';
+            res.innerHTML = method === 'accurate'
+                ? '<div style="color:#60a5fa;">Генерируем траектории лазера (PySLM)… до ~30 сек для крупных моделей</div>'
+                : '<div style="color:#60a5fa;">Анализируем модель…</div>';
             const fd = new FormData();
             fd.append('file', file);
+            const material = document.getElementById('stl-material')?.value || 'steel';
             try {
-                const r = await fetch('/upload/stl-estimate', { method: 'POST', body: fd });
+                const r = await fetch(`/upload/stl-estimate?material=${encodeURIComponent(material)}&method=${method}`, { method: 'POST', body: fd });
                 const d = await r.json();
                 const vol = d.volume_cm3;
                 const est = d.estimate;
+                const pred = d.prediction;
                 const warns = (d.warnings || []).map(w =>
                     `<div style="background:#451a03;border:1px solid #92400e;border-radius:6px;padding:8px 10px;font-size:12px;color:#fcd34d;margin-top:8px;">⚠️ ${w}</div>`
                 ).join('');
@@ -1527,14 +1830,22 @@
                             </div>
                         </div>
                         <div style="color:#a0aec0;font-size:12px;">${est.note} · ${est.sessions_used} сессий</div>
+                        ${_renderPrediction(pred)}
                         ${warns}
-                        <button onclick="showMainTab('models',null)"
-                            style="margin-top:14px;background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
-                            📦 Открыть в истории моделей
-                        </button>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
+                            <button onclick="runStlEstimate('${method === 'fast' ? 'accurate' : 'fast'}')"
+                                style="background:${method === 'fast' ? '#10b981' : '#3b82f6'};color:white;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
+                                ${method === 'fast' ? '🎯 Пересчитать точно (PySLM)' : '⚡ Пересчитать быстро (Excel)'}
+                            </button>
+                            <button onclick="showMainTab('models',null)"
+                                style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
+                                📦 Открыть в истории моделей
+                            </button>
+                        </div>
                     </div>`;
-                // Save to model history
-                _saveModelEntry(file.name, vol, est.avg_session_hours);
+                // Save to model history (prefer geometry-based hours)
+                const histHours = (pred && pred.available) ? pred.print_hours : est.avg_session_hours;
+                _saveModelEntry(file.name, vol, histHours);
             } catch(e) {
                 res.innerHTML = `<div style="color:#ef4444;">Ошибка загрузки: ${e.message || e}<br><small style="color:#6b7280;">Убедитесь что API запущен (docker compose up)</small></div>`;
             }
@@ -2081,6 +2392,396 @@
                 renderer.render(scene, camera);
             }
             animate();
+        }
+
+        // =========================================================
+        // ARCHIVE — print records + machine params
+        // =========================================================
+        const _MATERIAL_RU = { steel: 'Сталь', aluminum: 'Алюминий', titanium: 'Титан', other: 'Другое' };
+        const _STATUS_RU   = { draft: '📝 Черновик', active: '🔥 Печатается', completed: '✅ Завершена' };
+        const _FILE_ICON   = { stl: '🧊', stl_supports: '🏗', magics: '🧩', photo: '📷', doc: '📄' };
+        const _ARCHIVE_PAGE_SIZE = 20;
+        let _archiveSkip = 0;
+
+        function _materialRu(m) { return _MATERIAL_RU[m] || m; }
+
+        function toggleArchiveForm() {
+            const el = document.getElementById('archive-form');
+            const opening = el.style.display === 'none';
+            el.style.display = opening ? 'block' : 'none';
+            if (opening) loadPrintDefaults();
+        }
+
+        function toggleMachineParams() {
+            const el = document.getElementById('machine-params-form');
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        }
+
+        async function loadPrintDefaults() {
+            try {
+                const d = await fetch('/prints/defaults').then(r => r.json());
+                const sel = document.getElementById('ar-material');
+                const current = sel.value;
+                sel.innerHTML = d.materials.map(m => `<option value="${m}">${_materialRu(m)}</option>`).join('');
+                if (current && d.materials.includes(current)) sel.value = current;
+                // Filter select shares the material list
+                const filt = document.getElementById('ar-filter-material');
+                const filtCurrent = filt.value;
+                filt.innerHTML = '<option value="">Все</option>' +
+                    d.materials.map(m => `<option value="${m}">${_materialRu(m)}</option>`).join('');
+                filt.value = filtCurrent;
+                const cost = document.getElementById('ar-powder-cost');
+                if (!cost.value && d.powder_cost_rub_per_kg != null) cost.value = d.powder_cost_rub_per_kg;
+            } catch (e) { /* форма работает и без дефолтов */ }
+        }
+
+        async function createPrintRecord() {
+            const name = document.getElementById('ar-name').value.trim();
+            const result = document.getElementById('ar-form-result');
+            if (!name) { result.innerHTML = '<span style="color:#ef4444;">Введите название изделия</span>'; return; }
+            const printedAt = document.getElementById('ar-printed-at').value;
+            const powderCost = document.getElementById('ar-powder-cost').value;
+            try {
+                const r = await fetch('/prints', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name,
+                        material: document.getElementById('ar-material').value,
+                        notes: document.getElementById('ar-notes').value.trim(),
+                        printed_at: printedAt || null,
+                        powder_cost_rub_per_kg: powderCost === '' ? null : Number(powderCost),
+                    }),
+                });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                result.innerHTML = '<span style="color:#10b981;">Карточка создана</span>';
+                document.getElementById('ar-name').value = '';
+                document.getElementById('ar-notes').value = '';
+                document.getElementById('ar-printed-at').value = '';
+                loadArchive();
+            } catch (e) {
+                result.innerHTML = `<span style="color:#ef4444;">Ошибка: ${e.message}</span>`;
+            }
+        }
+
+        async function estimateRecord(recordId) {
+            try {
+                const r = await fetch(`/prints/${recordId}/estimate`, { method: 'POST' });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || r.status);
+                loadArchive(_archiveSkip);
+            } catch (e) { alert('Ошибка расчёта: ' + e.message); }
+        }
+
+        async function deletePrintRecord(recordId, name) {
+            if (!confirm(`Удалить карточку «${name}» со всеми файлами? Это действие необратимо.`)) return;
+            try {
+                const r = await fetch(`/prints/${recordId}`, { method: 'DELETE' });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                loadArchive(_archiveSkip);
+            } catch (e) { alert('Ошибка удаления: ' + e.message); }
+        }
+
+        async function deleteArchiveFile(recordId, fileId, name) {
+            if (!confirm(`Удалить файл «${name}»?`)) return;
+            try {
+                const r = await fetch(`/prints/${recordId}/files/${fileId}`, { method: 'DELETE' });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                loadArchive(_archiveSkip);
+            } catch (e) { alert('Ошибка удаления файла: ' + e.message); }
+        }
+
+        function _archiveFilters() {
+            const q  = document.getElementById('ar-search').value.trim();
+            const m  = document.getElementById('ar-filter-material').value;
+            const df = document.getElementById('ar-date-from').value;
+            const dt = document.getElementById('ar-date-to').value;
+            let qs = '';
+            if (q)  qs += `&q=${encodeURIComponent(q)}`;
+            if (m)  qs += `&material=${encodeURIComponent(m)}`;
+            if (df) qs += `&date_from=${df}`;
+            if (dt) qs += `&date_to=${dt}T23:59:59`;
+            return qs;
+        }
+
+        async function loadArchive(skip = 0) {
+            _archiveSkip = skip;
+            const body  = document.getElementById('archive-table-body');
+            const empty = document.getElementById('archive-empty');
+            const wrap  = document.getElementById('archive-list-wrap');
+            const filters = _archiveFilters();
+            try {
+                const d = await fetch(`/prints?skip=${skip}&limit=${_ARCHIVE_PAGE_SIZE}${filters}`).then(r => r.json());
+                if (!d.total && !filters) {
+                    empty.style.display = 'block'; wrap.style.display = 'none';
+                    return;
+                }
+                empty.style.display = 'none'; wrap.style.display = 'block';
+                body.innerHTML = d.total === 0
+                    ? '<tr><td colspan="8" style="color:#6b7280;padding:14px;">Ничего не найдено</td></tr>'
+                    : d.items.map(rec => {
+                    const rawDate = rec.printed_at || rec.created_at;
+                    const date = rawDate ? new Date(rawDate).toLocaleDateString('ru') : '—';
+                    const dateHint = rec.printed_at ? '' : ' <span style="color:#4a5568;" title="Дата создания карточки — дата печати неизвестна">≈</span>';
+                    const pred = (rec.metadata_json || {}).prediction;
+                    const predLine = pred
+                        ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;" title="быстрый / точный прогноз">📐 ${pred.fast.print_hours} ч / ${pred.accurate.print_hours} ч</div>` : '';
+                    const session = rec.session_id
+                        ? `<span style="color:#10b981;" title="${rec.session_id}">✓ привязана</span>${predLine}`
+                        : `<span id="session-cell-${rec.record_id}"><a onclick="showSessionCandidates('${rec.record_id}')"
+                            style="color:#60a5fa;cursor:pointer;font-size:12px;" title="Найти сессии логов рядом с датой печати">🔗 найти сессию</a></span>${predLine}`;
+                    const powder = rec.powder_cost_rub_per_kg != null ? rec.powder_cost_rub_per_kg : '—';
+                    const chips = rec.files.map(f => {
+                        const dl = `/prints/${rec.record_id}/files/${f.file_id}/download`;
+                        const safeName = f.file_name.replace(/'/g, '&#39;');
+                        const preview = (f.file_type === 'stl' || f.file_type === 'stl_supports')
+                            ? ` <a onclick="previewArchiveStl('${dl}','${safeName}')" title="3D-просмотр">👁</a>` : '';
+                        return `<span class="file-chip">${_FILE_ICON[f.file_type] || '📎'} <a href="${dl}" title="Скачать">${f.file_name}</a>${preview} <a onclick="deleteArchiveFile('${rec.record_id}','${f.file_id}','${safeName}')" title="Удалить файл" style="color:#6b7280;">✕</a></span>`;
+                    }).join('');
+                    const upload = `<label class="file-chip" style="cursor:pointer;" title="Прикрепить файл (STL, Magics, фото, документ)">＋
+                        <input type="file" style="display:none" onchange="uploadArchiveFile('${rec.record_id}', this.files[0])"></label>`;
+                    const logsUpload = rec.session_id ? '' : `<label class="file-chip" style="cursor:pointer;" title="Загрузить логи печати — сессия привяжется автоматически">📋 логи
+                        <input type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadArchiveLogs('${rec.record_id}', this.files)"></label>`;
+                    const safeRecName = rec.name.replace(/'/g, '&#39;');
+                    return `<tr class="archive-row">
+                        <td>${date}${dateHint}</td>
+                        <td style="color:#e2e8f0;font-weight:600;">${rec.name}${rec.notes ? ` <span title="${rec.notes}" style="cursor:help;color:#4a5568;">💬</span>` : ''}</td>
+                        <td>${_materialRu(rec.material)}</td>
+                        <td>${powder}</td>
+                        <td>${_STATUS_RU[rec.status] || rec.status}</td>
+                        <td>${session}</td>
+                        <td>${chips}${upload}${logsUpload}</td>
+                        <td style="white-space:nowrap;">${rec.files.some(f => f.file_type === 'stl')
+                            ? `<a onclick="estimateRecord('${rec.record_id}')" title="Рассчитать и сохранить прогноз времени/стоимости" style="cursor:pointer;margin-right:8px;">📐</a>` : ''}<a onclick="deletePrintRecord('${rec.record_id}','${safeRecName}')" title="Удалить карточку" style="cursor:pointer;color:#6b7280;">🗑</a></td>
+                    </tr>`;
+                }).join('');
+
+                const pager = document.getElementById('archive-pagination');
+                const pages = Math.ceil(d.total / _ARCHIVE_PAGE_SIZE);
+                pager.innerHTML = pages <= 1 ? '' : Array.from({ length: pages }, (_, i) => {
+                    const active = i * _ARCHIVE_PAGE_SIZE === skip;
+                    return `<a onclick="loadArchive(${i * _ARCHIVE_PAGE_SIZE})"
+                        style="cursor:pointer;padding:4px 10px;border-radius:6px;font-size:13px;
+                               ${active ? 'background:#2d3748;color:#e2e8f0;' : 'color:#60a5fa;'}">${i + 1}</a>`;
+                }).join('');
+            } catch (e) {
+                body.innerHTML = `<tr><td colspan="8" style="color:#ef4444;padding:14px;">Ошибка загрузки архива: ${e.message}</td></tr>`;
+                empty.style.display = 'none'; wrap.style.display = 'block';
+            }
+        }
+
+        function _guessFileType(name) {
+            const n = name.toLowerCase();
+            if (n.endsWith('.stl'))    return n.startsWith('s_') ? 'stl_supports' : 'stl';
+            if (n.endsWith('.magics') || n.endsWith('.mgx')) return 'magics';
+            if (/\.(png|jpe?g|gif|webp|heic)$/.test(n))      return 'photo';
+            return 'doc';
+        }
+
+        async function uploadArchiveLogs(recordId, fileList) {
+            if (!fileList || !fileList.length) return;
+            const fd = new FormData();
+            for (const f of fileList) fd.append('files', f);
+            try {
+                const r = await fetch(`/prints/${recordId}/import-logs`, { method: 'POST', body: fd });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || r.status);
+                const skipped = (d.skipped || []).length;
+                alert(`Загружено файлов: ${d.saved.length}${skipped ? `, пропущено: ${skipped}` : ''}.\n${d.note}`);
+                _pollRecordLink(recordId);
+            } catch (e) {
+                alert('Ошибка загрузки логов: ' + e.message);
+            }
+        }
+
+        // Привязка идёт в фоне — опрашиваем карточку до появления session_id (≤60 с)
+        async function _pollRecordLink(recordId, attempt = 0) {
+            if (attempt >= 12) { loadArchive(_archiveSkip); return; }
+            await new Promise(res => setTimeout(res, 5000));
+            try {
+                const rec = await fetch(`/prints/${recordId}`).then(r => r.json());
+                if (rec.session_id) { loadArchive(_archiveSkip); return; }
+            } catch (e) { /* продолжаем опрос */ }
+            _pollRecordLink(recordId, attempt + 1);
+        }
+
+        async function showSessionCandidates(recordId) {
+            const cell = document.getElementById(`session-cell-${recordId}`);
+            cell.innerHTML = '<span style="color:#6b7280;font-size:12px;">поиск…</span>';
+            try {
+                const d = await fetch(`/prints/${recordId}/session-candidates`).then(r => r.json());
+                if (!d.candidates.length) {
+                    cell.innerHTML = '<span style="color:#6b7280;font-size:12px;" title="Нет непривязанных сессий рядом с датой печати — загрузите логи">нет кандидатов</span>';
+                    return;
+                }
+                const opts = d.candidates.map(c => {
+                    const start = new Date(c.start_ts).toLocaleString('ru');
+                    const dur = c.duration_min != null ? ` · ${(c.duration_min / 60).toFixed(1)} ч` : '';
+                    return `<option value="${c.session_id}">${start}${dur}</option>`;
+                }).join('');
+                cell.innerHTML = `<select id="cand-${recordId}" class="mp-input" style="max-width:200px;display:inline-block;font-size:12px;padding:4px 6px;">${opts}</select>
+                    <a onclick="confirmSessionLink('${recordId}')" style="color:#10b981;cursor:pointer;margin-left:6px;" title="Привязать">✓</a>`;
+            } catch (e) {
+                cell.innerHTML = '<span style="color:#ef4444;font-size:12px;">ошибка</span>';
+            }
+        }
+
+        async function confirmSessionLink(recordId) {
+            const sessionId = document.getElementById(`cand-${recordId}`).value;
+            try {
+                const r = await fetch(`/prints/${recordId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId }),
+                });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                loadArchive(_archiveSkip);
+            } catch (e) { alert('Ошибка привязки: ' + e.message); }
+        }
+
+        async function uploadArchiveFile(recordId, file) {
+            if (!file) return;
+            const fd = new FormData();
+            fd.append('file', file);
+            fd.append('file_type', _guessFileType(file.name));
+            try {
+                const r = await fetch(`/prints/${recordId}/files`, { method: 'POST', body: fd });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                loadArchive(_archiveSkip);
+            } catch (e) {
+                alert('Ошибка загрузки файла: ' + e.message);
+            }
+        }
+
+        async function previewArchiveStl(url, name) {
+            document.getElementById('viewer-title').textContent = name;
+            document.getElementById('viewer-meta').innerHTML = '';
+            document.getElementById('viewer-overlay').classList.add('open');
+            const wrap = document.getElementById('viewer-canvas-wrap');
+            wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280;">Загрузка…</div>';
+            try {
+                const buf = await fetch(url).then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); });
+                wrap.innerHTML = '<canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>';
+                _initThreeViewer(buf);
+            } catch (e) {
+                wrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;">Не удалось загрузить файл: ${e.message}</div>`;
+            }
+        }
+
+        // ── Machine params ──
+        const _MP_FIELDS = ['hatch_speed_mm_s','contour_speed_mm_s','hatch_distance_mm','layer_thickness_mm','laser_count',
+                            'recoat_time_ms','powder_cost_rub_per_kg','gas_cost_rub_per_atm','gas_atm_per_print',
+                            'filter_cost_rub','filter_lifetime_hours','platform_cost_rub','build_area_cm2',
+                            'time_correction_factor'];
+        const _MP_BASE_MATERIALS = ['steel','aluminum','titanium'];
+
+        function _renderMpMaterials(densities, hatches) {
+            const names = [...new Set([..._MP_BASE_MATERIALS, ...Object.keys(densities), ...Object.keys(hatches)])];
+            document.getElementById('mp-materials').innerHTML = names.map(m => `
+                <tr data-material="${m}">
+                    <td style="padding:6px 10px;color:#e2e8f0;">${_materialRu(m)}</td>
+                    <td style="padding:4px 10px;"><input class="mp-input mp-dens" type="number" min="0" step="any" value="${densities[m] ?? ''}"></td>
+                    <td style="padding:4px 10px;"><input class="mp-input mp-hatch" type="number" min="0" step="any" value="${hatches[m] ?? ''}"></td>
+                </tr>`).join('');
+        }
+
+        function addMpMaterial() {
+            const input = document.getElementById('mp-new-material');
+            const name = input.value.trim().toLowerCase();
+            if (!name) return;
+            if (!document.querySelector(`#mp-materials tr[data-material="${name}"]`)) {
+                const row = document.createElement('tr');
+                row.dataset.material = name;
+                row.innerHTML = `<td style="padding:6px 10px;color:#e2e8f0;">${_materialRu(name)}</td>
+                    <td style="padding:4px 10px;"><input class="mp-input mp-dens" type="number" min="0" step="any"></td>
+                    <td style="padding:4px 10px;"><input class="mp-input mp-hatch" type="number" min="0" step="any"></td>`;
+                document.getElementById('mp-materials').appendChild(row);
+            }
+            input.value = '';
+        }
+
+        function _collectMpMaterials() {
+            const densities = {}, hatches = {};
+            document.querySelectorAll('#mp-materials tr').forEach(tr => {
+                const m  = tr.dataset.material;
+                const dv = tr.querySelector('.mp-dens').value;
+                const hv = tr.querySelector('.mp-hatch').value;
+                if (dv !== '') densities[m] = Number(dv);
+                if (hv !== '') hatches[m]   = Number(hv);
+            });
+            return { densities, hatches };
+        }
+
+        async function loadMachineParams() {
+            try {
+                const d = await fetch('/settings/machine').then(r => r.json());
+                const p = d.params || {};
+                _MP_FIELDS.forEach(f => {
+                    const el = document.getElementById('mp-' + f);
+                    if (el) el.value = p[f] ?? '';
+                });
+                _renderMpMaterials(p.material_densities || {}, p.hatch_speeds_by_mat || {});
+                document.getElementById('mp-status').textContent = d.configured
+                    ? '✅ Параметры заданы' : '⚠️ Заполните параметры для расчёта времени и стоимости';
+                loadCalibration();
+            } catch (e) { /* форма остаётся пустой */ }
+        }
+
+        async function loadCalibration() {
+            const el = document.getElementById('mp-calibration');
+            try {
+                const d = await fetch('/prints/prediction-accuracy').then(r => r.json());
+                if (!d.n_pairs) {
+                    el.innerHTML = `📐 Прогноз vs факт: пока нет пар «прогноз + привязанные логи».
+                        Нажмите 📐 у карточки с STL, чтобы сохранить прогноз.`;
+                    return;
+                }
+                let html = `📐 Прогноз vs факт: <b style="color:#e2e8f0;">${d.n_pairs}</b> пар(ы).`;
+                if (d.suggested_correction_factor) {
+                    html += ` Рекомендуемая поправка точного метода:
+                        <b style="color:#10b981;">×${d.suggested_correction_factor}</b>
+                        <a onclick="applyCalibration(${d.suggested_correction_factor})"
+                           style="color:#60a5fa;cursor:pointer;margin-left:6px;">применить</a>`;
+                } else {
+                    html += ` Для калибровки нужно ≥${d.min_pairs_for_calibration} пар с точным прогнозом.`;
+                }
+                el.innerHTML = html;
+            } catch (e) { el.innerHTML = ''; }
+        }
+
+        async function applyCalibration(factor) {
+            await fetch('/settings/machine', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ time_correction_factor: factor }),
+            });
+            loadMachineParams();
+        }
+
+        async function saveMachineParams() {
+            const payload = {};
+            _MP_FIELDS.forEach(f => {
+                const v = document.getElementById('mp-' + f).value;
+                payload[f] = v === '' ? null : Number(v);
+            });
+            const { densities, hatches } = _collectMpMaterials();
+            payload.material_densities  = densities;
+            payload.hatch_speeds_by_mat = hatches;
+
+            const status = document.getElementById('mp-status');
+            try {
+                const r = await fetch('/settings/machine', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                const d = await r.json();
+                status.textContent = d.configured ? '✅ Сохранено' : '💾 Сохранено (не все параметры заданы)';
+                loadPrintDefaults();  // material list may have changed
+            } catch (e) {
+                status.textContent = '❌ Ошибка: ' + e.message;
+            }
         }
 
     </script>
