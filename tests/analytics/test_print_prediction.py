@@ -79,8 +79,8 @@ class TestSlicer:
 
 
 class TestPrintTime:
-    def test_excel_mode_reproduces_operator_spreadsheet(self):
-        """Точные входные из «расчёт стоимости Cталь.xlsx» → 40.36 ч."""
+    def test_excel_mode_uses_physics_formula(self):
+        """Режим excel использует физическую формулу A/(hd·v) + P/v_c."""
         from analytics.prediction.stl_slicer import SliceResult
 
         s = SliceResult(
@@ -91,13 +91,17 @@ class TestPrintTime:
                   "contour_speed_mm_s": 430.0, "recoat_time_ms": None}
         t = estimate_print_time(s, params, "steel", mode="excel")
         assert t.method == "excel"
-        assert t.scan_hours == pytest.approx(40.36, abs=0.01)
+        # t_section = (2270/0.12)/1000 + 190.578/430 = 18.917 + 0.443 = 19.36 s
+        # scan_hours = 19.36 × 2000 / 1 / 3600
+        expected = (2270.0 / 0.12 / 1000.0 + 190.578 / 430.0) * 2000 / 1 / 3600.0
+        assert t.scan_hours == pytest.approx(expected, rel=0.01)
 
     def test_excel_mode_cube_math(self):
-        # t_слоя = (√100/0.1)×(4√100)/1000×0.96 = 100×40/1000×0.96 = 3.84 c
+        # t_section = (100/0.1)/1000 + 40/500 = 1.0 + 0.08 = 1.08 s
+        # scan_hours = 1.08 × 200 / 2 / 3600
         s = slice_stl(CUBE_STL, 0.05)
         t = estimate_print_time(s, PARAMS, "steel", mode="excel")
-        expected_scan_h = 3.84 * 200 / 2 / 3600
+        expected_scan_h = 1.08 * 200 / 2 / 3600
         assert t.scan_hours == pytest.approx(expected_scan_h, rel=0.01)
         assert t.recoat_hours == pytest.approx(200 * 9.0 / 3600, abs=0.01)
 
@@ -141,11 +145,12 @@ class TestPrintTime:
         with pytest.raises(EstimationError):
             estimate_print_time(s, PARAMS, "steel", mode="magic")
 
-    def test_missing_recoat_warns(self):
+    def test_missing_recoat_uses_default(self):
         s = slice_stl(CUBE_STL, 0.05)
         t = estimate_print_time(s, {**PARAMS, "recoat_time_ms": None}, "steel", mode="excel")
-        assert t.recoat_hours == 0
-        assert any("recoat" in w for w in t.warnings)
+        # Дефолт 9500 мс/слой, 200 слоёв
+        assert t.recoat_hours == pytest.approx(200 * 9.5 / 3600, rel=0.01)
+        assert any("9.5" in w for w in t.warnings)
 
 
 class TestCost:
@@ -221,6 +226,33 @@ class TestStlEstimateEndpoint:
     def test_invalid_method_rejected(self, client):
         r = client.post(
             "/upload/stl-estimate?method=guess",
+            files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
+        )
+        assert r.status_code == 422
+
+    def test_hatch_distance_override(self, client):
+        client.put("/settings/machine", json={
+            "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 0, "hatch_distance_mm": 0.1,
+            "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9500,
+            "powder_cost_rub_per_kg": 7000, "material_densities": {"steel": 7.9},
+        })
+        # Шаг штриховки 0.12 (override) → меньше сканирования, чем при 0.10 из параметров
+        wide = client.post(
+            "/upload/stl-estimate?material=steel&method=fast&hatch_distance_mm=0.12",
+            files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
+        )
+        narrow = client.post(
+            "/upload/stl-estimate?material=steel&method=fast&hatch_distance_mm=0.06",
+            files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
+        )
+        assert wide.status_code == 200 and narrow.status_code == 200
+        pw, pn = wide.json()["prediction"], narrow.json()["prediction"]
+        assert pw["time_breakdown"]["hatch_distance_mm"] == 0.12
+        assert pw["scan_hours"] < pn["scan_hours"]  # шире шаг → быстрее скан
+
+    def test_hatch_distance_non_positive_rejected(self, client):
+        r = client.post(
+            "/upload/stl-estimate?hatch_distance_mm=0",
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
         )
         assert r.status_code == 422

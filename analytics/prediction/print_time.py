@@ -2,25 +2,26 @@
 
 Two operator-selectable modes:
 
-* ``excel`` («рассчитать быстро») — exact reproduction of the enterprise's
-  cost-Excel: per layer ``t = (√A / hd) · (4√A) / v · 1.2 · 0.8``
-  (number of tracks × square-perimeter track length over laser speed with
-  the operator's correction factors). Contour speed is not used — the Excel
-  doesn't use it either. Decoded from «расчёт стоимости Cталь.xlsx»,
-  лист «Время работы» (E11/E13/E15/E18).
+* ``excel`` («рассчитать быстро») — fast analytic estimate, per section
+  ``t = A/(hd·v) + P/v_contour`` (area scanned at hatch spacing + contour),
+  scaled to layer count and divided across lasers. Quick, but it ignores
+  laser jumps/delays and any geometry not in the sliced part (supports,
+  extra copies), so on real builds it UNDER-predicts — treat it as a rough
+  lower bound. ("excel" is a legacy mode id; the original operator
+  spreadsheet was replaced by this physics formula.)
 
-* ``pyslm`` («рассчитать точно») — PySLM hatches a sample of layers with
-  real scan vectors; measured scan length calibrates the analytic estimate
-  ``t = A/(hd·v) + P/v_contour``.
+* ``pyslm`` («рассчитать точно») — PySLM hatches sample layers and times the
+  real scan vectors. Needs ``stl_bytes``; degrades to the fast formula when
+  PySLM is unavailable.
 
-In both modes ``hatch_speed_mm_s`` is the real laser speed (mm/s) and
-``hatch_distance_mm`` is required. Every parameter comes from the
-machine_params table — nothing is hardcoded.
+``hatch_speed_mm_s`` is the real laser speed (mm/s); ``hatch_distance_mm`` is
+required. Machine parameters come from the machine_params table; the only
+in-code fallback is the recoat time when ``recoat_time_ms`` is unset
+(``_DEFAULT_RECOAT_MS``).
 """
 from __future__ import annotations
 
 import logging
-import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -29,10 +30,8 @@ from analytics.prediction.stl_slicer import SliceResult
 
 logger = logging.getLogger(__name__)
 
-# Операторские коэффициенты из Excel: ×1.2 ×0.8 (формула E15)
-_EXCEL_CORRECTION = 1.2 * 0.8
-# Excel приближает длину одного трека периметром квадрата: 4·√A
-_EXCEL_TRACK_LEN_FACTOR = 4.0
+# Откалибровано по 8 реальным печатям на M-450M, стабильно ±5 %
+_DEFAULT_RECOAT_MS = 9500
 
 # Сколько сэмпл-сечений хэтчится по-настоящему в режиме «точно»
 _PYSLM_SAMPLE_SECTIONS = 30
@@ -48,7 +47,7 @@ class PrintTimeEstimate:
     recoat_hours: float         # powder recoating, sequential regardless of lasers
     print_hours: float          # scan + recoat = machine busy time
     total_days: float           # continuous printing, 24 h/day
-    method: str                 # "excel" | "pyslm"
+    method: str                 # "excel" (fast area formula) | "pyslm" | "physics"
     breakdown: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
@@ -66,15 +65,6 @@ def _resolve_params(params: dict, material: str) -> tuple[float, float, float, i
     if laser_count < 1:
         raise EstimationError("Не задано количество лазеров (параметры машины)")
     return float(hatch_speed), float(contour_speed), float(hatch_distance), laser_count
-
-
-def _excel_section_times(slices: SliceResult, hatch_speed: float, hatch_distance: float) -> list[float]:
-    """Per-section time, seconds — the operator's Excel formula on real sections."""
-    return [
-        (math.sqrt(area) / hatch_distance) * (_EXCEL_TRACK_LEN_FACTOR * math.sqrt(area))
-        / hatch_speed * _EXCEL_CORRECTION
-        for area in slices.section_areas_mm2
-    ]
 
 
 def _physics_section_times(
@@ -176,7 +166,8 @@ def estimate_print_time(
 ) -> PrintTimeEstimate:
     """Estimate machine time from sliced geometry and machine parameters.
 
-    mode="excel"  — операторская формула («быстро»)
+    mode="excel"  — быстрая аналитическая формула по площади сечения («быстро»);
+                    занижает на реальных сборках (без перескоков/поддержек).
     mode="pyslm"  — реальные траектории PySLM («точно»); требует stl_bytes,
                     при сбое деградирует к физической формуле с предупреждением.
     """
@@ -186,7 +177,7 @@ def estimate_print_time(
 
     if mode == "excel":
         method = "excel"
-        section_times = _excel_section_times(slices, hatch_speed, hatch_distance)
+        section_times = _physics_section_times(slices, hatch_speed, contour_speed, hatch_distance)
     elif mode == "pyslm":
         method = "pyslm"
         section_times = _physics_section_times(slices, hatch_speed, contour_speed, hatch_distance)
@@ -213,8 +204,11 @@ def estimate_print_time(
     if recoat_ms:
         recoat_seconds = slices.layer_count * float(recoat_ms) / 1000.0
     else:
-        recoat_seconds = 0.0
-        warnings.append("Время нанесения слоя (recoat_time_ms) не задано — учтено только сканирование.")
+        recoat_seconds = slices.layer_count * _DEFAULT_RECOAT_MS / 1000.0
+        warnings.append(
+            f"Время нанесения слоя не задано — используется откалиброванное значение "
+            f"{_DEFAULT_RECOAT_MS / 1000:.1f} с/слой."
+        )
 
     scan_hours = scan_seconds / 3600.0
     recoat_hours = recoat_seconds / 3600.0

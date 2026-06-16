@@ -783,7 +783,7 @@
                 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;" id="mp-grid">
                     <div><label class="mp-label">Скорость штриховки (мм/с)</label><input class="mp-input" id="mp-hatch_speed_mm_s" type="number" min="0" step="any"></div>
                     <div><label class="mp-label">Скорость контуров (мм/с)</label><input class="mp-input" id="mp-contour_speed_mm_s" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label" title="Если задан — скорость штриховки трактуется как реальная скорость лазера (мм/с) и включается PySLM-расчёт. Если пуст — как площадная скорость (мм²/с), формула из Excel.">Шаг штриховки (мм) ⓘ</label><input class="mp-input" id="mp-hatch_distance_mm" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label" title="Расстояние между линиями штриховки (мм). Обязательно для расчёта времени; скорость штриховки трактуется как реальная скорость лазера (мм/с).">Шаг штриховки (мм) ⓘ</label><input class="mp-input" id="mp-hatch_distance_mm" type="number" min="0" step="any"></div>
                     <div><label class="mp-label">Толщина слоя (мм)</label><input class="mp-input" id="mp-layer_thickness_mm" type="number" min="0" step="any"></div>
                     <div><label class="mp-label">Количество лазеров</label><input class="mp-input" id="mp-laser_count" type="number" min="1" step="1"></div>
                     <div><label class="mp-label">Время нанесения слоя (мс)</label><input class="mp-input" id="mp-recoat_time_ms" type="number" min="0" step="any"></div>
@@ -1723,11 +1723,16 @@
                 <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;">
                     <div style="font-size:13px;color:#e2e8f0;margin-bottom:4px;">🧊 ${file.name}</div>
                     <div style="font-size:12px;color:#6b7280;margin-bottom:16px;">${(file.size / 1024 / 1024).toFixed(1)} МБ · выберите метод расчёта</div>
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:12px;color:#a0aec0;display:block;margin-bottom:5px;">Шаг штриховки (мкм) <span title="Зависит от режима печати. По умолчанию 120 мкм." style="color:#6b7280;cursor:help;">ⓘ</span></label>
+                        <input id="stl-hatch-um" type="number" min="1" step="1" value="120"
+                            style="width:120px;background:#0f1420;border:1px solid #2d3748;border-radius:8px;padding:8px 10px;color:#e2e8f0;font-size:14px;">
+                    </div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;">
                         <button onclick="runStlEstimate('fast')"
                             style="flex:1;min-width:200px;background:#3b82f6;color:white;border:none;border-radius:10px;padding:14px;font-size:14px;font-weight:600;cursor:pointer;">
                             ⚡ Рассчитать быстро
-                            <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">формула предприятия (Excel)</div>
+                            <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">быстрая оценка по площади сечения</div>
                         </button>
                         <button onclick="runStlEstimate('accurate')"
                             style="flex:1;min-width:200px;background:#10b981;color:white;border:none;border-radius:10px;padding:14px;font-size:14px;font-weight:600;cursor:pointer;">
@@ -1740,7 +1745,9 @@
 
         async function runStlEstimate(method) {
             if (!_pendingStlFile) return;
-            await uploadStl(_pendingStlFile, null, method);
+            const um = parseFloat(document.getElementById('stl-hatch-um')?.value);
+            const hatchMm = (um && um > 0) ? um / 1000 : null;
+            await uploadStl(_pendingStlFile, null, method, hatchMm);
         }
         function _renderPrediction(p) {
             if (!p) return '';
@@ -1756,7 +1763,7 @@
             const methodLabel = {
                 pyslm: 'PySLM — реальные траектории лазера',
                 physics: 'физическая формула (PySLM недоступен)',
-                excel: 'формула предприятия (Excel)',
+                excel: 'быстрая формула (по площади сечения)',
             }[p.method] || p.method;
             return `
                 <div style="background:#0f2438;border:1px solid #1a5276;border-radius:12px;padding:16px;margin-top:14px;">
@@ -1781,7 +1788,7 @@
                         </div>` : ''}
                     </div>
                     <div style="color:#6b7280;font-size:12px;">
-                        сканирование ${p.scan_hours} ч · нанесение слоёв ${p.recoat_hours} ч</div>
+                        сканирование ${p.scan_hours} ч · нанесение слоёв ${p.recoat_hours} ч${p.time_breakdown?.hatch_distance_mm ? ` · шаг штриховки ${Math.round(p.time_breakdown.hatch_distance_mm * 1000)} мкм` : ''}</div>
                     ${cost ? `<div style="color:#6b7280;font-size:12px;margin-top:6px;">${cost}</div>` : ''}
                     ${warns}
                 </div>`;
@@ -1798,7 +1805,7 @@
             }
         }
 
-        async function uploadStl(file, _buf, method = 'fast') {
+        async function uploadStl(file, _buf, method = 'fast', hatchMm = null) {
             const res = document.getElementById('stl-result');
             if (!file) return;
             res.innerHTML = method === 'accurate'
@@ -1808,7 +1815,9 @@
             fd.append('file', file);
             const material = document.getElementById('stl-material')?.value || 'steel';
             try {
-                const r = await fetch(`/upload/stl-estimate?material=${encodeURIComponent(material)}&method=${method}`, { method: 'POST', body: fd });
+                let url = `/upload/stl-estimate?material=${encodeURIComponent(material)}&method=${method}`;
+                if (hatchMm && hatchMm > 0) url += `&hatch_distance_mm=${hatchMm}`;
+                const r = await fetch(url, { method: 'POST', body: fd });
                 const d = await r.json();
                 const vol = d.volume_cm3;
                 const est = d.estimate;
@@ -1835,7 +1844,7 @@
                         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
                             <button onclick="runStlEstimate('${method === 'fast' ? 'accurate' : 'fast'}')"
                                 style="background:${method === 'fast' ? '#10b981' : '#3b82f6'};color:white;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
-                                ${method === 'fast' ? '🎯 Пересчитать точно (PySLM)' : '⚡ Пересчитать быстро (Excel)'}
+                                ${method === 'fast' ? '🎯 Пересчитать точно (PySLM)' : '⚡ Пересчитать быстро'}
                             </button>
                             <button onclick="showMainTab('models',null)"
                                 style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
