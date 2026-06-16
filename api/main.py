@@ -37,7 +37,7 @@ from core.config.settings import get_settings
 from core.logging.config import RequestIDMiddleware, configure_logging
 from core.preflight import run_preflight
 from core.versioning.version import APP_VERSION
-from storage.db.init_db import create_all
+from storage.db.migrate import upgrade_to_head
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +120,10 @@ async def _startup_import(raw_logs_path: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # Local dev (single process) auto-migrates here; prod runs `alembic upgrade
+    # head` once in the container entrypoint before workers spawn (race-free).
     if settings.app_env == "local":
-        create_all()
+        upgrade_to_head()
     report = run_preflight(settings, component="api")
     for warn in report.warnings:
         logging.getLogger("preflight").warning(warn)
