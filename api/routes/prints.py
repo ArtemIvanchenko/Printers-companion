@@ -97,7 +97,7 @@ def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repo
         "printed_at": printed_at,
         "powder_cost_rub_per_kg": _parse_powder_cost(payload.get("powder_cost_rub_per_kg")),
     })
-    repo.commit()
+    repo.flush()
     logger.info("prints: created %s (%s)", record["record_id"], name)
     return record
 
@@ -181,7 +181,7 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     meta = dict(record.get("metadata_json") or {})
     meta["prediction"] = snapshot
     repo.update_print_record(record_id, {"metadata_json": meta})
-    repo.commit()
+    repo.flush()
     logger.info("prints: prediction stored for %s (fast=%.1fh, accurate=%.1fh)",
                 record_id, snapshot["fast"]["print_hours"], snapshot["accurate"]["print_hours"])
     return snapshot
@@ -189,10 +189,10 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
 
 def _auto_estimate(record_id: str) -> None:
     """Background prediction after an STL upload — best-effort, own DB session."""
-    from storage.db.session import SessionLocal
+    from storage.db.session import session_scope
 
     try:
-        with SessionLocal() as db:
+        with session_scope() as db:
             repo = PrintsRepository(db)
             _compute_prediction_snapshot(repo, record_id)
     except HTTPException as exc:
@@ -256,7 +256,7 @@ def update_print(
     record = repo.update_print_record(record_id, values)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
-    repo.commit()
+    repo.flush()
     return record
 
 
@@ -266,7 +266,7 @@ def delete_print(record_id: str, repo: PrintsRepository = Depends(get_prints_rep
     if not repo.get_print_record(record_id):
         raise HTTPException(404, "Карточка печати не найдена")
     uris = repo.delete_print_record(record_id)
-    repo.commit()
+    repo.flush()
     _remove_objects(uris)
     logger.info("prints: deleted %s (%d files)", record_id, len(uris))
     return {"deleted": record_id, "files_removed": len(uris)}
@@ -341,7 +341,9 @@ async def upload_print_file(
         from_file = _date_from_text(file_name)
         if from_file:
             repo.update_print_record(record_id, {"printed_at": from_file})
-    repo.commit()
+    # Commit now (not at the request boundary): the background auto-estimate
+    # runs in its own session and must see the just-attached file committed.
+    repo.db.commit()
     # Деталь без поддержек → автоматический прогноз времени/стоимости в фоне,
     # чтобы пара «прогноз/факт» образовалась без ручного нажатия 📐
     if file_type == "stl" and not (record.get("metadata_json") or {}).get("prediction"):
@@ -412,7 +414,8 @@ async def import_logs_for_print(
         updates["metadata_json"] = meta
     if updates:
         repo.update_print_record(record_id, updates)
-        repo.commit()
+        # Durable now: the background rescan/auto-link reads this in its own session.
+        repo.db.commit()
 
     if saved:
         _trigger_rescan(settings.raw_logs_container_path)
@@ -431,7 +434,7 @@ def delete_print_file(
     uri = repo.delete_print_file(record_id, file_id)
     if uri is None:
         raise HTTPException(404, "Файл не найден")
-    repo.commit()
+    repo.flush()
     _remove_objects([uri])
     return {"deleted": file_id}
 

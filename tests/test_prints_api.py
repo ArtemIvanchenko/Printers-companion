@@ -312,15 +312,14 @@ class TestDeletion:
 class TestSessionLinking:
     def test_link_session_sets_printed_at(self):
         from datetime import datetime, timezone
-        from storage.db.session import SessionLocal
+        from storage.db.session import session_scope
         from storage.repositories.prints_repo import PrintsRepository
 
         record = _create_record(name="привязка-тест")
         start = datetime(2026, 5, 10, 8, 30, tzinfo=timezone.utc)
-        with SessionLocal() as db:
+        with session_scope() as db:
             repo = PrintsRepository(db)
             assert repo.link_session(record["record_id"], "session_xyz", session_start=start)
-            repo.commit()
         body = client.get(f"/prints/{record['record_id']}").json()
         assert body["session_id"] == "session_xyz"
         assert body["printed_at"].startswith("2026-05-10")

@@ -19,7 +19,7 @@ def create_knowledge(payload: dict, repo: RuntimeRepository = Depends(get_runtim
     knowledge_id = payload.get("knowledge_id") or f"knowledge_{uuid4().hex}"
     item = payload | {"knowledge_id": knowledge_id, "status": payload.get("status", "active")}
     repo.save_knowledge(item)
-    repo.commit()
+    repo.flush()
     return item
 
 
@@ -32,7 +32,7 @@ def update_knowledge(
     item = _get(knowledge_id, repo)
     item.update(payload)
     repo.save_knowledge(item)
-    repo.commit()
+    repo.flush()
     return item
 
 
@@ -41,7 +41,7 @@ def deprecate_knowledge(knowledge_id: str, repo: RuntimeRepository = Depends(get
     item = _get(knowledge_id, repo)
     item["status"] = "deprecated"
     repo.save_knowledge(item)
-    repo.commit()
+    repo.flush()
     return item
 
 

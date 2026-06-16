@@ -102,7 +102,7 @@ class TestSessionsReportGeneration:
 
         assert result["report_id"] == "report_123"
         mock_repo.save_report.assert_called_once()
-        mock_repo.commit.assert_called_once()
+        mock_repo.flush.assert_called_once()
 
     @patch("api.routes.sessions.generate_session_json_report")
     def test_generate_report_with_markdown(self, mock_generate, mock_repo):
@@ -206,4 +206,4 @@ class TestSessionIngest:
         result = ingest_session(payload, repo=repo)
 
         assert "groups" in result
-        repo.commit.assert_called_once()
+        repo.flush.assert_called_once()

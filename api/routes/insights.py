@@ -27,7 +27,7 @@ def confirm_insight(
     insight["status"] = "confirmed"
     insight.setdefault("audit_trail", []).append({"action": "confirm", "payload": payload or {}})
     repo.save_insight(insight)
-    repo.commit()
+    repo.flush()
     return insight
 
 
@@ -41,7 +41,7 @@ def dismiss_insight(
     insight["status"] = "dismissed"
     insight.setdefault("audit_trail", []).append({"action": "dismiss", "payload": payload or {}})
     repo.save_insight(insight)
-    repo.commit()
+    repo.flush()
     return insight
 
 
@@ -54,7 +54,7 @@ def annotate_insight(
     insight = _get(insight_id, repo)
     insight.setdefault("audit_trail", []).append({"action": "annotate", "payload": payload})
     repo.save_insight(insight)
-    repo.commit()
+    repo.flush()
     return insight
 
 
@@ -63,7 +63,7 @@ def mark_monitoring(insight_id: str, repo: RuntimeRepository = Depends(get_runti
     insight = _get(insight_id, repo)
     insight["status"] = "monitoring"
     repo.save_insight(insight)
-    repo.commit()
+    repo.flush()
     return insight
 
 

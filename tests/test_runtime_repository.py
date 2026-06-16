@@ -59,7 +59,7 @@ class TestRuntimeRepositorySessions:
         repo.save_session_payload("session_123", {"files": [], "group": {"features": {}}})
 
         mock_db_session.add.assert_called_once()
-        mock_db_session.commit.assert_called_once()
+        mock_db_session.flush.assert_called_once()
 
     def test_save_session_payload_existing(self, mock_db_session):
         """Test updating existing session payload."""
@@ -73,7 +73,7 @@ class TestRuntimeRepositorySessions:
         repo.save_session_payload("session_123", {"files": [], "group": {"features": {}}})
 
         mock_db_session.add.assert_not_called()
-        mock_db_session.commit.assert_called_once()
+        mock_db_session.flush.assert_called_once()
 
     def test_get_session_payload_not_found(self, mock_db_session):
         """Test getting non-existent session."""
@@ -117,7 +117,7 @@ class TestRuntimeRepositoryReports:
         repo.save_report(report)
 
         mock_db_session.add.assert_called_once()
-        mock_db_session.commit.assert_called_once()
+        mock_db_session.flush.assert_called_once()
 
 
 class TestRuntimeRepositoryOperatorEvents:
@@ -131,7 +131,7 @@ class TestRuntimeRepositoryOperatorEvents:
         repo.save_operator_event(sample_operator_event)
 
         mock_db_session.add.assert_called_once()
-        mock_db_session.commit.assert_called_once()
+        mock_db_session.flush.assert_called_once()
 
     def test_save_operator_event_existing(self, mock_db_session, sample_operator_event):
         """Test updating existing operator event."""
@@ -172,4 +172,4 @@ class TestRuntimeRepositoryQuality:
         repo.save_quality_outcome(outcome)
 
         mock_db_session.add.assert_called_once()
-        mock_db_session.commit.assert_called_once()
+        mock_db_session.flush.assert_called_once()

@@ -33,7 +33,7 @@ def create_operator_journal_entry(
             audit_trail=payload.get("audit_trail"),
         )
     saved = repo.save_operator_journal_entry(entry)
-    repo.commit()
+    repo.flush()
     return saved
 
 
@@ -76,5 +76,5 @@ def update_operator_journal_entry(
         }
     )
     saved = repo.save_operator_journal_entry(entry)
-    repo.commit()
+    repo.flush()
     return saved

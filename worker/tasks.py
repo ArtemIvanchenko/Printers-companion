@@ -105,7 +105,7 @@ def process_due_import_jobs() -> int:
                 from domain.services.print_linking import auto_link_print_records
 
                 auto_link_print_records(db)
-                repo.commit()
+                db.commit()
                 processed += 1
                 logger.info("Successfully processed import job %s", job.import_job_id)
             except Exception as exc:
@@ -126,7 +126,7 @@ def process_due_import_jobs() -> int:
                             job2.status = ImportJobStatus.failed
                             job2.updated_at = now
                             repo2.save_import_job(job2)
-                            repo2.commit()
+                            db2.commit()
                 except Exception as db_exc:
                     logger.error(
                         "Failed to persist error state for job %s: %s",
