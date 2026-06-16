@@ -20,6 +20,7 @@ services:
       - storage_net
       - agent_net
     restart: unless-stopped
+    read_only: true
     volumes:
       - type: bind
         source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
@@ -287,6 +288,7 @@ services:
   # automatically.  It also exposes an HTTP API so the web dashboard can trigger
   # an on-demand update check with a single button click — no terminal needed.
   watchtower:
+    profiles: ["watchtower"]
     image: containrrr/watchtower:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
