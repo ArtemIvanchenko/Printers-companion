@@ -17,7 +17,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 _NUMERIC_FIELDS = {
     "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm", "layer_thickness_mm",
-    "recoat_time_ms",
+    "recoat_time_ms", "jump_speed_mm_s", "jump_delay_ms",
     "powder_cost_rub_per_kg", "gas_cost_rub_per_atm", "gas_atm_per_print",
     "filter_cost_rub", "filter_lifetime_hours", "platform_cost_rub",
     "build_area_cm2", "time_correction_factor",
