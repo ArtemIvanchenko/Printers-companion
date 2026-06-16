@@ -70,6 +70,10 @@ class MachineParams(Base):
     layer_thickness_mm: Mapped[float | None] = mapped_column(Float)
     laser_count: Mapped[int | None] = mapped_column(Integer)
     recoat_time_ms: Mapped[float | None] = mapped_column(Float)
+    # Galvo jump (laser-off repositioning) speed and per-jump delay — used by
+    # the PySLM vector estimate to account for travel between scan vectors.
+    jump_speed_mm_s: Mapped[float | None] = mapped_column(Float)
+    jump_delay_ms: Mapped[float | None] = mapped_column(Float)
     # Consumable rates (rub)
     powder_cost_rub_per_kg: Mapped[float | None] = mapped_column(Float)
     gas_cost_rub_per_atm: Mapped[float | None] = mapped_column(Float)
