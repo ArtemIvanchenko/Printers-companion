@@ -66,13 +66,13 @@ def _trigger_rescan(path: str) -> None:
             from domain.services.session_grouping import group_files_into_sessions
             from domain.services.session_overview import build_group_overview
             from profiles.m350.profile import build_registry, get_profile
-            from storage.db.session import SessionLocal
+            from storage.db.session import session_scope
             from storage.repositories.runtime import RuntimeRepository
 
             folder = Path(path)
             result = IngestionService(build_registry(), get_profile()).parse(folder)
             groups = group_files_into_sessions(result.files)
-            with SessionLocal() as db:
+            with session_scope() as db:
                 repo = RuntimeRepository(db)
                 existing = {sid for sid, _ in repo.list_session_payloads()}
                 for group in groups:
@@ -92,7 +92,6 @@ def _trigger_rescan(path: str) -> None:
                 from domain.services.print_linking import auto_link_print_records
 
                 auto_link_print_records(db)
-                repo.commit()
             logger.info("upload rescan: complete, %d groups", len(groups))
         except Exception:
             logger.exception("upload rescan: failed")
@@ -122,7 +121,7 @@ async def new_print(payload: dict) -> dict:
       models     – list of model names / quantities (free text or list)
       note       – optional note
     """
-    from storage.db.session import SessionLocal
+    from storage.db.session import session_scope
     from storage.repositories.runtime import RuntimeRepository
     from domain.models.entities import OperatorEvent
 
@@ -150,10 +149,9 @@ async def new_print(payload: dict) -> dict:
     }
 
     try:
-        with SessionLocal() as db:
+        with session_scope() as db:
             repo = RuntimeRepository(db)
             repo.save_operator_event(record)
-            repo.commit()
     except Exception:
         logger.exception("new_print: failed to save")
         raise HTTPException(500, "Не удалось сохранить запись")

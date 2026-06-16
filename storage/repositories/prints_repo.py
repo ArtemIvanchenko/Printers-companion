@@ -60,8 +60,9 @@ class PrintsRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def commit(self) -> None:
-        self.db.commit()
+    def flush(self) -> None:
+        """Flush pending changes within the unit of work; the boundary commits."""
+        self.db.flush()
 
     # ── Print records ──────────────────────────────────────────────────────
 

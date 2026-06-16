@@ -96,6 +96,6 @@ def update_machine_params(
         raise HTTPException(422, "Нет известных полей для обновления")
 
     params = repo.save_machine_params(values)
-    repo.commit()
+    repo.flush()
     logger.info("machine_settings: updated %s", sorted(values.keys()))
     return {"params": params, "configured": params_configured(params)}

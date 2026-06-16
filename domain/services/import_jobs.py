@@ -344,7 +344,7 @@ def persist_parse_results_to_db(
                 events_saved += _flush_event_batch(repo, batch)
         
         try:
-            repo.commit()
+            db.commit()
         except Exception as exc:
             logger.error("Failed to commit parse results to database: %s", exc)
     
@@ -560,7 +560,7 @@ def _flush_event_batch(repo, batch: list[dict]) -> int:
         except Exception as exc:
             logger.error("Failed to save event: %s", exc)
     try:
-        repo.commit()
+        repo.db.commit()
     except Exception as exc:
         logger.error("Failed to commit event batch: %s", exc)
         try:

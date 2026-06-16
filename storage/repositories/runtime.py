@@ -136,8 +136,9 @@ class RuntimeRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def commit(self) -> None:
-        self.db.commit()
+    def flush(self) -> None:
+        """Flush pending changes within the unit of work; the boundary commits."""
+        self.db.flush()
 
     def _upsert(self, entity_class, entity_id: str, id_field: str, values: dict[str, Any]) -> Any:
         """Helper for save-or-update pattern - reduces boilerplate."""
@@ -275,7 +276,7 @@ class RuntimeRepository:
                     end_ts=end_ts,
                 )
             )
-        self.commit()
+        self.flush()
 
     def save_sessions(self, sessions: dict[str, dict[str, Any]]) -> None:
         for session_id, payload in sessions.items():
@@ -326,7 +327,7 @@ class RuntimeRepository:
             "version_metadata": jsonable_encoder(report.get("version_metadata", {})),
         }
         self._upsert(ReportArtifact, report_id, "report_id", values)
-        self.commit()
+        self.flush()
 
     def save_reports(self, reports: dict[str, dict[str, Any]]) -> None:
         for report in reports.values():
@@ -377,7 +378,7 @@ class RuntimeRepository:
             "audit_trail": event.get("audit_trail", []),
         }
         self._upsert(OperatorEvent, event_id, "event_id", values)
-        self.commit()
+        self.flush()
         return event
 
     def get_operator_event(self, event_id: str) -> dict[str, Any] | None:
@@ -442,7 +443,7 @@ class RuntimeRepository:
             "evidence_links": outcome.get("evidence_links", []),
         }
         self._upsert(QualityOutcome, outcome_id, "outcome_id", values)
-        self.commit()
+        self.flush()
         return outcome
 
     def get_quality_outcome(self, outcome_id: str) -> dict[str, Any] | None:

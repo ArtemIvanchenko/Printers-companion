@@ -12,8 +12,9 @@ class ReportRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def commit(self) -> None:
-        self.db.commit()
+    def flush(self) -> None:
+        """Flush pending changes within the unit of work; the boundary commits."""
+        self.db.flush()
 
     def save_artifact(self, report_id: str, report_type: str, session_id: str, artifact: dict) -> None:
         existing = self.db.get(ReportArtifact, report_id)

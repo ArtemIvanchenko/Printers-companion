@@ -21,7 +21,7 @@ def create_operator_event(payload: dict, repo: RuntimeRepository = Depends(get_r
         "verification_status": payload.get("verification_status", "unverified"),
     }
     repo.save_operator_event(event)
-    repo.commit()
+    repo.flush()
     return event
 
 
@@ -43,7 +43,7 @@ def confirm_operator_event(
     event["verification_status"] = VerificationStatus.operator_confirmed.value
     event.setdefault("audit_trail", []).append({"action": "confirm", "payload": payload or {}})
     repo.save_operator_event(event)
-    repo.commit()
+    repo.flush()
     return event
 
 
@@ -57,7 +57,7 @@ def dismiss_operator_event(
     event["verification_status"] = VerificationStatus.dismissed.value
     event.setdefault("audit_trail", []).append({"action": "dismiss", "payload": payload or {}})
     repo.save_operator_event(event)
-    repo.commit()
+    repo.flush()
     return event
 
 
@@ -72,7 +72,7 @@ def update_operator_event(
     event.update(payload)
     event.setdefault("audit_trail", []).append({"action": "patch", "before": before, "after": event.copy()})
     repo.save_operator_event(event)
-    repo.commit()
+    repo.flush()
     return event
 
 
@@ -95,7 +95,7 @@ def link_operator_event_session(
     event = _get(event_id, repo)
     event["session_id"] = payload["session_id"]
     repo.save_operator_event(event)
-    repo.commit()
+    repo.flush()
     return event
 
 
@@ -108,7 +108,7 @@ def link_operator_event_anomaly(
     event = _get(event_id, repo)
     event.setdefault("linked_machine_events", []).append(payload["anomaly_id"])
     repo.save_operator_event(event)
-    repo.commit()
+    repo.flush()
     return event
 
 

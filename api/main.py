@@ -68,7 +68,7 @@ async def _startup_import(raw_logs_path: str) -> None:
         from domain.services.session_grouping import group_files_into_sessions
         from domain.services.session_overview import build_group_overview
         from profiles.m350.profile import build_registry, get_profile
-        from storage.db.session import SessionLocal
+        from storage.db.session import session_scope
         from storage.repositories.runtime import RuntimeRepository
 
         registry = build_registry()
@@ -82,7 +82,7 @@ async def _startup_import(raw_logs_path: str) -> None:
 
         logger.info("startup_import: found %d session group(s)", len(groups))
 
-        with SessionLocal() as db:
+        with session_scope() as db:
             repo = RuntimeRepository(db)
             existing = {sid for sid, _ in repo.list_session_payloads()}
             imported = 0
@@ -108,9 +108,7 @@ async def _startup_import(raw_logs_path: str) -> None:
 
             from domain.services.print_linking import auto_link_print_records
 
-            links = auto_link_print_records(db)
-            if links:
-                db.commit()
+            links = auto_link_print_records(db)  # session_scope commits at the boundary
 
         logger.info("startup_import: done — %d new session(s) imported, %d already existed, %d linked to print records",
                     imported, len(groups) - imported, len(links))

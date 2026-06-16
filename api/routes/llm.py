@@ -78,5 +78,5 @@ async def llm_enhance_report(
         report["llm_markdown"] = result.content
     report.setdefault("llm_runs", []).append(result.__dict__)
     repo.save_report(report)
-    repo.commit()
+    repo.flush()
     return {"report_id": report_id, "llm": result.__dict__}
