@@ -110,6 +110,7 @@ def auto_link_print_records(db: Session, window_hours: float | None = None) -> l
             session_hits[s.session_id] = session_hits.get(s.session_id, 0) + 1
 
     by_id = {r.record_id: r for r in records}
+    used_sessions: set[str] = set()
     for record_id, matches in record_candidates.items():
         if len(matches) != 1:
             if len(matches) > 1:
@@ -121,7 +122,12 @@ def auto_link_print_records(db: Session, window_hours: float | None = None) -> l
             logger.info("print_linking: session %s matches several records — skipped (ambiguous)",
                         session.session_id)
             continue
+        if session.session_id in used_sessions:
+            logger.info("print_linking: session %s already claimed in this sweep — skipped",
+                        session.session_id)
+            continue
         _link(by_id[record_id], session, links)
+        used_sessions.add(session.session_id)
 
     if links:
         # SessionLocal runs with autoflush=False — flush so repeated calls
