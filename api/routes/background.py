@@ -22,7 +22,7 @@ def run_background_analysis(
     features = payload.get("session_features", [])
     verdict = run_bounded_historical_reanalysis(plan, features)
     repo.save_historical_verdict(verdict)
-    repo.commit()
+    repo.flush()
     return verdict
 
 

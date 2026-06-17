@@ -12,7 +12,7 @@ router = APIRouter(prefix="/quality-outcomes", tags=["quality"])
 def create_outcome(payload: dict, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
     outcome = create_quality_outcome(payload).model_dump(mode="json")
     repo.save_quality_outcome(outcome)
-    repo.commit()
+    repo.flush()
     return outcome
 
 
@@ -38,5 +38,5 @@ def link_outcome_session(
     outcome = get_outcome(outcome_id, repo)
     outcome["session_id"] = payload["session_id"]
     repo.save_quality_outcome(outcome)
-    repo.commit()
+    repo.flush()
     return outcome

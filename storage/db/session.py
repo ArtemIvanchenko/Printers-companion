@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from contextlib import contextmanager
 import logging
 
 from sqlalchemy import create_engine, event
@@ -66,9 +67,37 @@ def receive_checkout(dbapi_conn, connection_record, connection_proxy):
         logger.debug("Database connection checked out from pool")
 
 def get_db() -> Generator[Session, None, None]:
+    """Request-scoped session — the unit-of-work boundary.
+
+    Commits once if the handler succeeds, rolls back on any exception. Route
+    handlers and repositories must NOT commit themselves (repos only flush).
+    """
     db = SessionLocal()
     try:
         yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@contextmanager
+def session_scope() -> Generator[Session, None, None]:
+    """Session for non-request code (background tasks, workers, startup).
+
+    Same unit-of-work semantics as :func:`get_db`: commit on success, rollback
+    on exception, always close. Use instead of a bare ``SessionLocal()`` +
+    manual ``commit()``.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from domain.models.entities import OperatorEvent, QualityOutcome
 from domain.models.sessions import BuildSession
-from storage.db.session import SessionLocal
+from storage.db.session import session_scope
 
 router = APIRouter(tags=["dashboard"])
 
@@ -222,16 +222,13 @@ async def dashboard():
         f"s/n {_profile.serial_number}" if _profile.serial_number else _profile.model_family
     )
 
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         # Load a limited amount of data for dashboard display (e.g., last 500 sessions)
         sessions = get_sessions_paginated(db, skip=0, limit=10_000)
         gas_events = get_gas_events_paginated(db, skip=0, limit=10_000)
         powder_events = get_powder_events_paginated(db, skip=0, limit=10_000)
         quality = get_quality_paginated(db, skip=0, limit=10_000)
         tel_label, telemetry, health = get_latest_print_telemetry(db)
-    finally:
-        db.close()
     
     # Stats
     total = len(sessions)

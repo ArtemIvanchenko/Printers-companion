@@ -5,7 +5,9 @@ services:
       context: .
       dockerfile: Dockerfile.api
     env_file: .env
-    command: uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4
+    # Run migrations once here (before the 4 workers fork) so the schema
+    # auto-updates on deploy without a per-worker race.
+    command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4"
     ports:
       - "8000:8000"
     depends_on:
@@ -20,6 +22,7 @@ services:
       - storage_net
       - agent_net
     restart: unless-stopped
+    read_only: true
     volumes:
       - type: bind
         source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
@@ -287,6 +290,7 @@ services:
   # automatically.  It also exposes an HTTP API so the web dashboard can trigger
   # an on-demand update check with a single button click — no terminal needed.
   watchtower:
+    profiles: ["watchtower"]
     image: containrrr/watchtower:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
