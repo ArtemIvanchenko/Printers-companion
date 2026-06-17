@@ -1,0 +1,9 @@
+- [PLA test recipe](pla-test-recipe.md) — how to run printer-log-analytics tests locally (py3.11 venv, sqlite file, APP_ENV=test)
+- [PLA telegram frozen](pla-telegram-frozen.md) — telegram bot is paused (2026-06-10); deprioritize telegram work
+- [M-450-M print-time project](m450-print-time-project.md) — SLM time/cost: machine = LaserStudio M350 + 2×YLR-500; ×8 = ~×4 incomplete geometry (use DISK STLs not magics) × ~×2 scan duty; calibrated R²0.83–0.97; chosen engine = vector PySLM analysis.getLayerTime; machine's own time-calc is WRONG
+- [Magics file format](magics-file-format.md) — decode .magics (ZIP w/ MT→PK sig; int32 0.1µm verts; header.xml encrypted); or just export to STL
+- [Printers-companion](printers-companion.md) — ArtemIvanchenko/Printers-companion: M-350 SLM analytics system, v1.3.0, Docker Compose, FastAPI+PG+Redis+MinIO, 157 tests
+- [PLA DB architecture](pla-db-architecture.md) — commit unit-of-work boundary (repos never commit) + Alembic auto-migration (create_all only for tests); target conventions
+- [M350 machine params](m350-machine-params.md) — verified params from manuals+screen: Al preset hatch=1528/contour=600/step=0.12/60µm/jump=3000, build_area=1225cm², laser=2; curl cmd ready; steel preset not yet photographed
+- [No hardcode touch](feedback_no_hardcode_touch.md) — не трогать _CHAMBER_MAX_CM3 и M350 chamber comment в uploads.py
+- [Check existing first](feedback_check_existing_first.md) — перед реализацией искать готовое: в проекте, PyPI, stdlib
