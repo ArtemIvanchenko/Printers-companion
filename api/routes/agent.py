@@ -64,7 +64,7 @@ def notification_sent(
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     ok = repo.mark_notification_sent(notification_id, status_value="sent")
-    repo.commit()
+    repo.flush()
     return {"ok": ok, "notification_id": notification_id}
 
 
@@ -80,7 +80,7 @@ def notification_failed(
         status_value="failed",
         error=str(payload.get("error", ""))[:1000] or None,
     )
-    repo.commit()
+    repo.flush()
     return {"ok": ok, "notification_id": notification_id}
 
 
@@ -123,7 +123,7 @@ def agent_send_import_confirmation(
         return {"error": "not_found"}
     notification = build_import_confirmation_message(import_job_id, job.source_name)
     repo.save_notifications([notification])
-    repo.commit()
+    repo.flush()
     return notification.model_dump(mode="json")
 
 
@@ -142,5 +142,5 @@ def agent_send_import_summary(
         job.missing_context_questions,
     )
     repo.save_notifications([notification])
-    repo.commit()
+    repo.flush()
     return notification.model_dump(mode="json")

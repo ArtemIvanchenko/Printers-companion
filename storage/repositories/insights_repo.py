@@ -10,8 +10,9 @@ class InsightsRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def commit(self) -> None:
-        self.db.commit()
+    def flush(self) -> None:
+        """Flush pending changes within the unit of work; the boundary commits."""
+        self.db.flush()
 
     def save_insight(self, insight: PatternInsight) -> None:
         existing = self.db.get(PatternInsight, insight.insight_id)

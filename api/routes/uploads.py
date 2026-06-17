@@ -66,13 +66,13 @@ def _trigger_rescan(path: str) -> None:
             from domain.services.session_grouping import group_files_into_sessions
             from domain.services.session_overview import build_group_overview
             from profiles.m350.profile import build_registry, get_profile
-            from storage.db.session import SessionLocal
+            from storage.db.session import session_scope
             from storage.repositories.runtime import RuntimeRepository
 
             folder = Path(path)
             result = IngestionService(build_registry(), get_profile()).parse(folder)
             groups = group_files_into_sessions(result.files)
-            with SessionLocal() as db:
+            with session_scope() as db:
                 repo = RuntimeRepository(db)
                 existing = {sid for sid, _ in repo.list_session_payloads()}
                 for group in groups:
@@ -92,7 +92,6 @@ def _trigger_rescan(path: str) -> None:
                 from domain.services.print_linking import auto_link_print_records
 
                 auto_link_print_records(db)
-                repo.commit()
             logger.info("upload rescan: complete, %d groups", len(groups))
         except Exception:
             logger.exception("upload rescan: failed")
@@ -122,7 +121,7 @@ async def new_print(payload: dict) -> dict:
       models     – list of model names / quantities (free text or list)
       note       – optional note
     """
-    from storage.db.session import SessionLocal
+    from storage.db.session import session_scope
     from storage.repositories.runtime import RuntimeRepository
     from domain.models.entities import OperatorEvent
 
@@ -150,10 +149,9 @@ async def new_print(payload: dict) -> dict:
     }
 
     try:
-        with SessionLocal() as db:
+        with session_scope() as db:
             repo = RuntimeRepository(db)
             repo.save_operator_event(record)
-            repo.commit()
     except Exception:
         logger.exception("new_print: failed to save")
         raise HTTPException(500, "Не удалось сохранить запись")
@@ -283,8 +281,14 @@ def _historical_rate() -> dict:
         return {"sessions_used": 0, "avg_duration_min": None}
 
 
-def _geometry_prediction(data: bytes, material: str, mode: str = "excel") -> dict:
+def _geometry_prediction(
+    data: bytes, material: str, mode: str = "excel", hatch_distance_mm: float | None = None,
+) -> dict:
     """Slice the STL and predict time + cost from machine parameters.
+
+    ``hatch_distance_mm`` — операторский override шага штриховки на этот расчёт
+    (шаг зависит от режима печати; задаётся в окошке расчёта). Если не задан,
+    берётся значение из параметров машины.
 
     Returns the response "prediction" field; degrades to
     {"available": False, "reason": ...} instead of failing the request.
@@ -300,6 +304,9 @@ def _geometry_prediction(data: bytes, material: str, mode: str = "excel") -> dic
     except Exception:
         logger.exception("stl_estimate: machine params unavailable")
         return {"available": False, "reason": "База параметров машины недоступна"}
+
+    if hatch_distance_mm and hatch_distance_mm > 0 and params is not None:
+        params = {**params, "hatch_distance_mm": float(hatch_distance_mm)}
 
     from api.routes.machine_settings import params_configured
 
@@ -343,17 +350,25 @@ def _geometry_prediction(data: bytes, material: str, mode: str = "excel") -> dic
 
 
 @router.post("/stl-estimate")
-async def stl_estimate(file: UploadFile, material: str = "steel", method: str = "fast") -> dict:
+async def stl_estimate(
+    file: UploadFile,
+    material: str = "steel",
+    method: str = "fast",
+    hatch_distance_mm: float | None = None,
+) -> dict:
     """Upload an STL file → volume, historical reference and (when machine
     parameters are configured) a geometry-based time + cost prediction.
 
     method=fast     → операторская Excel-формула («рассчитать быстро»)
     method=accurate → PySLM, реальные траектории лазера («рассчитать точно»)
+    hatch_distance_mm → override шага штриховки на этот расчёт (зависит от режима)
     """
     if not (file.filename or "").lower().endswith(".stl"):
         raise HTTPException(422, "Ожидается файл .stl")
     if method not in ("fast", "accurate"):
         raise HTTPException(422, "method должен быть 'fast' или 'accurate'")
+    if hatch_distance_mm is not None and hatch_distance_mm <= 0:
+        raise HTTPException(422, "hatch_distance_mm должен быть > 0")
 
     data = await file.read()
     if len(data) > 200 * 1024 * 1024:
@@ -368,7 +383,9 @@ async def stl_estimate(file: UploadFile, material: str = "steel", method: str = 
 
     warnings = _stl_warnings(file.filename or "", volume_cm3)
     mode = "pyslm" if method == "accurate" else "excel"
-    prediction = _geometry_prediction(data, (material or "steel").strip().lower(), mode=mode)
+    prediction = _geometry_prediction(
+        data, (material or "steel").strip().lower(), mode=mode, hatch_distance_mm=hatch_distance_mm,
+    )
 
     return {
         "filename": file.filename,

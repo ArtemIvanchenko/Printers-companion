@@ -7,25 +7,21 @@ from sqlalchemy import select
 
 from domain.models.quality import MaintenanceRecord
 from domain.services.maintenance import get_maintenance_status
-from storage.db.session import SessionLocal
+from storage.db.session import session_scope
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 
 @router.get("/status")
 def maintenance_status() -> list[dict]:
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         return get_maintenance_status(db)
-    finally:
-        db.close()
 
 
 @router.post("/reset/{component}")
 def reset_component(component: str, notes: str = "") -> dict:
     """Record that a consumable was serviced / replaced (resets the wear clock)."""
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         rec = MaintenanceRecord(
             component=component,
             action="replaced_or_serviced",
@@ -33,16 +29,13 @@ def reset_component(component: str, notes: str = "") -> dict:
             notes=notes or None,
         )
         db.add(rec)
-        db.commit()
+        db.flush()
         return {"ok": True, "component": component, "timestamp": rec.timestamp.isoformat()}
-    finally:
-        db.close()
 
 
 @router.get("/history")
 def maintenance_history() -> list[dict]:
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         recs = db.execute(
             select(MaintenanceRecord).order_by(MaintenanceRecord.timestamp.desc()).limit(100)
         ).scalars().all()
@@ -56,5 +49,3 @@ def maintenance_history() -> list[dict]:
             }
             for r in recs
         ]
-    finally:
-        db.close()

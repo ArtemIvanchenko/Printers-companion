@@ -152,7 +152,7 @@ def _persist_result(result: ImportExecutionResult, repo: RuntimeRepository) -> N
     repo.save_notifications(result.notifications)
     repo.save_sessions(result.sessions)
     repo.save_reports(result.reports)
-    repo.commit()
+    repo.flush()
 
 
 def _response(result: ImportExecutionResult) -> dict:

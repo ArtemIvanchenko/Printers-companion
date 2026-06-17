@@ -20,6 +20,27 @@ def _ensure_schema():
 
 
 @pytest.fixture(autouse=True)
+def _clean_db(_ensure_schema):
+    """Empty every table before each test.
+
+    The harness uses a shared sqlite *file* (NullPool can't share an in-memory
+    DB across connections), so rows committed by one test persist into the
+    next. Tests that insert fixed ids (e.g. ``s_cand_a``) would then collide on
+    UNIQUE constraints on a rerun or full-suite run. Wiping tables per test
+    keeps them isolated and idempotent.
+    """
+    from storage.db.session import engine
+    if engine.url.get_backend_name() != "sqlite":
+        yield
+        return
+    from storage.db.base import Base
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _stub_object_store(monkeypatch):
     """No MinIO in the test harness: make the real ObjectStore report unavailable
     so report offload short-circuits without a slow network round-trip. Tests that
