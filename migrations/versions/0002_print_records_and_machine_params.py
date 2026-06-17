@@ -5,6 +5,7 @@ Revises: 0001_initial_metadata
 Create Date: 2026-06-12
 """
 
+import sqlalchemy as sa
 from alembic import op
 
 from storage.db.base import Base
@@ -21,9 +22,13 @@ _TABLES = ("print_record_files", "print_records", "machine_params")
 
 
 def upgrade() -> None:
-    # create_all skips tables that already exist (fresh DBs get them in 0001,
-    # which creates the full metadata including these models).
-    Base.metadata.create_all(bind=op.get_bind())
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    # Pre-Alembic databases already have these tables — skip create_all to avoid
+    # DDL lock contention on existing tables inside a PostgreSQL transaction.
+    if all(inspector.has_table(t) for t in _TABLES):
+        return
+    Base.metadata.create_all(bind=bind)
 
 
 def downgrade() -> None:
