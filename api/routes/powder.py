@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from domain.models.quality import MaterialBatch, PowderPreparationEvent, PowderUsageCycle
-from storage.db.session import SessionLocal
+from storage.db.session import session_scope
 
 router = APIRouter(prefix="/powder", tags=["powder"])
 
@@ -35,8 +35,7 @@ class ConsumeRequest(BaseModel):
 
 @router.post("/batches")
 def create_batch(body: BatchCreate) -> dict:
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         batch = MaterialBatch(
             material=body.material,
             alloy=body.alloy,
@@ -54,16 +53,13 @@ def create_batch(body: BatchCreate) -> dict:
                        "ts": datetime.now(timezone.utc).isoformat()}],
         )
         db.add(cycle)
-        db.commit()
+        db.flush()
         return {"batch_id": batch.material_batch_id, "cycle_id": cycle.powder_cycle_id}
-    finally:
-        db.close()
 
 
 @router.get("/batches")
 def list_batches() -> list[dict]:
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         batches = db.execute(
             select(MaterialBatch).order_by(MaterialBatch.created_at.desc()).limit(50)
         ).scalars().all()
@@ -93,14 +89,11 @@ def list_batches() -> list[dict]:
                 "active_cycle": latest_cycle.powder_cycle_id if latest_cycle else None,
             })
         return result
-    finally:
-        db.close()
 
 
 @router.post("/batches/{batch_id}/consume")
 def log_consumption(batch_id: str, body: ConsumeRequest) -> dict:
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         batch = db.get(MaterialBatch, batch_id)
         if not batch:
             raise HTTPException(404, "Batch not found")
@@ -138,17 +131,14 @@ def log_consumption(batch_id: str, body: ConsumeRequest) -> dict:
                 payload={"session_id": body.session_id, "layers": body.layers},
             )
         )
-        db.commit()
+        db.flush()
         return {"ok": True, "consumed_kg": kg, "cycle_id": cycle.powder_cycle_id}
-    finally:
-        db.close()
 
 
 @router.get("/status")
 def powder_status() -> dict[str, Any]:
     """Summary of the active (most recent) powder batch."""
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         batches = db.execute(
             select(MaterialBatch).order_by(MaterialBatch.created_at.desc()).limit(1)
         ).scalars().first()
@@ -184,5 +174,3 @@ def powder_status() -> dict[str, Any]:
             "quality_pct": quality_pct,
             "quality_grade": "ok" if quality_pct >= 70 else "warning" if quality_pct >= 40 else "critical",
         }
-    finally:
-        db.close()

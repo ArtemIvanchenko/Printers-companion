@@ -18,7 +18,7 @@ from analytics.cross_session import run_cross_session_analysis
 from analytics.signal_stats import compute_signal_stats   # fallback for old sessions
 from domain.models.events import OperatorEvent
 from domain.models.sessions import BuildSession
-from storage.db.session import SessionLocal
+from storage.db.session import session_scope
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -99,12 +99,9 @@ def _load_operator_events(db) -> list[dict[str, Any]]:
 
 
 def _compute() -> dict[str, Any]:
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         sessions = _load_sessions(db)
         events   = _load_operator_events(db)
-    finally:
-        db.close()
 
     result = run_cross_session_analysis(sessions, events)
     result["sessions_detail"] = sessions   # include per-session stats for the dashboard
@@ -173,12 +170,9 @@ def defect_risk_all() -> dict[str, Any]:
     """Defect-risk score for every session (learned model if enough labels, else
     heuristic). Explainable: each result carries top contributing factors."""
     from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         sessions = _load_session_groups(db)
         labels = _load_quality_labels(db)
-    finally:
-        db.close()
 
     labelled = [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
     model = train_defect_model(labelled)
@@ -202,12 +196,9 @@ def defect_risk_all() -> dict[str, Any]:
 def defect_risk_one(session_id: str) -> dict[str, Any]:
     """Defect-risk for a single session with explanation."""
     from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         sessions = _load_session_groups(db)
         labels = _load_quality_labels(db)
-    finally:
-        db.close()
 
     target = next((s for s in sessions if s["session_id"] == session_id), None)
     if target is None:
@@ -224,11 +215,8 @@ def maintenance_forecast() -> dict[str, Any]:
     """Project per-signal drift toward alarm thresholds (predictive maintenance)."""
     from analytics.prediction.maintenance import forecast_maintenance
     from analytics.thresholds import load_alarm_thresholds
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         sessions = _load_sessions(db)  # already chronological, carries signal_stats
-    finally:
-        db.close()
     forecasts = forecast_maintenance(sessions, load_alarm_thresholds())
     return {"n_sessions": len(sessions), "forecasts": forecasts}
 
