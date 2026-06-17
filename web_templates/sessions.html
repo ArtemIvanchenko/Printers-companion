@@ -40,10 +40,11 @@
         </div>
     </div>
     <script>
+        function esc(v) { const d = document.createElement('div'); d.textContent = v == null ? '-' : String(v); return d.innerHTML; }
         fetch('http://localhost:8000/sessions/').then(r => r.json()).then(data => {
             const tbody = document.querySelector('#sessions-table tbody');
             (data.sessions || []).forEach(s => {
-                tbody.innerHTML += `<tr><td>${s.session_id}</td><td>${s.start_ts || '-'}</td><td>${s.classification || '-'}</td><td>${s.material || '-'}</td><td>${s.duration_sec ? Math.round(s.duration_sec/60) + ' мин' : '-'}</td></tr>`;
+                tbody.innerHTML += `<tr><td>${esc(s.session_id)}</td><td>${esc(s.start_ts)}</td><td>${esc(s.classification)}</td><td>${esc(s.material)}</td><td>${s.duration_sec ? esc(Math.round(s.duration_sec/60) + ' мин') : '-'}</td></tr>`;
             });
         });
     </script>

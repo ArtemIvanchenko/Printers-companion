@@ -40,10 +40,11 @@
         </div>
     </div>
     <script>
+        function esc(v) { const d = document.createElement('div'); d.textContent = v == null ? '-' : String(v); return d.innerHTML; }
         fetch('http://localhost:8000/quality/').then(r => r.json()).then(data => {
             const tbody = document.querySelector('#quality-table tbody');
             (data.outcomes || []).forEach(q => {
-                tbody.innerHTML += `<tr><td>${q.outcome_id}</td><td>${q.session_id || '-'}</td><td>${q.timestamp || '-'}</td><td>${q.inspection_type || '-'}</td><td>${q.result || '-'}</td><td>${q.defect_type || '-'}</td></tr>`;
+                tbody.innerHTML += `<tr><td>${esc(q.outcome_id)}</td><td>${esc(q.session_id)}</td><td>${esc(q.timestamp)}</td><td>${esc(q.inspection_type)}</td><td>${esc(q.result)}</td><td>${esc(q.defect_type)}</td></tr>`;
             });
         });
     </script>

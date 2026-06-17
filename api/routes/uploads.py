@@ -283,12 +283,15 @@ def _historical_rate() -> dict:
 
 def _geometry_prediction(
     data: bytes, material: str, mode: str = "excel", hatch_distance_mm: float | None = None,
+    powder_cost_override: float | None = None,
 ) -> dict:
     """Slice the STL and predict time + cost from machine parameters.
 
     ``hatch_distance_mm`` — операторский override шага штриховки на этот расчёт
     (шаг зависит от режима печати; задаётся в окошке расчёта). Если не задан,
     берётся значение из параметров машины.
+    ``powder_cost_override`` — стоимость порошка из карточки печати; имеет приоритет
+    над последней ценой из архива.
 
     Returns the response "prediction" field; degrades to
     {"available": False, "reason": ...} instead of failing the request.
@@ -300,7 +303,7 @@ def _geometry_prediction(
         with SessionLocal() as db:
             repo = PrintsRepository(db)
             params = repo.get_machine_params()
-            powder_cost = repo.last_powder_cost()
+            powder_cost = powder_cost_override if powder_cost_override is not None else repo.last_powder_cost()
     except Exception:
         logger.exception("stl_estimate: machine params unavailable")
         return {"available": False, "reason": "База параметров машины недоступна"}

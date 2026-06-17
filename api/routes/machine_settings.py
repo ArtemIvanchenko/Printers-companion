@@ -27,7 +27,7 @@ _DICT_FIELDS = {"material_densities", "hatch_speeds_by_mat"}
 
 # Fields the time/cost estimators cannot work without
 _REQUIRED_FOR_ESTIMATION = (
-    "hatch_speed_mm_s", "contour_speed_mm_s", "layer_thickness_mm", "laser_count",
+    "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm", "layer_thickness_mm", "laser_count",
 )
 
 
