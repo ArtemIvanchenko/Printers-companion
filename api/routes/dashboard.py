@@ -112,15 +112,16 @@ def get_quality_paginated(db: Session, skip: int = 0, limit: int = 1000):
 
 
 
-def get_latest_print_telemetry(db: Session):
-    """Return (label, telemetry) for the most data-rich REAL_PRINT session.
+_MONTHS_RU = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
 
-    Telemetry is the compact process series (oxygen / temperatures / pressure /
-    humidity / per-layer burn time) decoded from the M-450-M signal dictionary and
-    stored on the session payload during ingest.
-    """
+
+def get_latest_print_telemetry(db: Session):
+    """Return (label, telemetry, health, start_ts) for the most data-rich REAL_PRINT session."""
     stmt = select(BuildSession).order_by(BuildSession.start_ts.desc()).limit(500)
-    best_label, best_tel, best_health, best_score = None, {}, {}, -1
+    best_label, best_tel, best_health, best_start_ts, best_score = None, {}, {}, None, -1
     for s in db.execute(stmt).scalars().all():
         group = ((s.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
         if group.get("classification") != "REAL_PRINT":
@@ -133,8 +134,9 @@ def get_latest_print_telemetry(db: Session):
             best_label = s.session_id.replace("session_", "")
             best_tel = tel
             best_health = group.get("health") or {}
+            best_start_ts = s.start_ts
             best_score = score
-    return best_label, best_tel, best_health
+    return best_label, best_tel, best_health, best_start_ts
 
 
 # ---- Template rendering ----
@@ -228,7 +230,7 @@ async def dashboard():
         gas_events = get_gas_events_paginated(db, skip=0, limit=10_000)
         powder_events = get_powder_events_paginated(db, skip=0, limit=10_000)
         quality = get_quality_paginated(db, skip=0, limit=10_000)
-        tel_label, telemetry, health = get_latest_print_telemetry(db)
+        tel_label, telemetry, health, tel_start_ts = get_latest_print_telemetry(db)
     
     # Stats
     total = len(sessions)
@@ -270,7 +272,17 @@ async def dashboard():
     tel_burn_labels = json.dumps([b["layer"] for b in tel_burn])
     tel_burn_data = json.dumps([b["duration_sec"] for b in tel_burn])
     has_telemetry = bool(telemetry.get("time"))
-    tel_subtitle = f"Печать {tel_label}" if tel_label else "нет данных телеметрии"
+    if tel_label and tel_start_ts:
+        _d = tel_start_ts.day
+        _m = _MONTHS_RU[tel_start_ts.month - 1]
+        _y = tel_start_ts.year
+        _hm = tel_start_ts.strftime("%H:%M")
+        tel_subtitle = f"{_d} {_m} {_y} · {_hm}"
+    elif tel_label:
+        tel_subtitle = tel_label
+    else:
+        tel_subtitle = "нет данных"
+    tel_session_id = tel_label or ""
 
     # Build labelled datasets (canonical names from the signal dictionary).
     _sig_titles = {
@@ -454,6 +466,7 @@ async def dashboard():
         "EXPR_QUALITY_ROWS": _quality_table_rows(quality),
         "EXPR_SESSION_ROWS": _session_table_rows(sessions),
         "EXPR_GAS_ROWS": _gas_table_rows(gas_events),
+        "EXPR_TEL_SESSION_ID": json.dumps(tel_session_id),
     }
 
     return HTMLResponse(_render_template(ctx))

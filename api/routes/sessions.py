@@ -88,6 +88,51 @@ def list_sessions(
     return PaginatedResponse(items=items, total=total, skip=skip, limit=limit).to_dict()
 
 
+@router.get("/telemetry-list")
+def list_sessions_with_telemetry(
+    repo: RuntimeRepository = Depends(get_runtime_repository),
+) -> list:
+    """List REAL_PRINT sessions that have telemetry data, newest first."""
+    result = []
+    for session_id, payload in repo.list_session_payloads():
+        group = payload.get("group") or {}
+        if group.get("classification") != "REAL_PRINT":
+            continue
+        tel = group.get("telemetry") or {}
+        if not tel.get("time"):
+            continue
+        result.append({
+            "session_id": session_id,
+            "start_ts": group.get("start_ts"),
+            "end_ts": group.get("end_ts"),
+            "duration_min": group.get("duration_min"),
+        })
+    result.sort(key=lambda x: x.get("start_ts") or "", reverse=True)
+    return result
+
+
+@router.get("/{session_id}/telemetry")
+def get_session_telemetry(
+    session_id: str,
+    repo: RuntimeRepository = Depends(get_runtime_repository),
+) -> dict:
+    """Return telemetry data for a specific session."""
+    payload = repo.get_session_payload(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Session not found")
+    group = payload.get("group") or {}
+    tel = group.get("telemetry") or {}
+    return {
+        "session_id": session_id,
+        "start_ts": group.get("start_ts"),
+        "end_ts": group.get("end_ts"),
+        "duration_min": group.get("duration_min"),
+        "telemetry": tel,
+        "health": group.get("health") or {},
+        "has_telemetry": bool(tel.get("time")),
+    }
+
+
 @router.get("/{session_id}")
 def get_session(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
     payload = repo.get_session_payload(session_id)
