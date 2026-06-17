@@ -142,10 +142,10 @@ async def get_logs(n: int = 200, level: str | None = None) -> list[dict]:
 @router.get("/import/status")
 async def import_status() -> dict:
     """Quick summary for the dashboard status card: session count + last import."""
-    from storage.db.session import SessionLocal
+    from storage.db.session import session_scope
     from storage.repositories.runtime import RuntimeRepository
     try:
-        with SessionLocal() as db:
+        with session_scope() as db:
             repo = RuntimeRepository(db)
             sessions = repo.list_session_payloads()
             jobs = repo.list_import_jobs()

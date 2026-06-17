@@ -165,7 +165,7 @@ def approve_session(
 ) -> dict:
     """Mark session as 'OK' and update tolerance rules."""
     from core.tolerance import learn_from_session
-    from storage.db.session import SessionLocal
+    from storage.db.session import session_scope
 
     files = repo.get_session_files(session_id)
     if files is None:
@@ -177,7 +177,7 @@ def approve_session(
 
     confirmed_by = (payload or {}).get("confirmed_by", "unknown")
 
-    with SessionLocal() as db:
+    with session_scope() as db:
         rules = learn_from_session(db, session_id, features, confirmed_by=confirmed_by)
 
     return {
