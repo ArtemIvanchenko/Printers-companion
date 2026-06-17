@@ -204,35 +204,40 @@
                 style="font-family:monospace;font-size:13px;background:#1e2433;border:1px solid #2d3748;
                        padding:4px 12px;border-radius:20px;cursor:pointer;color:#10b981;white-space:nowrap;"
                 title="Журнал изменений">v…</span>
-            <div class="nav-more" id="gear-menu" style="position:relative;">
-                <button onclick="toggleGear(event)"
-                    style="background:#1e2433;border:1px solid #2d3748;color:#a0aec0;
-                           width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:16px;
-                           display:flex;align-items:center;justify-content:center;"
-                    title="Дополнительно">⚙</button>
-                <div class="nav-more-menu" id="gear-dropdown" style="right:0;min-width:200px;">
-                    <a onclick="showGearPage('upload',event)">📂 Загрузка логов</a>
-                    <a onclick="showGearPage('logs',event)">📋 Логи системы</a>
-                    <a onclick="showGearPage('update',event)">⬆️ Обновление</a>
-                </div>
-            </div>
         </div>
     </div>
 
     <nav class="nav" id="main-nav">
         <a href="#" onclick="showMainTab('home',event)" id="nav-home" class="active">🏠 Главная</a>
-        <a href="#" onclick="showMainTab('analytics',event)" id="nav-analytics">📊 Аналитика</a>
-        <a href="#" onclick="showMainTab('models',event)" id="nav-models">🧊 Модели</a>
-        <a href="#" onclick="showMainTab('archive',event)" id="nav-archive">📦 Архив</a>
-        <a href="#" onclick="showMainTab('maintenance',event)" id="nav-maintenance">⚙️ Обслуживание</a>
+        <a href="#" onclick="showMainTab('prints',event)" id="nav-prints">📋 Печати</a>
+        <a href="#" onclick="showMainTab('sessions',event)" id="nav-sessions">📊 Сессии</a>
+        <a href="#" onclick="showMainTab('settings',event)" id="nav-settings">⚙️ Настройки</a>
+        <a href="#" onclick="showMainTab('maintenance',event)" id="nav-maintenance">🔧 Обслуживание</a>
+        <button onclick="openNewPrintRecord()"
+            style="margin-left:auto;background:#10b981;color:white;border:none;border-radius:8px;
+                   padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">
+            + Печать
+        </button>
     </nav>
 
-    <!-- Аналитика sub-nav -->
-    <div class="subnav" id="analytics-subnav" style="display:none;">
-        <a onclick="showAnalyticsPage('telemetry',event)" id="subnav-telemetry">🌡️ Телеметрия</a>
-        <a onclick="showAnalyticsPage('history',event)" id="subnav-history">📋 История</a>
-        <a onclick="showAnalyticsPage('quality',event)" id="subnav-quality">✅ Качество</a>
-        <a onclick="showAnalyticsPage('patterns',event)" id="subnav-patterns">🔍 Тренды</a>
+    <!-- Печати sub-nav -->
+    <div class="subnav" id="prints-subnav" style="display:none;">
+        <a onclick="showPrintsPage('archive',event)" id="subnav-prints-archive">📦 Карточки</a>
+        <a onclick="showPrintsPage('models',event)" id="subnav-prints-models">🧊 Модели</a>
+    </div>
+    <!-- Сессии sub-nav -->
+    <div class="subnav" id="sessions-subnav" style="display:none;">
+        <a onclick="showSessionsPage('telemetry',event)" id="subnav-telemetry">🌡️ Телеметрия</a>
+        <a onclick="showSessionsPage('history',event)" id="subnav-history">📋 История</a>
+        <a onclick="showSessionsPage('quality',event)" id="subnav-quality">✅ Качество</a>
+        <a onclick="showSessionsPage('patterns',event)" id="subnav-patterns">🔍 Тренды</a>
+        <a onclick="showSessionsPage('upload',event)" id="subnav-upload">📂 Загрузка</a>
+    </div>
+    <!-- Настройки sub-nav -->
+    <div class="subnav" id="settings-subnav" style="display:none;">
+        <a onclick="showSettingsPage('params',event)" id="subnav-settings-params">⚙️ Машина</a>
+        <a onclick="showSettingsPage('logs',event)" id="subnav-settings-logs">📋 Логи</a>
+        <a onclick="showSettingsPage('update',event)" id="subnav-settings-update">⬆️ Обновление</a>
     </div>
     <!-- Обслуживание sub-nav -->
     <div class="subnav" id="maintenance-subnav" style="display:none;">
@@ -278,12 +283,12 @@
 
             <!-- Quick actions -->
             <div class="quick-actions">
-                <button class="quick-btn primary" onclick="openNewPrint()">🖨️ Зарегистрировать печать</button>
+                <button class="quick-btn primary" onclick="openNewPrintRecord()">📋 Новая карточка печати</button>
                 <button class="quick-btn" onclick="document.getElementById('file-input-home').click()">📂 Загрузить логи
                     <input id="file-input-home" type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadFiles(this.files)">
                 </button>
-                <button class="quick-btn" onclick="showMainTab('analytics',null);showAnalyticsPage('telemetry',null)">🌡️ Телеметрия</button>
-                <button class="quick-btn" onclick="showMainTab('analytics',null);showAnalyticsPage('patterns',null)">🔍 Тренды</button>
+                <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('telemetry',null)">🌡️ Телеметрия</button>
+                <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('patterns',null)">🔍 Тренды</button>
             </div>
 
             <!-- Key metrics -->
@@ -318,7 +323,7 @@
             <div class="section">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
                     <h2 style="margin:0;">Последние печати</h2>
-                    <a onclick="showMainTab('analytics',null);showAnalyticsPage('history',null)"
+                    <a onclick="showMainTab('sessions',null);showSessionsPage('history',null)"
                        style="color:#60a5fa;font-size:13px;cursor:pointer;text-decoration:none;">Все сессии →</a>
                 </div>
                 <div class="recent-grid" id="home-recent-sessions">
@@ -350,9 +355,17 @@
         <!-- Telemetry Page -->
         <div id="page-telemetry" style="display:none;">
             <div class="section" style="margin-bottom:20px;">
-                <h2>🌡️ Телеметрия процесса <span style="color:#60a5fa;font-size:14px;">({!EXPR8!})</span></h2>
+                <div style="display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin-bottom:8px;">
+                    <h2 style="margin:0;">🌡️ Телеметрия</h2>
+                    <select id="tel-session-select" class="mp-input"
+                        style="max-width:300px;flex:1;"
+                        onchange="loadTelemetryForSession(this.value)">
+                        <option value="">Загрузка печатей...</option>
+                    </select>
+                    <span id="tel-subtitle" style="color:#60a5fa;font-size:13px;">{!EXPR8!}</span>
+                </div>
                 <p style="color:#6b7280;font-size:13px;margin-top:6px;">
-                    Сигналы расшифрованы по словарю M-450-M (мнемосхема LaserStudio): O₂ — окисление,
+                    Сигналы расшифрованы по словарю M-450-M: O₂ — окисление,
                     температуры стола/камеры, давление и влажность инертной атмосферы, время прожига по слоям.
                 </p>
             </div>
@@ -720,17 +733,13 @@
             <div class="section" style="margin-bottom:20px;">
                 <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
                     <div>
-                        <h2 style="margin:0;">📦 Архив печатей</h2>
-                        <p style="color:#6b7280;font-size:13px;margin-top:6px;">Карточки печатей: STL, Magics, фото, документы и привязанные логи — всё в одном месте.</p>
+                        <h2 style="margin:0;">📦 Карточки печатей</h2>
+                        <p style="color:#6b7280;font-size:13px;margin-top:6px;">STL, Magics, фото, документы и привязанные сессии — всё в одном месте.</p>
                     </div>
                     <div style="display:flex;gap:10px;">
                         <button onclick="toggleArchiveForm()"
                             style="background:#10b981;color:white;border:none;border-radius:8px;padding:10px 20px;font-size:14px;cursor:pointer;">
-                            + Новая печать
-                        </button>
-                        <button onclick="toggleMachineParams()"
-                            style="background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:8px;padding:10px 14px;font-size:13px;cursor:pointer;">
-                            ⚙️ Параметры машины
+                            + Новая карточка
                         </button>
                     </div>
                 </div>
@@ -771,57 +780,6 @@
                         ✅ Создать карточку
                     </button>
                     <div id="ar-form-result" style="font-size:13px;text-align:center;"></div>
-                </div>
-            </div>
-
-            <!-- Machine params form (hidden until gear clicked) -->
-            <div class="section" id="machine-params-form" style="display:none;max-width:760px;margin:0 auto 20px;">
-                <h2 style="margin-bottom:6px;font-size:16px;">⚙️ Параметры машины M-450M</h2>
-                <p style="color:#6b7280;font-size:12px;margin-bottom:16px;">
-                    Используются для расчёта времени печати и себестоимости. Пустое поле — параметр не задан.
-                </p>
-                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;" id="mp-grid">
-                    <div><label class="mp-label">Скорость штриховки (мм/с)</label><input class="mp-input" id="mp-hatch_speed_mm_s" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Скорость контуров (мм/с)</label><input class="mp-input" id="mp-contour_speed_mm_s" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label" title="Расстояние между линиями штриховки (мм). Обязательно для расчёта времени; скорость штриховки трактуется как реальная скорость лазера (мм/с).">Шаг штриховки (мм) ⓘ</label><input class="mp-input" id="mp-hatch_distance_mm" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Толщина слоя (мм)</label><input class="mp-input" id="mp-layer_thickness_mm" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Количество лазеров</label><input class="mp-input" id="mp-laser_count" type="number" min="1" step="1"></div>
-                    <div><label class="mp-label">Время нанесения слоя (мс)</label><input class="mp-input" id="mp-recoat_time_ms" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Порошок (руб/кг)</label><input class="mp-input" id="mp-powder_cost_rub_per_kg" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Газ (руб/атм)</label><input class="mp-input" id="mp-gas_cost_rub_per_atm" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Газ на печать (атм)</label><input class="mp-input" id="mp-gas_atm_per_print" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Фильтр (руб/шт)</label><input class="mp-input" id="mp-filter_cost_rub" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Ресурс фильтра (ч)</label><input class="mp-input" id="mp-filter_lifetime_hours" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Платформа (руб/шт)</label><input class="mp-input" id="mp-platform_cost_rub" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label">Площадь стола (см²)</label><input class="mp-input" id="mp-build_area_cm2" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label" title="Множитель к точному (PySLM) расчёту времени. Калибруется по истории прогноз/факт.">Поправка времени ⓘ</label><input class="mp-input" id="mp-time_correction_factor" type="number" min="0" step="any" placeholder="1.0"></div>
-                </div>
-                <div id="mp-calibration" style="margin-top:14px;font-size:12px;color:#a0aec0;"></div>
-                <h3 style="color:#a0aec0;font-size:13px;margin:18px 0 10px;">По материалам</h3>
-                <div style="overflow-x:auto;">
-                    <table style="width:100%;border-collapse:collapse;font-size:13px;">
-                        <thead><tr style="color:#6b7280;text-align:left;">
-                            <th style="padding:6px 10px;">Материал</th>
-                            <th style="padding:6px 10px;">Плотность (г/см³)</th>
-                            <th style="padding:6px 10px;">Скорость штриховки (мм/с)</th>
-                        </tr></thead>
-                        <tbody id="mp-materials"></tbody>
-                    </table>
-                </div>
-                <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
-                    <input id="mp-new-material" type="text" class="mp-input" placeholder="новый материал (латиницей, напр. inconel)"
-                        style="max-width:280px;">
-                    <button onclick="addMpMaterial()"
-                        style="background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;">
-                        + Добавить материал
-                    </button>
-                </div>
-                <div style="display:flex;align-items:center;gap:14px;margin-top:16px;">
-                    <button onclick="saveMachineParams()"
-                        style="background:#3b82f6;color:white;border:none;border-radius:10px;padding:12px 28px;font-size:14px;font-weight:600;cursor:pointer;">
-                        💾 Сохранить
-                    </button>
-                    <span id="mp-status" style="font-size:13px;color:#6b7280;"></span>
                 </div>
             </div>
 
@@ -869,6 +827,59 @@
                     </table>
                 </div>
                 <div id="archive-pagination" style="display:flex;justify-content:center;gap:10px;margin-top:14px;"></div>
+            </div>
+        </div>
+
+        <!-- Settings Page -->
+        <div id="page-settings" style="display:none;">
+            <div class="section" style="max-width:760px;margin:0 auto 28px;">
+                <h2 style="margin-bottom:6px;">⚙️ Параметры машины M-450M</h2>
+                <p style="color:#6b7280;font-size:12px;margin-bottom:16px;">
+                    Используются для расчёта времени печати и себестоимости. Пустое поле — параметр не задан.
+                </p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;" id="mp-grid">
+                    <div><label class="mp-label">Скорость штриховки (мм/с)</label><input class="mp-input" id="mp-hatch_speed_mm_s" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Скорость контуров (мм/с)</label><input class="mp-input" id="mp-contour_speed_mm_s" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label" title="Расстояние между линиями штриховки (мм).">Шаг штриховки (мм) ⓘ</label><input class="mp-input" id="mp-hatch_distance_mm" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Толщина слоя (мм)</label><input class="mp-input" id="mp-layer_thickness_mm" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Количество лазеров</label><input class="mp-input" id="mp-laser_count" type="number" min="1" step="1"></div>
+                    <div><label class="mp-label">Время нанесения слоя (мс)</label><input class="mp-input" id="mp-recoat_time_ms" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Порошок (руб/кг)</label><input class="mp-input" id="mp-powder_cost_rub_per_kg" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Газ (руб/атм)</label><input class="mp-input" id="mp-gas_cost_rub_per_atm" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Газ на печать (атм)</label><input class="mp-input" id="mp-gas_atm_per_print" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Фильтр (руб/шт)</label><input class="mp-input" id="mp-filter_cost_rub" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Ресурс фильтра (ч)</label><input class="mp-input" id="mp-filter_lifetime_hours" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Платформа (руб/шт)</label><input class="mp-input" id="mp-platform_cost_rub" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label">Площадь стола (см²)</label><input class="mp-input" id="mp-build_area_cm2" type="number" min="0" step="any"></div>
+                    <div><label class="mp-label" title="Множитель к точному (PySLM) расчёту времени.">Поправка времени ⓘ</label><input class="mp-input" id="mp-time_correction_factor" type="number" min="0" step="any" placeholder="1.0"></div>
+                </div>
+                <div id="mp-calibration" style="margin-top:14px;font-size:12px;color:#a0aec0;"></div>
+                <h3 style="color:#a0aec0;font-size:13px;margin:18px 0 10px;">По материалам</h3>
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                        <thead><tr style="color:#6b7280;text-align:left;">
+                            <th style="padding:6px 10px;">Материал</th>
+                            <th style="padding:6px 10px;">Плотность (г/см³)</th>
+                            <th style="padding:6px 10px;">Скорость штриховки (мм/с)</th>
+                        </tr></thead>
+                        <tbody id="mp-materials"></tbody>
+                    </table>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+                    <input id="mp-new-material" type="text" class="mp-input" placeholder="новый материал (латиницей, напр. inconel)"
+                        style="max-width:280px;">
+                    <button onclick="addMpMaterial()"
+                        style="background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;">
+                        + Добавить материал
+                    </button>
+                </div>
+                <div style="display:flex;align-items:center;gap:14px;margin-top:16px;">
+                    <button onclick="saveMachineParams()"
+                        style="background:#3b82f6;color:white;border:none;border-radius:10px;padding:12px 28px;font-size:14px;font-weight:600;cursor:pointer;">
+                        💾 Сохранить
+                    </button>
+                    <span id="mp-status" style="font-size:13px;color:#6b7280;"></span>
+                </div>
             </div>
         </div>
 
@@ -1327,11 +1338,13 @@
         });
 
         // --- Process telemetry charts (decoded sensor series) ---
+        const _telCharts = {};
+        _telCharts.currentSessionId = {!EXPR_TEL_SESSION_ID!};
         const telTime = {!EXPR69!};
         function lineChart(canvasId, datasets, opts) {
             const el = document.getElementById(canvasId);
-            if (!el) return;
-            new Chart(el, {
+            if (!el) return null;
+            return new Chart(el, {
                 type: 'line',
                 data: { labels: telTime, datasets: datasets },
                 options: Object.assign({
@@ -1342,15 +1355,15 @@
                 }, opts || {})
             });
         }
-        lineChart('o2Chart', {!EXPR70!});
-        lineChart('tempChart', {!EXPR71!});
-        lineChart('humChart', {!EXPR72!});
-        lineChart('pressChart', {!EXPR73!});
+        _telCharts.o2   = lineChart('o2Chart',   {!EXPR70!});
+        _telCharts.temp = lineChart('tempChart', {!EXPR71!});
+        _telCharts.hum  = lineChart('humChart',  {!EXPR72!});
+        _telCharts.press= lineChart('pressChart',{!EXPR73!});
 
         // Per-layer burn time (bar)
         const burnEl = document.getElementById('burnLayerChart');
         if (burnEl) {
-            new Chart(burnEl, {
+            _telCharts.burn = new Chart(burnEl, {
                 type: 'bar',
                 data: {
                     labels: {!EXPR74!},
@@ -1371,13 +1384,17 @@
         }
 
         // =========================================================
-        // NAVIGATION — Главная / Аналитика / Модели / Архив / Обслуживание
+        // NAVIGATION — Главная / Печати / Сессии / Настройки / Обслуживание
         // =========================================================
-        // Subnav item → page-... element id
-        const ANALYTICS_PAGES = { telemetry: 'telemetry', history: 'sessions', quality: 'quality', patterns: 'patterns' };
-        const MAINT_PAGES     = { powder: 'powder', maint: 'maintenance', journal: 'logs' };
-        let _activeAnalyticsPage = 'telemetry';
-        let _activeMaintPage     = 'powder';
+        const SESSIONS_PAGES = { telemetry: 'telemetry', history: 'sessions', quality: 'quality', patterns: 'patterns', upload: 'upload' };
+        const PRINTS_PAGES   = { archive: 'archive', models: 'models' };
+        const SETTINGS_PAGES = { params: 'settings', logs: 'logs', update: 'update' };
+        const MAINT_PAGES    = { powder: 'powder', maint: 'maintenance', journal: 'logs' };
+
+        let _activeSessionsPage = 'telemetry';
+        let _activePrintsPage   = 'archive';
+        let _activeSettingsPage = 'params';
+        let _activeMaintPage    = 'powder';
 
         function _hideAllPages() {
             document.querySelectorAll('[id^="page-"]').forEach(el => el.style.display = 'none');
@@ -1385,40 +1402,13 @@
 
         function _setMainActive(tab) {
             document.querySelectorAll('#main-nav > a').forEach(a => a.classList.remove('active'));
-            document.getElementById('nav-' + tab)?.classList.add('active');
+            if (tab) document.getElementById('nav-' + tab)?.classList.add('active');
         }
 
         function _showSubnav(tab) {
-            document.getElementById('analytics-subnav').style.display   = tab === 'analytics'   ? 'flex' : 'none';
-            document.getElementById('maintenance-subnav').style.display = tab === 'maintenance' ? 'flex' : 'none';
-        }
-
-        function showMainTab(tab, evt) {
-            if (evt) evt.preventDefault();
-            document.getElementById('gear-menu')?.classList.remove('open');
-            _hideAllPages();
-            _showSubnav(tab);
-            _setMainActive(tab);
-
-            if (tab === 'home') {
-                document.getElementById('page-home').style.display = 'block';
-            } else if (tab === 'analytics') {
-                showAnalyticsPage(_activeAnalyticsPage, null);
-            } else if (tab === 'maintenance') {
-                showMaintenancePage(_activeMaintPage, null);
-            } else if (tab === 'models') {
-                document.getElementById('page-models').style.display = 'block';
-                loadModelHistory();
-            } else if (tab === 'archive') {
-                document.getElementById('page-archive').style.display = 'block';
-                loadArchive(); loadMachineParams(); loadPrintDefaults();
-            } else if (tab === 'stl') {
-                document.getElementById('page-stl').style.display = 'block';
-                loadStlMaterials();
-            } else if (tab === 'update') {
-                document.getElementById('page-update').style.display = 'block';
-                checkWatchtower(); loadVersionInfo(); loadImportStatus();
-            }
+            ['prints','sessions','settings','maintenance'].forEach(t => {
+                document.getElementById(t + '-subnav').style.display = tab === t ? 'flex' : 'none';
+            });
         }
 
         function _showSubPage(subnavId, pageId, subId) {
@@ -1428,13 +1418,58 @@
             document.getElementById('subnav-' + subId)?.classList.add('active');
         }
 
-        function showAnalyticsPage(page, evt) {
+        function showMainTab(tab, evt) {
             if (evt) evt.preventDefault();
-            _activeAnalyticsPage = page;
-            _showSubnav('analytics');
-            _setMainActive('analytics');
-            _showSubPage('analytics-subnav', ANALYTICS_PAGES[page] || page, page);
+            _hideAllPages();
+            _showSubnav(tab);
+            _setMainActive(tab);
+            if (tab === 'home') {
+                document.getElementById('page-home').style.display = 'block';
+                loadHomeStats();
+            } else if (tab === 'prints') {
+                showPrintsPage(_activePrintsPage, null);
+            } else if (tab === 'sessions') {
+                showSessionsPage(_activeSessionsPage, null);
+            } else if (tab === 'settings') {
+                showSettingsPage(_activeSettingsPage, null);
+            } else if (tab === 'maintenance') {
+                showMaintenancePage(_activeMaintPage, null);
+            }
+        }
+
+        function showPrintsPage(page, evt) {
+            if (evt) evt.preventDefault();
+            _activePrintsPage = page;
+            _showSubnav('prints');
+            _setMainActive('prints');
+            if (page === 'archive') {
+                _showSubPage('prints-subnav', 'archive', 'prints-archive');
+                loadArchive(); loadPrintDefaults();
+            } else if (page === 'models') {
+                _showSubPage('prints-subnav', 'models', 'prints-models');
+                loadModelHistory();
+            }
+        }
+
+        function showSessionsPage(page, evt) {
+            if (evt) evt.preventDefault();
+            _activeSessionsPage = page;
+            _showSubnav('sessions');
+            _setMainActive('sessions');
+            _showSubPage('sessions-subnav', SESSIONS_PAGES[page] || page, page);
             if (page === 'patterns') loadPatterns();
+            if (page === 'telemetry') loadTelemetrySessions();
+        }
+
+        function showSettingsPage(page, evt) {
+            if (evt) evt.preventDefault();
+            _activeSettingsPage = page;
+            _showSubnav('settings');
+            _setMainActive('settings');
+            _showSubPage('settings-subnav', SETTINGS_PAGES[page] || page, 'settings-' + page);
+            if (page === 'params')  loadMachineParams();
+            if (page === 'logs')    loadLogs();
+            if (page === 'update')  { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
         }
 
         function showMaintenancePage(page, evt) {
@@ -1448,30 +1483,15 @@
             if (page === 'journal') loadLogs();
         }
 
-        // ── Gear menu (⚙ — Загрузка логов / Логи системы / Обновление) ──
-        function toggleGear(evt) {
-            evt.preventDefault();
-            evt.stopPropagation();
-            document.getElementById('gear-menu').classList.toggle('open');
+        // ── New print record shortcut ──
+        function openNewPrintRecord() {
+            showMainTab('prints', null);
+            showPrintsPage('archive', null);
+            const form = document.getElementById('archive-form');
+            if (form) { form.style.display = 'block'; loadPrintDefaults(); }
         }
 
-        function showGearPage(page, evt) {
-            if (evt) { evt.preventDefault(); evt.stopPropagation(); }
-            document.getElementById('gear-menu')?.classList.remove('open');
-            _hideAllPages();
-            _showSubnav(null);
-            _setMainActive(null);
-            document.getElementById('page-' + page).style.display = 'block';
-            if (page === 'logs')   loadLogs();
-            if (page === 'update') { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
-        }
-
-        document.addEventListener('click', function(e) {
-            const gm = document.getElementById('gear-menu');
-            if (gm && !gm.contains(e.target)) gm.classList.remove('open');
-        });
-
-        // ── Misc top-bar handlers ──
+        // Legacy alias (used by page-newprint button)
         function openNewPrint() {
             _hideAllPages();
             _showSubnav(null);
@@ -1480,7 +1500,6 @@
         }
 
         function openChangelog() {
-            // Single source of truth: the changelog block on the update page
             const entries = document.querySelector('#page-update .changelog-entry');
             document.getElementById('changelog-content').innerHTML =
                 entries ? entries.parentElement.innerHTML : 'Нет данных';
@@ -1491,16 +1510,26 @@
             document.getElementById('changelog-modal').classList.remove('open');
         }
 
-        // Legacy compat — some inline onclick still call showPage()
+        // Legacy compat — inline onclick calls
+        function showGearPage(page, evt) {
+            if (evt) { evt.preventDefault(); evt.stopPropagation(); }
+            if (page === 'upload') showSessionsPage('upload', null);
+            else if (page === 'logs') showSettingsPage('logs', null);
+            else if (page === 'update') showSettingsPage('update', null);
+        }
+
         function showPage(page) {
-            if (page in ANALYTICS_PAGES)            showAnalyticsPage(page, null);
-            else if (page in MAINT_PAGES)           showMaintenancePage(page, null);
-            else if (page === 'maintenance')        showMaintenancePage('maint', null);
-            else if (page === 'logs')               showGearPage('logs', null);
-            else if (page === 'upload')             showGearPage('upload', null);
-            else if (page === 'update')             showMainTab('update', null);
-            else if (page === 'newprint')           openNewPrint();
-            else if (page === 'stl' || page === 'estimate') showMainTab('stl', null);
+            if (page in SESSIONS_PAGES)              showSessionsPage(page, null);
+            else if (page in MAINT_PAGES)            showMaintenancePage(page, null);
+            else if (page === 'maintenance')         showMaintenancePage('maint', null);
+            else if (page === 'archive')             showPrintsPage('archive', null);
+            else if (page === 'models')              showPrintsPage('models', null);
+            else if (page === 'stl' || page === 'estimate') {
+                _hideAllPages(); _showSubnav(null); _setMainActive(null);
+                document.getElementById('page-stl').style.display = 'block'; loadStlMaterials();
+            }
+            else if (page === 'newprint')            openNewPrint();
+            else if (page === 'settings')            showSettingsPage('params', null);
             else {
                 const el = document.getElementById('page-' + page);
                 if (el) { _hideAllPages(); el.style.display = 'block'; }
@@ -1636,6 +1665,13 @@
         }
         setInterval(updateImportStatus, 3000);
         updateImportStatus();
+
+        // ── Page initialisation ──────────────────────────────────────────────
+        fetch('/health').then(r => r.json()).then(d => {
+            if (d.version) document.getElementById('hdr-version').textContent = 'v' + d.version;
+        }).catch(() => {});
+
+        loadHomeStats();
 
         // =========================================================
         // UPDATE — Watchtower on-demand update
@@ -1846,7 +1882,7 @@
                                 style="background:${method === 'fast' ? '#10b981' : '#3b82f6'};color:white;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
                                 ${method === 'fast' ? '🎯 Пересчитать точно (PySLM)' : '⚡ Пересчитать быстро'}
                             </button>
-                            <button onclick="showMainTab('models',null)"
+                            <button onclick="showPrintsPage('models',null)"
                                 style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
                                 📦 Открыть в истории моделей
                             </button>
@@ -2406,9 +2442,16 @@
         // =========================================================
         // ARCHIVE — print records + machine params
         // =========================================================
-        const _MATERIAL_RU = { steel: 'Сталь', aluminum: 'Алюминий', titanium: 'Титан', other: 'Другое' };
-        const _STATUS_RU   = { draft: '📝 Черновик', active: '🔥 Печатается', completed: '✅ Завершена' };
-        const _FILE_ICON   = { stl: '🧊', stl_supports: '🏗', magics: '🧩', photo: '📷', doc: '📄' };
+        const _MATERIAL_RU  = { steel: 'Сталь', aluminum: 'Алюминий', titanium: 'Титан', other: 'Другое' };
+        const _STATUS_LABEL = { draft: 'Черновик', active: 'Печатается', completed: 'Завершена' };
+        const _STATUS_COLOR = { draft: '#6b7280', active: '#f59e0b', completed: '#10b981' };
+        const _FILE_ICON    = { stl: '🧊', stl_supports: '🏗', magics: '🧩', photo: '📷', doc: '📄' };
+
+        function _statusBadge(status) {
+            const label = _STATUS_LABEL[status] || status;
+            const color = _STATUS_COLOR[status] || '#4a5568';
+            return `<span style="background:${color}22;color:${color};border:1px solid ${color}55;padding:2px 9px;border-radius:12px;font-size:11px;font-weight:600;white-space:nowrap;">${label}</span>`;
+        }
         const _ARCHIVE_PAGE_SIZE = 20;
         let _archiveSkip = 0;
 
@@ -2557,7 +2600,7 @@
                         <td style="color:#e2e8f0;font-weight:600;">${rec.name}${rec.notes ? ` <span title="${rec.notes}" style="cursor:help;color:#4a5568;">💬</span>` : ''}</td>
                         <td>${_materialRu(rec.material)}</td>
                         <td>${powder}</td>
-                        <td>${_STATUS_RU[rec.status] || rec.status}</td>
+                        <td>${_statusBadge(rec.status)}</td>
                         <td>${session}</td>
                         <td>${chips}${upload}${logsUpload}</td>
                         <td style="white-space:nowrap;">${rec.files.some(f => f.file_type === 'stl')
@@ -2765,6 +2808,129 @@
                 body: JSON.stringify({ time_correction_factor: factor }),
             });
             loadMachineParams();
+        }
+
+        // =========================================================
+        // HOME STATS
+        // =========================================================
+        async function loadHomeStats() {
+            try {
+                const d = await fetch('/powder/status').then(r => r.json());
+                const el = document.getElementById('home-pow-remaining');
+                if (el) el.textContent = d.has_batch ? d.remaining_kg.toFixed(2) : '—';
+            } catch(e) {}
+            try {
+                const items = await fetch('/maintenance/status').then(r => r.json());
+                const el = document.getElementById('home-maint-next');
+                if (el) {
+                    const urgent = (items || []).filter(i => i.grade !== 'ok');
+                    if (urgent.length) {
+                        el.textContent = urgent[0].remaining + ' ' + urgent[0].unit;
+                        el.style.color = urgent[0].grade === 'critical' ? '#ef4444' : '#f59e0b';
+                    } else {
+                        el.textContent = '✅ OK';
+                        el.style.color = '#10b981';
+                    }
+                }
+            } catch(e) {}
+            try {
+                const d = await fetch('/sessions?limit=8').then(r => r.json());
+                const sessions = (d.items || []).filter(s => s.classification === 'REAL_PRINT').slice(0,4);
+                const el = document.getElementById('home-recent-sessions');
+                if (!el) return;
+                if (!sessions.length) {
+                    el.innerHTML = '<div style="color:#6b7280;font-size:13px;">Нет сессий печати.</div>';
+                    return;
+                }
+                el.innerHTML = sessions.map(s => {
+                    const date = s.start_ts ? s.start_ts.slice(0,10) : '—';
+                    const dur  = s.duration_min != null ? (s.duration_min/60).toFixed(1) + ' ч' : '—';
+                    return `<div style="background:#1e2433;border:1px solid #2d3748;border-radius:10px;padding:14px;cursor:pointer;"
+                        onclick="showMainTab('sessions',null);showSessionsPage('history',null)">
+                        <div style="font-weight:600;color:#e2e8f0;">${date}</div>
+                        <div style="font-size:12px;color:#a0aec0;margin-top:4px;">⏱ ${dur}</div>
+                    </div>`;
+                }).join('');
+            } catch(e) {}
+        }
+
+        // =========================================================
+        // DYNAMIC TELEMETRY
+        // =========================================================
+        function _fmtTelDate(iso) {
+            if (!iso) return '';
+            const d = new Date(iso);
+            if (isNaN(d)) return iso.slice(0,10);
+            const months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+            return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()} · ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        }
+
+        async function loadTelemetrySessions() {
+            const sel = document.getElementById('tel-session-select');
+            if (!sel) return;
+            try {
+                const list = await fetch('/sessions/telemetry-list').then(r => r.json());
+                if (!list.length) { sel.innerHTML = '<option>Нет сессий с телеметрией</option>'; return; }
+                sel.innerHTML = list.map(s => {
+                    const label = _fmtTelDate(s.start_ts);
+                    const dur   = s.duration_min != null ? ` · ${(s.duration_min/60).toFixed(1)} ч` : '';
+                    const cur   = _telCharts.currentSessionId;
+                    const sel_  = (cur && s.session_id.includes(cur)) ? ' selected' : '';
+                    return `<option value="${s.session_id}"${sel_}>${label}${dur}</option>`;
+                }).join('');
+            } catch(e) {
+                sel.innerHTML = '<option>Ошибка загрузки</option>';
+            }
+        }
+
+        const _SIG_TITLES = {
+            SO1:'O₂ канал 1', SO2:'O₂ канал 2',
+            ST3:'Камера (низ)', ST4:'Камера (верх)', ST5:'Стол',
+            SP4:'Давление камеры', 'Flow H':'Влажность',
+        };
+        const _SIG_COLORS = {
+            SO1:'#ef4444', SO2:'#f59e0b',
+            ST3:'#60a5fa', ST4:'#8b5cf6', ST5:'#10b981',
+            SP4:'#06b6d4', 'Flow H':'#8b5cf6',
+        };
+        const _PALETTE = ['#60a5fa','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4'];
+
+        function _makeDatasets(series) {
+            return Object.entries(series).map(([key, values], i) => ({
+                label: _SIG_TITLES[key] || key,
+                data: values,
+                borderColor: _SIG_COLORS[key] || _PALETTE[i % _PALETTE.length],
+                backgroundColor: 'transparent',
+                borderWidth: 2, pointRadius: 0, tension: 0.3,
+            }));
+        }
+
+        function _updateLineChart(chart, time, series) {
+            if (!chart) return;
+            chart.data.labels = time;
+            chart.data.datasets = _makeDatasets(series);
+            chart.update('none');
+        }
+
+        async function loadTelemetryForSession(sessionId) {
+            if (!sessionId) return;
+            _telCharts.currentSessionId = sessionId;
+            try {
+                const d = await fetch('/sessions/' + encodeURIComponent(sessionId) + '/telemetry').then(r => r.json());
+                const tel  = d.telemetry || {};
+                const time = tel.time || [];
+                document.getElementById('tel-subtitle').textContent = _fmtTelDate(d.start_ts);
+                _updateLineChart(_telCharts.o2,   time, tel.oxygen       || {});
+                _updateLineChart(_telCharts.temp, time, tel.temperatures || {});
+                _updateLineChart(_telCharts.hum,  time, tel.humidity     || {});
+                _updateLineChart(_telCharts.press,time, tel.pressure     || {});
+                if (_telCharts.burn) {
+                    const burn = tel.layer_burn_times || [];
+                    _telCharts.burn.data.labels = burn.map(b => b.layer);
+                    _telCharts.burn.data.datasets[0].data = burn.map(b => b.duration_sec);
+                    _telCharts.burn.update('none');
+                }
+            } catch(e) { console.error('loadTelemetryForSession:', e); }
         }
 
         async function saveMachineParams() {
