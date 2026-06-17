@@ -167,9 +167,10 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     from api.routes.uploads import _geometry_prediction
 
     material = record["material"]
+    record_powder_cost = record.get("powder_cost_rub_per_kg")
     snapshot: dict = {"estimated_at": datetime.now(timezone.utc).isoformat()}
     for key, mode in (("fast", "excel"), ("accurate", "pyslm")):
-        result = _geometry_prediction(data, material, mode=mode)
+        result = _geometry_prediction(data, material, mode=mode, powder_cost_override=record_powder_cost)
         if not result.get("available"):
             raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
         snapshot[key] = {
@@ -245,7 +246,16 @@ def update_print(
     if "notes" in payload:
         values["notes"] = (payload["notes"] or "").strip() or None
     if "session_id" in payload:
-        values["session_id"] = payload["session_id"] or None
+        new_session_id = payload["session_id"] or None
+        values["session_id"] = new_session_id
+        if new_session_id and "printed_at" not in payload:
+            from domain.models.sessions import BuildSession
+            session = repo.db.get(BuildSession, new_session_id)
+            if session and session.start_ts:
+                ts = session.start_ts
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                values["printed_at"] = ts
     if "printed_at" in payload:
         values["printed_at"] = _parse_iso_datetime(payload["printed_at"], "printed_at")
     if "powder_cost_rub_per_kg" in payload:
@@ -261,13 +271,18 @@ def update_print(
 
 
 @router.delete("/{record_id}")
-def delete_print(record_id: str, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
+def delete_print(
+    record_id: str,
+    background_tasks: BackgroundTasks,
+    repo: PrintsRepository = Depends(get_prints_repository),
+) -> dict:
     """Delete a record with all attached files (DB rows + stored objects)."""
     if not repo.get_print_record(record_id):
         raise HTTPException(404, "Карточка печати не найдена")
     uris = repo.delete_print_record(record_id)
     repo.flush()
-    _remove_objects(uris)
+    # MinIO cleanup runs after get_db commits so DB and object store stay in sync
+    background_tasks.add_task(_remove_objects, uris)
     logger.info("prints: deleted %s (%d files)", record_id, len(uris))
     return {"deleted": record_id, "files_removed": len(uris)}
 
@@ -428,6 +443,7 @@ async def import_logs_for_print(
 def delete_print_file(
     record_id: str,
     file_id: str,
+    background_tasks: BackgroundTasks,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
     """Detach one file from a record (DB row + stored object)."""
@@ -435,7 +451,8 @@ def delete_print_file(
     if uri is None:
         raise HTTPException(404, "Файл не найден")
     repo.flush()
-    _remove_objects([uri])
+    # MinIO cleanup runs after get_db commits so DB and object store stay in sync
+    background_tasks.add_task(_remove_objects, [uri])
     return {"deleted": file_id}
 
 

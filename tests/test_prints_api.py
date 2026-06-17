@@ -353,6 +353,7 @@ class TestMachineSettings:
         payload = {
             "hatch_speed_mm_s": 1330,
             "contour_speed_mm_s": 500,
+            "hatch_distance_mm": 0.12,
             "layer_thickness_mm": 0.05,
             "laser_count": 2,
             "powder_cost_rub_per_kg": 7000,

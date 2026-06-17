@@ -72,6 +72,7 @@ def import_folder(folder: Path) -> int:
                 f"lines={feats['total_lines']}, duration={feats['duration_min']}min)"
             )
             saved += 1
+        db.commit()
     except Exception as exc:  # noqa: BLE001 - surface any import failure to the operator
         db.rollback()
         print(f"[ERROR] Import failed: {exc}", file=sys.stderr)
