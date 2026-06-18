@@ -1022,35 +1022,15 @@
                 </div>
 
                 <!-- Auto-update banner -->
-                <div style="background:#0f3460;border:1px solid #1a5276;border-radius:12px;padding:14px 16px;margin-bottom:16px;display:flex;align-items:center;gap:12px;">
+                <div style="background:#0f3460;border:1px solid #1a5276;border-radius:12px;padding:14px 16px;display:flex;align-items:center;gap:12px;">
                     <span style="font-size:22px;">🔄</span>
                     <div>
                         <div style="color:#e2e8f0;font-size:14px;font-weight:600;">Авто-обновление активно</div>
                         <div style="color:#85929e;font-size:12px;margin-top:2px;">
-                            Watchtower проверяет Docker Hub каждый час и устанавливает обновления автоматически
+                            Cron проверяет GitHub каждые 30 минут и обновляет сервисы при появлении новых коммитов
                         </div>
                     </div>
                 </div>
-
-                <!-- Watchtower status -->
-                <div id="update-status-box" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:20px;">
-                    <div style="display:flex;align-items:center;gap:12px;">
-                        <span id="update-wt-dot" style="width:10px;height:10px;border-radius:50%;background:#6b7280;display:inline-block;"></span>
-                        <span id="update-wt-label" style="color:#a0aec0;font-size:14px;">Проверка Watchtower...</span>
-                    </div>
-                </div>
-
-                <button id="btn-update"
-                    onclick="triggerUpdate()"
-                    style="width:100%;padding:16px;font-size:16px;font-weight:600;
-                           background:#3b82f6;color:white;border:none;border-radius:10px;
-                           cursor:pointer;transition:background 0.2s;">
-                    🚀 Обновить сейчас
-                </button>
-
-                <div id="update-log" style="margin-top:20px;font-family:monospace;font-size:13px;
-                     color:#a0aec0;background:#0f1419;border-radius:8px;padding:16px;
-                     min-height:60px;display:none;"></div>
             </div>
         </div>
 
@@ -1469,7 +1449,7 @@
             _showSubPage('settings-subnav', SETTINGS_PAGES[page] || page, 'settings-' + page);
             if (page === 'params')  loadMachineParams();
             if (page === 'logs')    loadLogs();
-            if (page === 'update')  { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
+            if (page === 'update')  { loadVersionInfo(); loadImportStatus(); }
         }
 
         function showMaintenancePage(page, evt) {
@@ -1957,76 +1937,6 @@
             } catch(e) { /* не блокирует работу */ }
         }
 
-        async function checkWatchtower() {
-            try {
-                const r = await fetch('/admin/update/status');
-                const d = await r.json();
-                const dot   = document.getElementById('update-wt-dot');
-                const label = document.getElementById('update-wt-label');
-                const btn   = document.getElementById('btn-update');
-                if (d.watchtower === 'online') {
-                    dot.style.background   = '#10b981';
-                    label.textContent      = '✅ Watchtower готов — обновление доступно';
-                    btn.disabled           = false;
-                    btn.style.background   = '#3b82f6';
-                } else {
-                    dot.style.background   = '#ef4444';
-                    label.textContent      = '❌ Watchtower недоступен — запустите: docker compose up watchtower';
-                    btn.disabled           = true;
-                    btn.style.background   = '#4a5568';
-                }
-            } catch(e) {
-                document.getElementById('update-wt-label').textContent = '⚠️ Не удалось проверить статус';
-            }
-        }
-
-        async function triggerUpdate() {
-            const btn = document.getElementById('btn-update');
-            const log = document.getElementById('update-log');
-            btn.disabled = true;
-            btn.textContent = '⏳ Запуск обновления...';
-            log.style.display = 'block';
-            log.textContent = '[' + new Date().toLocaleTimeString() + '] Отправка команды Watchtower...\n';
-
-            try {
-                const r = await fetch('/admin/update', { method: 'POST' });
-                const d = await r.json();
-                if (d.ok) {
-                    log.textContent += '[' + new Date().toLocaleTimeString() + '] ' + d.message + '\n';
-                    log.textContent += 'Ожидание перезапуска сервисов...\n';
-                    btn.textContent = '🔄 Обновление в процессе...';
-                    // Poll /health until API comes back after restart
-                    await pollUntilBack(log);
-                } else {
-                    log.textContent += '❌ Ошибка: ' + JSON.stringify(d);
-                    btn.disabled = false;
-                    btn.textContent = '🚀 Обновить сейчас';
-                }
-            } catch(e) {
-                // API may have restarted — start polling
-                log.textContent += 'API перезапускается, ожидаем...\n';
-                await pollUntilBack(log);
-            }
-        }
-
-        async function pollUntilBack(log) {
-            const start = Date.now();
-            while (Date.now() - start < 180_000) {
-                await new Promise(r => setTimeout(r, 3000));
-                try {
-                    const r = await fetch('/health');
-                    if (r.ok) {
-                        log.textContent += '✅ Система обновлена и готова к работе!\n';
-                        log.textContent += 'Перезагрузка страницы через 3 секунды...';
-                        await new Promise(r => setTimeout(r, 3000));
-                        location.reload();
-                        return;
-                    }
-                } catch(e) { /* still restarting */ }
-                log.textContent += '.';
-            }
-            log.textContent += '\n⚠️ Таймаут. Обновите страницу вручную.';
-        }
 
         // =========================================================
         // PATTERNS — cross-session intelligence
