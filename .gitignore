@@ -14,3 +14,7 @@ backups/
 
 # Generated / temp files (use explicit paths, not wildcards)
 import.sql
+
+# Auto-update state
+.last_deployed
+update.log
