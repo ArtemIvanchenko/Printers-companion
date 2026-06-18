@@ -302,25 +302,29 @@ def upload_files(record_map: dict[str, str]) -> None:
 def link_sessions(record_map: dict[str, str]) -> None:
     step("4. Привязка лог-сессий к карточкам")
 
+    used_sessions: set[str] = set()  # prevent one session from linking to multiple records
+
     for s in SESSIONS:
         rid = record_map.get(s["name"])
         if not rid:
             continue
         date_str = s["date"][:10]  # YYYY-MM-DD
 
-        # Try exact date match first
-        session_id = EXISTING_SESSIONS.get(date_str)
+        # Try exact date match first (only if session not already taken)
+        candidate = EXISTING_SESSIONS.get(date_str)
+        session_id = candidate if candidate and candidate not in used_sessions else None
 
-        # Also try to match by proximity (model was prepared before print date)
+        # Proximity fallback: closest session within 45 days that hasn't been used yet
         if not session_id:
-            # Look at the log sessions and pick closest one after the model date
             model_date = datetime.fromisoformat(date_str).date()
             best = None
             best_delta = None
             for sess_date, sess_id in EXISTING_SESSIONS.items():
+                if sess_id in used_sessions:
+                    continue
                 sd = datetime.fromisoformat(sess_date).date()
                 delta = (sd - model_date).days
-                if 0 <= delta <= 45:  # print happened 0-45 days after model prep
+                if 0 <= delta <= 45:
                     if best_delta is None or delta < best_delta:
                         best_delta = delta
                         best = sess_id
@@ -330,6 +334,7 @@ def link_sessions(record_map: dict[str, str]) -> None:
         if session_id:
             r = requests.patch(f"{BASE}/prints/{rid}", json={"session_id": session_id})
             if r.ok:
+                used_sessions.add(session_id)
                 ok(f"'{s['name']}' → сессия {session_id}")
             else:
                 warn(f"Привязка сессии не удалась для '{s['name']}': {r.text[:150]}")
