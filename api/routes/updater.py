@@ -1,4 +1,4 @@
-"""Admin endpoints: version, logs, import status, update history."""
+"""Admin endpoints: version, logs, import status, update management."""
 from __future__ import annotations
 
 import asyncio
@@ -8,8 +8,9 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
+import httpx
 import redis as _redis
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from core.config.settings import get_settings
 from core.versioning.constants import (
@@ -23,22 +24,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 _START_TIME = datetime.now(timezone.utc)
+_REDIS_KEY   = "pla:update:last_event"
+_REDIS_TTL   = 60 * 60 * 24 * 90
 
-_REDIS_KEY = "pla:update:last_event"
-_REDIS_TTL = 60 * 60 * 24 * 90
+_GITHUB_REPO     = "ArtemIvanchenko/Printers-companion"
+_GITHUB_WORKFLOW = "deploy.yml"
+_GITHUB_BRANCH   = "main"
+
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 # ── Redis helpers ─────────────────────────────────────────────────────────────
 
 def _redis_client() -> _redis.Redis | None:
     try:
-        settings = get_settings()
-        return _redis.from_url(
-            settings.redis_url,
-            socket_connect_timeout=1,
-            socket_timeout=1,
-            decode_responses=True,
-        )
+        s = get_settings()
+        return _redis.from_url(s.redis_url, socket_connect_timeout=1, socket_timeout=1, decode_responses=True)
     except Exception:
         return None
 
@@ -49,7 +50,7 @@ def _store_update_event(event: dict) -> None:
         if r:
             r.set(_REDIS_KEY, json.dumps(event), ex=_REDIS_TTL)
     except Exception as exc:
-        logger.warning("Could not store update event in Redis: %s", exc)
+        logger.warning("Could not store update event: %s", exc)
 
 
 def _load_update_event() -> dict:
@@ -60,7 +61,7 @@ def _load_update_event() -> dict:
             if raw:
                 return json.loads(raw)
     except Exception as exc:
-        logger.warning("Could not load update event from Redis: %s", exc)
+        logger.warning("Could not load update event: %s", exc)
     return {}
 
 
@@ -71,9 +72,7 @@ def _git_commit() -> str:
         return c[:8]
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
+            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL, text=True
         ).strip()
     except Exception:
         return "unknown"
@@ -101,9 +100,7 @@ async def get_version() -> dict:
 async def get_logs(n: int = 200, level: str | None = None) -> list[dict]:
     from core.logging.config import read_recent_logs
     n = min(max(1, n), 1000)
-    return await asyncio.get_running_loop().run_in_executor(
-        None, read_recent_logs, n, level
-    )
+    return await asyncio.get_running_loop().run_in_executor(None, read_recent_logs, n, level)
 
 
 # ── Import status ─────────────────────────────────────────────────────────────
@@ -130,26 +127,124 @@ async def import_status() -> dict:
         return {"session_count": 0, "import_job_count": 0}
 
 
-# ── Update history ────────────────────────────────────────────────────────────
+# ── Update: check ─────────────────────────────────────────────────────────────
+
+@router.get("/update/check")
+async def check_for_update() -> dict:
+    """Compare running GIT_COMMIT with the latest commit on GitHub main."""
+    current = _git_commit()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"https://api.github.com/repos/{_GITHUB_REPO}/commits/{_GITHUB_BRANCH}",
+                headers={"Accept": "application/vnd.github.v3+json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+        latest_sha   = data["sha"]
+        latest_short = latest_sha[:8]
+        update_available = current not in ("unknown", "") and current != latest_short
+        return {
+            "update_available": update_available,
+            "current_commit": current,
+            "latest_commit": latest_short,
+            "latest_date": data["commit"]["committer"]["date"],
+            "latest_message": data["commit"]["message"].split("\n")[0][:80],
+        }
+    except Exception as exc:
+        logger.warning("GitHub update check failed: %s", exc)
+        return {"update_available": False, "error": str(exc), "current_commit": current}
+
+
+# ── Update: trigger via GitHub Actions workflow_dispatch ──────────────────────
+
+@router.post("/update")
+async def trigger_update() -> dict:
+    """Trigger deploy.yml on the self-hosted runner via GitHub API."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail="GITHUB_TOKEN не задан — добавьте токен в .env (права: repo + workflow)",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"https://api.github.com/repos/{_GITHUB_REPO}/actions/workflows/{_GITHUB_WORKFLOW}/dispatches",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+                json={"ref": _GITHUB_BRANCH},
+            )
+            r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=f"GitHub API: {exc.response.text}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub API недоступен: {exc}")
+
+    event = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "source": "dashboard",
+        "trigger": "workflow_dispatch",
+    }
+    await asyncio.get_running_loop().run_in_executor(None, _store_update_event, event)
+    return {"ok": True, "message": "Задание отправлено. Runner начнёт обновление через несколько секунд."}
+
+
+# ── Update: workflow run status ───────────────────────────────────────────────
+
+@router.get("/update/run-status")
+async def update_run_status() -> dict:
+    """Latest deploy.yml run status (public GitHub API — no auth required for public repos)."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"https://api.github.com/repos/{_GITHUB_REPO}/actions/workflows/{_GITHUB_WORKFLOW}/runs",
+                headers=headers,
+                params={"per_page": 1, "branch": _GITHUB_BRANCH},
+            )
+            r.raise_for_status()
+            runs = r.json().get("workflow_runs", [])
+        if not runs:
+            return {"status": "unknown"}
+        run = runs[0]
+        return {
+            "status":     run["status"],      # queued | in_progress | completed
+            "conclusion": run["conclusion"],  # success | failure | None
+            "created_at": run["created_at"],
+            "updated_at": run["updated_at"],
+            "run_id":     run["id"],
+            "url":        run["html_url"],
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+# ── Update: history ───────────────────────────────────────────────────────────
 
 @router.get("/update/history")
 async def update_history() -> dict:
-    """Last recorded update event (written by update.sh after successful git pull)."""
+    """Last recorded update event."""
     return await asyncio.get_running_loop().run_in_executor(None, _load_update_event)
 
 
 @router.post("/update/notify")
 async def update_notify(request: Request) -> dict:
-    """Called by update.sh after a successful update to record the timestamp."""
+    """Called by update.sh after a successful local update to record the timestamp."""
     try:
         body = await request.json()
     except Exception:
         body = {}
     event = {
-        "at": datetime.now(timezone.utc).isoformat(),
-        "commit": body.get("commit", ""),
+        "at":      datetime.now(timezone.utc).isoformat(),
+        "commit":  body.get("commit", ""),
         "message": body.get("message", ""),
+        "source":  "script",
     }
     await asyncio.get_running_loop().run_in_executor(None, _store_update_event, event)
-    logger.info("Update notification received: %s", event)
     return {"ok": True}
