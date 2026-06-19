@@ -9,7 +9,10 @@ services:
     # auto-updates on deploy without a per-worker race.
     command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4"
     ports:
-      - "8000:8000"
+      # Bind to localhost only: each employee runs their own copy and opens
+      # http://localhost:8000. Not reachable from the network → /admin/* and
+      # /upload/* (no app-level auth) are not exposed to other machines.
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -187,8 +190,10 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Localhost only — object store is an internal dependency, not exposed to
+      # the network. :9001 is the MinIO console (also localhost-only).
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     networks:
       - storage_net
     restart: unless-stopped
