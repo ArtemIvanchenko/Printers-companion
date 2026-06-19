@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,20 +45,26 @@ async def upload_logs(files: list[UploadFile]) -> dict:
         target = dest / name
         total = 0
         too_big = False
-        with open(target, "wb") as buf:
-            while chunk := await f.read(16 * 1024 * 1024):
-                total += len(chunk)
-                if total > _MAX_FILE_MB * 1024 * 1024:
-                    too_big = True
-                    break
-                buf.write(chunk)
-        if too_big:
-            target.unlink(missing_ok=True)
-            skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
-        else:
-            saved.append({"name": name, "size_bytes": total})
-        logger.info("upload_logs: saved %s (%d bytes) → %s", name, len(data), target)
-        saved.append({"name": name, "size_bytes": len(data)})
+        tmp_path = f"/tmp/{os.urandom(8).hex()}.upload"
+        try:
+            with open(tmp_path, "wb") as buf:
+                while chunk := await f.read(16 * 1024 * 1024):
+                    total += len(chunk)
+                    if total > _MAX_FILE_MB * 1024 * 1024:
+                        too_big = True
+                        break
+                    buf.write(chunk)
+            if too_big:
+                os.unlink(tmp_path)
+                skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
+            else:
+                shutil.move(tmp_path, target)
+                saved.append({"name": name, "size_bytes": total})
+                logger.info("upload_logs: saved %s (%d bytes) → %s", name, total, target)
+        except BaseException:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
 
     # Trigger re-scan so new files are imported without waiting for next restart
     if saved:
