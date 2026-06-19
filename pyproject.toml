@@ -11,11 +11,9 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.111",
   "uvicorn[standard]>=0.29",
-  "typer>=0.12",
   "pydantic>=2.7",
   "pydantic-settings>=2.2",
   "polars>=0.20",
-  "duckdb>=0.10",
   "sqlalchemy>=2.0",
   "psycopg[binary]>=3.1",
   "alembic>=1.13",
@@ -30,7 +28,6 @@ dependencies = [
   "PyYAML>=6.0",
   "python-multipart>=0.0.9",
   "charset-normalizer>=3.3",
-  "rq>=1.16",
   "apscheduler>=3.10",
   "watchdog>=4.0",
   "trimesh>=4.0",
@@ -42,8 +39,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-telegram = ["python-telegram-bot>=21.0"]
-dev = ["pytest>=8.2", "pytest-cov>=5.0", "ruff>=0.5"]
+mcp = ["mcp>=1.0.0"]
+dev = ["pytest>=8.2", "pytest-cov>=5.0", "ruff>=0.5", "typer>=0.12"]
 
 [project.scripts]
 pla = "cli.main:app"
