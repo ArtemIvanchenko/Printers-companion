@@ -62,6 +62,7 @@ from domain.models.quality import (
 
 from domain.models.prints import (
     MachineParams,
+    MachinePreset,
     PrintRecord,
     PrintRecordFile,
 )
@@ -120,6 +121,7 @@ __all__ = [
     "PrintRecord",
     "PrintRecordFile",
     "MachineParams",
+    "MachinePreset",
 ]
 
 
