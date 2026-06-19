@@ -15,6 +15,8 @@ Revises: 0003_scanner_jump_params
 Create Date: 2026-06-19
 """
 
+import json
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -66,29 +68,30 @@ def upgrade() -> None:
     if not inspector.has_table(_TABLE):
         Base.metadata.create_all(bind=bind, tables=[Base.metadata.tables[_TABLE]])
 
-    presets = sa.table(
-        _TABLE,
-        sa.column("name", sa.String),
-        sa.column("material", sa.String),
-        sa.column("layer_thickness_mm", sa.Float),
-        sa.column("hatch_speed_mm_s", sa.Float),
-        sa.column("contour_speed_mm_s", sa.Float),
-        sa.column("hatch_distance_mm", sa.Float),
-        sa.column("jump_speed_mm_s", sa.Float),
-        sa.column("jump_delay_ms", sa.Float),
-        sa.column("laser_power_w", sa.Float),
-        sa.column("is_default", sa.Boolean),
-        sa.column("notes", sa.Text),
-    )
-
+    # Use raw SQL for seed inserts — avoids sa.table()/sa.column() hang in
+    # PostgreSQL transactional DDL context.
     existing = {
         row[0]
-        for row in bind.execute(sa.select(sa.text("material")).select_from(sa.text(_TABLE)))
+        for row in bind.execute(sa.text(f"SELECT material FROM {_TABLE}"))
     }
 
-    for preset in _SEED_PRESETS:
-        if preset["material"] not in existing:
-            bind.execute(presets.insert().values(**preset))
+    for p in _SEED_PRESETS:
+        if p["material"] in existing:
+            continue
+        bind.execute(
+            sa.text(
+                f"INSERT INTO {_TABLE} "
+                "(name, material, layer_thickness_mm, hatch_speed_mm_s, "
+                "contour_speed_mm_s, hatch_distance_mm, jump_speed_mm_s, "
+                "jump_delay_ms, laser_power_w, is_default, notes, "
+                "created_at, updated_at) "
+                "VALUES (:name, :material, :layer_thickness_mm, :hatch_speed_mm_s, "
+                ":contour_speed_mm_s, :hatch_distance_mm, :jump_speed_mm_s, "
+                ":jump_delay_ms, :laser_power_w, :is_default, :notes, "
+                "NOW(), NOW())"
+            ),
+            p,
+        )
 
     # Add steel density to machine_params if the row exists and steel is missing
     if inspector.has_table("machine_params"):
@@ -96,7 +99,6 @@ def upgrade() -> None:
             sa.text("SELECT material_densities FROM machine_params WHERE id = 1")
         ).fetchone()
         if row is not None:
-            import json
             densities = row[0] if isinstance(row[0], dict) else (json.loads(row[0]) if row[0] else {})
             if "steel" not in densities:
                 densities["steel"] = 7.9
