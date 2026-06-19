@@ -2177,12 +2177,16 @@
         // =========================================================
         const _signalLabel = {
             SO1:'O₂ (SO1)', SO2:'O₂ (SO2)', ST3:'Темп ST3', ST4:'Темп ST4',
-            ST5:'Темп стола (ST5)', SP4:'Давление (SP4)', SF1:'Поток SF1',
+            ST5:'Темп стола (ST5)', SP2:'Давление (SP2)', SP4:'Давление (SP4)',
+            SP8:'Давление (SP8)', SP14:'Давление (SP14)', SP15:'Давление (SP15)',
+            SF1:'Поток SF1',
             'Flow H':'Влажность', 'Flow T':'Темп газа',
+            LIR:'Уровень жидкости',
         };
         const _groupColor = {
             oxygen:'#ef4444', temperature:'#f59e0b',
             pressure:'#8b5cf6', humidity:'#06b6d4',
+            temp_gas:'#f59e0b', flow:'#3b82f6',
         };
 
         function sigLabel(s)  { return _signalLabel[s] || s; }
@@ -2222,28 +2226,52 @@
             `).join('');
         }
 
-        function renderAnomalies(anomalies) {
+        function _anomalyDescription(signal, direction) {
+            const desc = {
+                'Flow H': { high: 'Влажность в камере была выше нормы', low: 'Влажность в камере была ниже нормы' },
+                'Flow T': { high: 'Температура газового потока была выше нормы', low: 'Температура газового потока была ниже нормы' },
+                LIR: { high: 'Уровень жидкости в системе был повышен', low: 'Уровень жидкости в системе был понижен' },
+                SF1: { high: 'Расход газа был выше нормы', low: 'Расход газа был ниже нормы' },
+                SO1: { high: 'Содержание кислорода было повышено', low: 'Содержание кислорода было понижено' },
+                SO2: { high: 'Содержание кислорода (SO2) было повышено', low: 'Содержание кислорода (SO2) было понижено' },
+                SP2: { high: 'Давление в системе было выше нормы', low: 'Давление в системе было ниже нормы' },
+                SP8: { high: 'Давление SP8 было выше нормы', low: 'Давление SP8 было ниже нормы' },
+                SP14: { high: 'Давление SP14 было выше нормы', low: 'Давление SP14 было ниже нормы' },
+                SP15: { high: 'Давление SP15 было выше нормы', low: 'Давление SP15 было ниже нормы' },
+                ST3: { high: 'Температура ST3 была выше нормы', low: 'Температура ST3 была ниже нормы' },
+                ST5: { high: 'Температура стола была выше нормы', low: 'Температура стола была ниже нормы' },
+            };
+            return (desc[signal] || {})[direction] || `${sigLabel(signal)}: аномальное значение (${direction})`;
+        }
+
+        function renderAnomalies(anomalies, sessionsDetail) {
             const el = document.getElementById('patterns-anomalies');
             if (!anomalies.length) {
                 el.innerHTML = '<div style="color:#6b7280;font-size:13px;">Аномалий не обнаружено.</div>';
                 return;
             }
-            // Group by session
+            const dateMap = {};
+            (sessionsDetail || []).forEach(s => { dateMap[s.session_id] = (s.start_ts || '').slice(0, 10); });
             const bySession = {};
             anomalies.forEach(a => { (bySession[a.session_id] = bySession[a.session_id] || []).push(a); });
-            el.innerHTML = Object.entries(bySession).map(([sid, anoms]) => `
+            el.innerHTML = Object.entries(bySession).map(([sid, anoms]) => {
+                const date = dateMap[sid] || sid.slice(9, 19);
+                return `
                 <div style="border:1px solid #2d3748;border-radius:10px;padding:14px;margin-bottom:12px;">
-                    <div style="font-weight:600;margin-bottom:8px;font-size:13px;color:#a0aec0;">${sid}</div>
+                    <div style="font-weight:600;margin-bottom:8px;font-size:13px;">${date}</div>
                     ${anoms.map(a => `
-                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                            <span style="color:${grpColor(a.group)};font-size:13px;">${sigLabel(a.signal)}</span>
-                            <span style="color:${a.direction==='high'?'#ef4444':'#60a5fa'};font-weight:600;">
-                                ${a.value} (z=${a.z_score})
-                            </span>
+                        <div style="margin-bottom:8px;padding:8px;background:#1e2433;border-radius:8px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                                <span style="color:${grpColor(a.group)};font-size:13px;font-weight:500;">${sigLabel(a.signal)}</span>
+                                <span style="color:${a.direction==='high'?'#ef4444':'#60a5fa'};font-weight:600;">
+                                    z=${a.z_score.toFixed(1)}
+                                </span>
+                            </div>
+                            <div style="color:#e2e8f0;font-size:13px;">${_anomalyDescription(a.signal, a.direction)}</div>
                         </div>
                     `).join('')}
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
         }
 
         function renderBeforeAfter(items) {
@@ -2323,7 +2351,7 @@
                     `обновлено ${(data.computed_at||'').slice(11,19)}</span>`;
 
                 renderTrends(data.trends || []);
-                renderAnomalies(data.anomalies || []);
+                renderAnomalies(data.anomalies || [], data.sessions_detail || []);
                 renderBeforeAfter(data.before_after || []);
                 renderSessionsTable(data.sessions_detail || []);
                 loadDefectRisk();
