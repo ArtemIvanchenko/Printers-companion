@@ -27,15 +27,32 @@
 
 ## Установка
 
-### 1. Установить Docker Desktop
+### 1. Установить Docker
 
-| ОС | Ссылка |
-|---|---|
-| Windows | https://docs.docker.com/desktop/install/windows-install/ |
-| macOS | https://docs.docker.com/desktop/install/mac-install/ |
-| Linux | https://docs.docker.com/desktop/install/linux-install/ |
+Проект требует только Docker Engine и Docker Compose — GUI не нужен.
 
-Запустить Docker Desktop и дождаться зелёного значка.
+**macOS** — [OrbStack](https://orbstack.dev) (рекомендуется): нативный, запускается за секунду, бесплатный для личного использования. Альтернатива: Docker Desktop.
+
+```bash
+brew install orbstack
+```
+
+**Windows** — [Rancher Desktop](https://rancherdesktop.io) (рекомендуется): open source, легче Docker Desktop. При установке выбрать движок **dockerd (moby)**. Альтернатива: Docker Desktop.
+
+**Linux** — Docker Desktop не нужен, только Docker Engine:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install docker-ce docker-ce-cli docker-compose-plugin
+# или одной командой:
+curl -fsSL https://get.docker.com | sh
+```
+
+Проверить установку:
+
+```bash
+docker compose version
+```
 
 ### 2. Скачать проект
 
