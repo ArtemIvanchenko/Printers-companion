@@ -8,14 +8,14 @@ verified data for the two standard M-350 presets:
   • 12Х18Н10Т 32мкм (Steel) — approximate values; exact preset not yet
     photographed.
 
-Also adds steel density to machine_params.material_densities if the row exists.
+Steel density (7.9 g/cm³) is intentionally NOT updated here — DML on live
+application tables inside an Alembic migration causes lock contention with the
+running API. Set it via PUT /settings/machine instead.
 
 Revision ID: 0004_machine_presets
 Revises: 0003_scanner_jump_params
 Create Date: 2026-06-19
 """
-
-import json
 
 import sqlalchemy as sa
 from alembic import op
@@ -92,20 +92,6 @@ def upgrade() -> None:
             ),
             p,
         )
-
-    # Add steel density to machine_params if the row exists and steel is missing
-    if inspector.has_table("machine_params"):
-        row = bind.execute(
-            sa.text("SELECT material_densities FROM machine_params WHERE id = 1")
-        ).fetchone()
-        if row is not None:
-            densities = row[0] if isinstance(row[0], dict) else (json.loads(row[0]) if row[0] else {})
-            if "steel" not in densities:
-                densities["steel"] = 7.9
-                bind.execute(
-                    sa.text("UPDATE machine_params SET material_densities = :d WHERE id = 1"),
-                    {"d": json.dumps(densities)},
-                )
 
 
 def downgrade() -> None:
