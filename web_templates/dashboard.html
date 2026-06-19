@@ -2481,7 +2481,10 @@
             try {
                 const r = await fetch('/upload/stl-estimate', { method: 'POST', body: fd });
                 const d = await r.json();
-                _saveModelEntry(file.name, d.volume_cm3, d.estimate?.avg_session_hours);
+                const _estH = (d.prediction?.available && d.prediction?.print_hours != null)
+                    ? d.prediction.print_hours
+                    : d.estimate?.avg_session_hours;
+                _saveModelEntry(file.name, d.volume_cm3, _estH);
                 loadModelHistory();
                 openViewer(0);
             } catch(e) {
