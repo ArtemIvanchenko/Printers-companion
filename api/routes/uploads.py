@@ -73,6 +73,21 @@ async def upload_logs(files: list[UploadFile]) -> dict:
     return {"saved": saved, "skipped": skipped}
 
 
+@router.post("/rescan")
+async def rescan_logs() -> dict:
+    """Trigger re-import of all files already in the raw-logs folder.
+
+    Use this when logs were placed directly into the mounted folder
+    (bypassing the browser upload), e.g. via network copy or USB.
+    """
+    settings = get_settings()
+    dest = Path(settings.raw_logs_container_path)
+    if not dest.exists():
+        raise HTTPException(500, f"Папка логов не найдена: {dest}")
+    _trigger_rescan(settings.raw_logs_container_path)
+    return {"status": "ok", "message": "Сканирование запущено. Новые данные появятся через минуту."}
+
+
 def _trigger_rescan(path: str) -> None:
     """Ask the API's startup-import logic to re-run in background."""
     import asyncio

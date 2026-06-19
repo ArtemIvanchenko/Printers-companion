@@ -322,6 +322,7 @@
                 <button class="quick-btn" onclick="document.getElementById('file-input-home').click()">📂 Загрузить логи
                     <input id="file-input-home" type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadFiles(this.files)">
                 </button>
+                <button class="quick-btn" onclick="rescanFolder()">🔄 Сканировать папку</button>
                 <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('telemetry',null)">🌡️ Телеметрия</button>
                 <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('patterns',null)">🔍 Тренды</button>
             </div>
@@ -660,10 +661,16 @@
                     <div style="font-size:40px;margin-bottom:12px;">📁</div>
                     <div style="color:#e2e8f0;font-weight:600;margin-bottom:8px;">Перетащите .log или .zip файлы сюда</div>
                     <div style="color:#6b7280;font-size:13px;margin-bottom:16px;">или</div>
-                    <button onclick="document.getElementById('file-input').click()"
-                        style="background:#3b82f6;color:white;border:none;border-radius:8px;padding:10px 24px;font-size:14px;cursor:pointer;">
-                        Выбрать файлы
-                    </button>
+                    <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+                        <button onclick="document.getElementById('file-input').click()"
+                            style="background:#3b82f6;color:white;border:none;border-radius:8px;padding:10px 24px;font-size:14px;cursor:pointer;">
+                            Выбрать файлы
+                        </button>
+                        <button onclick="rescanFolder()"
+                            style="background:#374151;color:#e2e8f0;border:1px solid #4b5563;border-radius:8px;padding:10px 24px;font-size:14px;cursor:pointer;">
+                            🔄 Сканировать папку
+                        </button>
+                    </div>
                     <input id="file-input" type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadFiles(this.files)">
                 </div>
                 <div id="upload-result" style="margin-top:16px;font-size:13px;"></div>
@@ -1742,6 +1749,19 @@
             const savedCount = (html.match(/✅/g) || []).length;
             if (savedCount) html += '<div style="color:#a0aec0;margin-top:8px;">Данные импортируются автоматически. Обновите страницу через минуту.</div>';
             res.innerHTML = html;
+        }
+
+        async function rescanFolder() {
+            const res = document.getElementById('upload-result');
+            res.innerHTML = '<span style="color:#60a5fa;">Сканирование папки…</span>';
+            try {
+                const r = await fetch('/upload/rescan', { method: 'POST' });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || r.status);
+                res.innerHTML = '<span style="color:#10b981;">✅ ' + d.message + '</span>';
+            } catch(e) {
+                res.innerHTML = '<span style="color:#ef4444;">Ошибка: ' + e + '</span>';
+            }
         }
 
         // ── New print form ───────────────────────────────────────────────────
