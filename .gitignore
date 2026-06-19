@@ -20,3 +20,6 @@ import.sql
 # Auto-update state
 .last_deployed
 update.log
+
+# Dashboard→launcher update-request flag (runtime only)
+control/

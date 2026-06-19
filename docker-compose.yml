@@ -30,6 +30,11 @@ services:
       - type: bind
         source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
+      # Control dir — the dashboard "Обновить" button drops an update-request
+      # flag here; the launcher applies it on next start. No Docker access needed.
+      - type: bind
+        source: ${CONTROL_HOST_PATH:-./control}
+        target: /mnt/control
     tmpfs:
       - /tmp:size=4g,mode=1777
     security_opt:

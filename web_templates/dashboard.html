@@ -292,14 +292,13 @@
         <div style="background:#1a2035;border:1px solid #2d3748;border-radius:16px;padding:36px 40px;
                     max-width:460px;width:90%;text-align:center;">
             <div style="font-size:40px;margin-bottom:16px;" id="upd-icon">⏳</div>
-            <div style="font-size:18px;font-weight:700;color:#e2e8f0;margin-bottom:8px;" id="upd-title">Обновление запущено</div>
-            <div style="font-size:13px;color:#a0aec0;margin-bottom:24px;line-height:1.6;" id="upd-detail">Runner получил задание и начинает сборку…</div>
-            <div style="background:#0f1419;border-radius:8px;padding:12px 16px;font-family:monospace;
-                        font-size:12px;color:#60a5fa;text-align:left;max-height:120px;overflow-y:auto;" id="upd-log"></div>
-            <a id="upd-gh-link" href="#" target="_blank"
-               style="display:inline-block;margin-top:16px;color:#60a5fa;font-size:12px;text-decoration:none;">
-               Открыть в GitHub Actions ↗
-            </a>
+            <div style="font-size:18px;font-weight:700;color:#e2e8f0;margin-bottom:8px;" id="upd-title">Обновление</div>
+            <div style="font-size:13px;color:#a0aec0;margin-bottom:24px;line-height:1.6;" id="upd-detail"></div>
+            <button onclick="document.getElementById('update-overlay').style.display='none'"
+                    style="margin-top:4px;background:#3b82f6;color:white;border:none;border-radius:8px;
+                           padding:10px 24px;font-size:14px;font-weight:600;cursor:pointer;">
+                Понятно
+            </button>
         </div>
     </div>
 
@@ -2017,6 +2016,15 @@
             const dot   = document.getElementById('upd-status-dot');
             const label = document.getElementById('upd-status-label');
             const btn   = document.getElementById('upd-trigger-btn');
+            // Кнопка «Обновить» доступна всегда — обновление можно запросить в любой
+            // момент (git pull без новых коммитов просто ничего не меняет). Проверка
+            // версии лишь подсказывает, есть ли что-то новое, но не блокирует кнопку.
+            if (btn) {
+                btn.disabled         = false;
+                btn.style.background  = '#3b82f6';
+                btn.style.color       = 'white';
+                btn.style.cursor      = 'pointer';
+            }
             if (dot) { dot.style.background = '#6b7280'; label.textContent = 'Проверка…'; }
             try {
                 const d = await fetch('/admin/update/check').then(r => r.json());
@@ -2028,11 +2036,6 @@
                 if (d.update_available) {
                     dot.style.background   = '#f59e0b';
                     label.textContent      = `Доступно обновление → ${d.latest_commit}`;
-                    btn.disabled           = false;
-                    btn.style.background   = '#3b82f6';
-                    btn.style.color        = 'white';
-                    btn.style.cursor       = 'pointer';
-                    // also show global banner
                     if (!_updateDismissed && !_updatePolling) {
                         const banner = document.getElementById('update-banner');
                         const msg    = document.getElementById('update-banner-msg');
@@ -2042,17 +2045,13 @@
                     }
                 } else if (d.error) {
                     dot.style.background = '#ef4444';
-                    label.textContent    = `Ошибка проверки: ${d.error}`;
+                    label.textContent    = `Проверка версии недоступна — обновить можно вручную`;
                 } else {
                     dot.style.background = '#10b981';
                     label.textContent    = 'Установлена последняя версия';
-                    btn.disabled         = true;
-                    btn.style.background = '#4a5568';
-                    btn.style.color      = '#718096';
-                    btn.style.cursor     = 'not-allowed';
                 }
             } catch(e) {
-                if (dot) { dot.style.background = '#ef4444'; label.textContent = 'GitHub недоступен'; }
+                if (dot) { dot.style.background = '#ef4444'; label.textContent = 'Проверка версии недоступна — обновить можно вручную'; }
             }
         }
 
@@ -2080,93 +2079,33 @@
             document.getElementById('upd-detail').textContent = detail;
         }
 
-        function _appendLog(line) {
-            const el = document.getElementById('upd-log');
-            el.textContent += line + '\n';
-            el.scrollTop = el.scrollHeight;
-        }
-
         async function triggerUpdate() {
             if (_updatePolling) return;
             _updatePolling = true;
 
-            // Show overlay
             const overlay = document.getElementById('update-overlay');
             overlay.style.display = 'flex';
             document.getElementById('update-banner').style.display = 'none';
-            _setOverlay('⏳', 'Запуск обновления…', 'Отправляем задание на GitHub Actions runner…');
+            _setOverlay('⏳', 'Запрашиваю обновление…', '');
 
             try {
                 const r = await fetch('/admin/update', { method: 'POST' });
                 const d = await r.json();
                 if (!r.ok) {
-                    _setOverlay('❌', 'Ошибка', d.detail || 'Не удалось запустить обновление');
-                    _appendLog(d.detail || JSON.stringify(d));
-                    _updatePolling = false;
-                    return;
+                    _setOverlay('❌', 'Ошибка', d.detail || 'Не удалось запросить обновление');
+                } else {
+                    _setOverlay(
+                        '✅',
+                        'Обновление запрошено',
+                        'Закройте систему и запустите «Запустить.command» ещё раз — ' +
+                        'новая версия скачается и установится при следующем старте.'
+                    );
                 }
-                _setOverlay('🔄', 'Runner получил задание', 'Ожидаем начала сборки на Windows PC…');
-                _appendLog('[' + new Date().toLocaleTimeString() + '] ' + d.message);
-                await _pollRunStatus();
             } catch(e) {
                 _setOverlay('❌', 'Ошибка сети', String(e));
+            } finally {
                 _updatePolling = false;
             }
-        }
-
-        async function _pollRunStatus() {
-            const deadline = Date.now() + 10 * 60 * 1000; // 10 min timeout
-            let lastStatus = '';
-
-            while (Date.now() < deadline) {
-                await new Promise(r => setTimeout(r, 4000));
-                try {
-                    const d = await fetch('/admin/update/run-status').then(r => r.json());
-                    if (d.run_id) {
-                        document.getElementById('upd-gh-link').href = d.url || '#';
-                    }
-                    const key = d.status + '/' + d.conclusion;
-                    if (key !== lastStatus) {
-                        lastStatus = key;
-                        const ts = '[' + new Date().toLocaleTimeString() + '] ';
-                        if (d.status === 'queued')      { _appendLog(ts + '⏳ Runner в очереди…'); _setOverlay('⏳', 'В очереди', 'Runner ожидает запуска на Windows PC…'); }
-                        if (d.status === 'in_progress') { _appendLog(ts + '🔨 Сборка и запуск контейнеров…'); _setOverlay('🔄', 'Идёт обновление', 'Runner выполняет docker compose up --build…'); }
-                        if (d.status === 'completed' && d.conclusion === 'success') {
-                            _appendLog(ts + '✅ Готово! Ждём перезапуска API…');
-                            _setOverlay('🔄', 'Готово! Перезапуск…', 'Сервисы пересобраны. Ждём когда API вернётся онлайн…');
-                            await _waitForRestart();
-                            return;
-                        }
-                        if (d.status === 'completed' && d.conclusion !== 'success') {
-                            _setOverlay('❌', 'Ошибка сборки', `Runner завершился с ошибкой: ${d.conclusion}. Откройте GitHub Actions для деталей.`);
-                            _appendLog(ts + '❌ conclusion=' + d.conclusion);
-                            _updatePolling = false;
-                            return;
-                        }
-                    }
-                } catch(e) { /* runner может перезапускать API — нормально */ }
-            }
-            _setOverlay('⚠️', 'Таймаут', 'Обновление выполняется дольше 10 минут. Проверьте GitHub Actions.');
-            _updatePolling = false;
-        }
-
-        async function _waitForRestart() {
-            const deadline = Date.now() + 3 * 60 * 1000;
-            while (Date.now() < deadline) {
-                await new Promise(r => setTimeout(r, 3000));
-                try {
-                    const r = await fetch('/health');
-                    if (r.ok) {
-                        _setOverlay('✅', 'Обновление завершено!', 'Страница перезагрузится через 3 секунды…');
-                        _appendLog('[' + new Date().toLocaleTimeString() + '] ✅ API онлайн, перезагрузка…');
-                        await new Promise(r => setTimeout(r, 3000));
-                        location.reload();
-                        return;
-                    }
-                } catch(e) { /* API перезапускается */ }
-            }
-            _setOverlay('⚠️', 'Сервис не ответил', 'Обновите страницу вручную когда сервис будет готов.');
-            _updatePolling = false;
         }
 
         // Check for update on load, then every 5 minutes
