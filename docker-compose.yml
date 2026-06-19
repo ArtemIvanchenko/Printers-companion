@@ -205,47 +205,6 @@ services:
       timeout: 10s
       retries: 5
 
-  telegram-bot:
-    profiles: ["telegram"]
-    image: ghcr.io/artemivanchenko/printers-companion:telegram-bot
-    build:
-      context: .
-      dockerfile: Dockerfile.telegram-bot
-    env_file:
-      - .env
-      - .env.secrets
-    environment:
-      HF_HOME: /models/stt/huggingface
-      HF_HUB_CACHE: /models/stt/huggingface/hub
-      HF_XET_CACHE: /models/stt/huggingface/xet
-      XDG_CACHE_HOME: /models/stt/cache
-    command: python -m operator_journal.telegram_bot
-    depends_on:
-      api:
-        condition: service_healthy
-    volumes:
-      - stt_model_cache:/models/stt
-    networks:
-      - agent_net
-    restart: unless-stopped
-    tmpfs:
-      - /tmp:size=512m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 4g
-    healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
   mcp:
     profiles: ["mcp"]
     image: ghcr.io/artemivanchenko/printers-companion:mcp
@@ -302,4 +261,3 @@ volumes:
   postgres_data:
   redis_data:
   minio_data:
-  stt_model_cache:

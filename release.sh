@@ -20,7 +20,7 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 REPO="ghcr.io/artemivanchenko/printers-companion"
-SERVICES=(api worker scheduler telegram-bot mcp)
+SERVICES=(api worker scheduler mcp)
 FLASH_MOUNT="/Volumes/SANDISK"
 FLASH_PROJECT="$FLASH_MOUNT/printer-log-analytics"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
