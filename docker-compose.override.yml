@@ -13,7 +13,7 @@ services:
   api:
     volumes:
       - .:/app:ro
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload --reload-exclude '*.log' --reload-exclude '*.zip' --reload-exclude 'sample_logs/*' --reload-exclude 'update.log' --reload-exclude '.last_deployed'
 
   worker:
     volumes:

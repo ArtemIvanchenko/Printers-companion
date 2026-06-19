@@ -14,8 +14,6 @@ from typing import Any
 from fastapi import APIRouter
 from sqlalchemy import select
 
-from analytics.cross_session import run_cross_session_analysis
-from analytics.signal_stats import compute_signal_stats   # fallback for old sessions
 from domain.models.events import OperatorEvent
 from domain.models.sessions import BuildSession
 from storage.db.session import session_scope
@@ -55,6 +53,7 @@ def _load_sessions(db) -> list[dict[str, Any]]:
         if not signal_stats:
             telemetry = group.get("telemetry", {}) or {}
             if telemetry:
+                from analytics.signal_stats import compute_signal_stats
                 signal_stats = compute_signal_stats(telemetry)
         if not signal_stats:
             continue
@@ -103,6 +102,7 @@ def _compute() -> dict[str, Any]:
         sessions = _load_sessions(db)
         events   = _load_operator_events(db)
 
+    from analytics.cross_session import run_cross_session_analysis
     result = run_cross_session_analysis(sessions, events)
     result["sessions_detail"] = sessions   # include per-session stats for the dashboard
     # NOTE: computed_at is set by the caller (get_patterns) as a real datetime so
