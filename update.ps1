@@ -32,7 +32,7 @@ if ($Local -ne $Remote) {
 $Changed = git diff --name-only $From $Remote 2>$null
 if ($Changed -match 'Dockerfile\.base|requirements') {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm')] Пересборка базового образа..." | Add-Content $Log
-    docker build -f Dockerfile.base -t artemivanchenko/printer-log-analytics:base . 2>&1 | Add-Content $Log
+    docker build -f Dockerfile.base -t ghcr.io/artemivanchenko/printers-companion:base . 2>&1 | Add-Content $Log
     if ($LASTEXITCODE -ne 0) { throw "docker build base failed with exit code $LASTEXITCODE" }
 }
 

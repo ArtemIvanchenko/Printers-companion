@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
-# release.sh — bump version, build amd64 Docker images, push to Hub, update flash.
+# release.sh — bump version, build amd64 Docker images, push to GHCR, update flash.
 #
 # Usage:
 #   ./release.sh patch          # 0.2.0 → 0.2.1
 #   ./release.sh minor          # 0.2.0 → 0.3.0
 #   ./release.sh major          # 0.2.0 → 1.0.0
 #   ./release.sh 0.5.0          # set exact version
-#   ./release.sh patch --no-push        # build only, skip Hub push
+#   ./release.sh patch --no-push        # build only, skip GHCR push
 #   ./release.sh patch --no-flash       # skip flash drive copy
 #   ./release.sh patch --dry-run        # print what would happen, do nothing
 #
 # Requirements:
 #   - docker (with buildx multiplatform support)
+#   - gh CLI (github.com/cli/cli) — used for GHCR auth
 #   - git (clean working tree recommended)
 #   - Flash drive at /Volumes/SANDISK (optional, skip with --no-flash)
 
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-REPO="artemivanchenko/printer-log-analytics"
+REPO="ghcr.io/artemivanchenko/printers-companion"
 SERVICES=(api worker scheduler telegram-bot mcp)
 FLASH_MOUNT="/Volumes/SANDISK"
 FLASH_PROJECT="$FLASH_MOUNT/printer-log-analytics"
@@ -119,6 +120,14 @@ else
 fi
 run git tag -f -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
 info "Tagged v${NEW_VERSION}"
+
+# ── GHCR login ───────────────────────────────────────────────────────────────
+if $PUSH && ! $DRY_RUN; then
+  step "Logging in to GitHub Container Registry"
+  gh auth token | docker login ghcr.io -u artemivanchenko --password-stdin \
+    || die "GHCR login failed. Run 'gh auth login' first."
+  info "Logged in to ghcr.io"
+fi
 
 # ── Docker build ──────────────────────────────────────────────────────────────
 step "Building Docker images (linux/amd64)"
@@ -224,7 +233,7 @@ echo
 echo "  Version:    $NEW_VERSION"
 echo "  Git tag:    v${NEW_VERSION} (run: git push && git push --tags)"
 if $PUSH; then
-  echo "  Docker Hub: ${REPO}:api  (and :api-v${NEW_VERSION}, :worker-v${NEW_VERSION}, …)"
+  echo "  GHCR: ${REPO}:api  (and :api-v${NEW_VERSION}, :worker-v${NEW_VERSION}, …)"
   echo
   echo "  To deploy on the printer machine:"
   echo "    docker compose pull && docker compose up -d"

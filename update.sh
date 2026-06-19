@@ -29,7 +29,7 @@ fi
 # Rebuild base image if base-layer files changed (new deps won't appear otherwise).
 if git diff --name-only "$FROM" "$REMOTE" 2>/dev/null | grep -qE 'Dockerfile\.base|requirements'; then
     echo "[$(date '+%Y-%m-%d %H:%M')] Пересборка базового образа..." >> "$LOG"
-    docker build -f Dockerfile.base -t artemivanchenko/printer-log-analytics:base . >> "$LOG" 2>&1
+    docker build -f Dockerfile.base -t ghcr.io/artemivanchenko/printers-companion:base . >> "$LOG" 2>&1
 fi
 
 # Rebuild and restart all currently running app services (dynamic — respects active profiles).
