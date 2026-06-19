@@ -1,6 +1,6 @@
 services:
   api:
-    image: artemivanchenko/printer-log-analytics:api
+    image: ghcr.io/artemivanchenko/printers-companion:api
     build:
       context: .
       dockerfile: Dockerfile.api
@@ -49,7 +49,7 @@ services:
       start_period: 120s
 
   worker:
-    image: artemivanchenko/printer-log-analytics:worker
+    image: ghcr.io/artemivanchenko/printers-companion:worker
     build:
       context: .
       dockerfile: Dockerfile.worker
@@ -84,7 +84,7 @@ services:
           memory: 8g
 
   watcher:
-    image: artemivanchenko/printer-log-analytics:watcher
+    image: ghcr.io/artemivanchenko/printers-companion:watcher
     build:
       context: .
       dockerfile: Dockerfile.worker
@@ -114,7 +114,7 @@ services:
           memory: 2g
 
   scheduler:
-    image: artemivanchenko/printer-log-analytics:scheduler
+    image: ghcr.io/artemivanchenko/printers-companion:scheduler
     build:
       context: .
       dockerfile: Dockerfile.scheduler
@@ -207,7 +207,7 @@ services:
 
   telegram-bot:
     profiles: ["telegram"]
-    image: artemivanchenko/printer-log-analytics:telegram-bot
+    image: ghcr.io/artemivanchenko/printers-companion:telegram-bot
     build:
       context: .
       dockerfile: Dockerfile.telegram-bot
@@ -248,7 +248,7 @@ services:
 
   mcp:
     profiles: ["mcp"]
-    image: artemivanchenko/printer-log-analytics:mcp
+    image: ghcr.io/artemivanchenko/printers-companion:mcp
     build:
       context: .
       dockerfile: Dockerfile.mcp
