@@ -145,32 +145,116 @@ def get_prediction_accuracy(repo: PrintsRepository = Depends(get_prints_reposito
     return prediction_accuracy(repo.db)
 
 
+def _combined_prediction(
+    blobs: list[bytes],
+    material: str,
+    params: dict,
+    powder_cost: float | None,
+    mode: str,
+) -> dict:
+    """Time + cost estimate over a full print platform (one or more part STLs).
+
+    Semantics:
+    - scan  = Σ per-part scan times  (parts scanned independently by the laser)
+    - recoat = from the tallest part (one recoat pass per layer for the whole platform)
+    - volume / powder = Σ parts
+    """
+    from analytics.prediction.cost_estimator import estimate_cost
+    from analytics.prediction.print_time import EstimationError, PrintTimeEstimate, estimate_print_time
+    from analytics.prediction.stl_slicer import SliceResult, slice_stl
+
+    try:
+        layer_thickness = float(params["layer_thickness_mm"])
+        per_part = [
+            (slc := slice_stl(blob, layer_thickness),
+             estimate_print_time(slc, params, material, stl_bytes=blob, mode=mode))
+            for blob in blobs
+        ]
+
+        scan_hours = sum(te.scan_hours for _, te in per_part)
+        # Recoat is a single pass per layer for the tallest part on the platform
+        tallest = max(range(len(per_part)), key=lambda i: per_part[i][0].layer_count)
+        recoat_hours = per_part[tallest][1].recoat_hours
+        print_hours = scan_hours + recoat_hours
+
+        # Deduplicated warnings from all parts
+        seen: set[str] = set()
+        warnings: list[str] = []
+        for _, te in per_part:
+            for w in te.warnings:
+                if w not in seen:
+                    seen.add(w)
+                    warnings.append(w)
+
+        combined_time = PrintTimeEstimate(
+            scan_hours=scan_hours,
+            recoat_hours=recoat_hours,
+            print_hours=print_hours,
+            total_days=print_hours / 24.0,
+            method=per_part[0][1].method,
+            warnings=warnings,
+        )
+        combined_slices = SliceResult(
+            volume_mm3=sum(sl.volume_mm3 for sl, _ in per_part),
+            height_mm=max(sl.height_mm for sl, _ in per_part),
+            layer_count=max(sl.layer_count for sl, _ in per_part),
+            layer_thickness_mm=layer_thickness,
+        )
+        cost_est = estimate_cost(combined_slices, params, material, combined_time,
+                                 powder_cost_override=powder_cost)
+    except EstimationError as exc:
+        return {"available": False, "reason": str(exc)}
+    except Exception:
+        logger.exception("prints: combined prediction failed")
+        return {"available": False, "reason": "Не удалось нарезать модель — проверьте файлы"}
+
+    return {
+        "available": True,
+        "n_parts": len(per_part),
+        "method": combined_time.method,
+        "print_hours": round(print_hours, 3),
+        "scan_hours": round(scan_hours, 3),
+        "recoat_hours": round(recoat_hours, 3),
+        "cost_total_rub": cost_est.total_rub,
+        "warnings": combined_time.warnings + cost_est.warnings,
+    }
+
+
 def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict:
-    """Run both time/cost estimates on the record's STL and store the snapshot.
+    """Run both time/cost estimates on all STL files of a record and store the snapshot.
 
     Raises HTTPException with the reason when the estimate cannot run.
     """
     record = repo.get_print_record(record_id)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
-    stl_file = next(
-        (f for f in repo.list_print_files(record_id) if f["file_type"] == "stl"), None,
-    )
-    if not stl_file:
+
+    stl_files = [f for f in repo.list_print_files(record_id) if f["file_type"] == "stl"]
+    if not stl_files:
         raise HTTPException(422, "К карточке не прикреплён STL (без поддержек)")
 
-    bucket, _, object_name = stl_file["object_uri"].removeprefix("s3://").partition("/")
-    data = ObjectStore().get_bytes(bucket, object_name)
-    if data is None:
-        raise HTTPException(503, "STL недоступен в хранилище")
+    from api.routes.machine_settings import params_configured
 
-    from api.routes.uploads import _geometry_prediction
+    params = repo.get_machine_params()
+    if not params_configured(params):
+        raise HTTPException(
+            422, "Заполните параметры машины (вкладка Настройки → Машина) перед расчётом"
+        )
+
+    store = ObjectStore()
+    blobs: list[bytes] = []
+    for f in stl_files:
+        bucket, _, object_name = f["object_uri"].removeprefix("s3://").partition("/")
+        data = store.get_bytes(bucket, object_name)
+        if data is None:
+            raise HTTPException(503, f"STL недоступен в хранилище: {f['file_name']}")
+        blobs.append(data)
 
     material = record["material"]
-    record_powder_cost = record.get("powder_cost_rub_per_kg")
-    snapshot: dict = {"estimated_at": datetime.now(timezone.utc).isoformat()}
+    powder_cost = record.get("powder_cost_rub_per_kg") or repo.last_powder_cost()
+    snapshot: dict = {"estimated_at": datetime.now(timezone.utc).isoformat(), "n_parts": len(blobs)}
     for key, mode in (("fast", "excel"), ("accurate", "pyslm")):
-        result = _geometry_prediction(data, material, mode=mode, powder_cost_override=record_powder_cost)
+        result = _combined_prediction(blobs, material, params, powder_cost, mode)
         if not result.get("available"):
             raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
         snapshot[key] = {
@@ -183,8 +267,10 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     meta["prediction"] = snapshot
     repo.update_print_record(record_id, {"metadata_json": meta})
     repo.flush()
-    logger.info("prints: prediction stored for %s (fast=%.1fh, accurate=%.1fh)",
-                record_id, snapshot["fast"]["print_hours"], snapshot["accurate"]["print_hours"])
+    logger.info(
+        "prints: prediction stored for %s (%d parts, fast=%.1fh, accurate=%.1fh)",
+        record_id, len(blobs), snapshot["fast"]["print_hours"], snapshot["accurate"]["print_hours"],
+    )
     return snapshot
 
 

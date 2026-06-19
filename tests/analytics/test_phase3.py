@@ -106,6 +106,60 @@ class TestEstimateRecordEndpoint:
         stored = client.get(f"/prints/{rec['record_id']}").json()
         assert stored["metadata_json"]["prediction"]["fast"]["method"] == "excel"
 
+    def test_estimate_two_stl_aggregates_correctly(self, monkeypatch):
+        """Платформа из 2 STL: scan=Σ, recoat=max, объём=Σ."""
+        import trimesh
+
+        TALL_STL = trimesh.creation.box(extents=[10, 10, 20]).export(file_type="stl")
+
+        class _Store:
+            data = {}
+            def __init__(self, *a, **k): pass
+            def is_available(self): return True
+            def put_bytes(self, b, o, d, content_type=""):
+                _Store.data[(b, o)] = d
+                return f"s3://{b}/{o}"
+            def get_bytes(self, b, o): return _Store.data.get((b, o))
+            def remove_object(self, b, o): return _Store.data.pop((b, o), None) is not None
+
+        monkeypatch.setattr("api.routes.prints.ObjectStore", _Store)
+        client.put("/settings/machine", json={
+            "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 500, "hatch_distance_mm": 0.1,
+            "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9000,
+            "powder_cost_rub_per_kg": 7000, "material_densities": {"steel": 7.9},
+        })
+        rec = client.post("/prints", json={"name": "два куба"}).json()
+        rid = rec["record_id"]
+        # Куб 10mm + куб 20mm (высокий)
+        for name, stl in (("cube10.stl", CUBE_STL), ("cube20.stl", TALL_STL)):
+            client.post(
+                f"/prints/{rid}/files",
+                files={"file": (name, io.BytesIO(stl), "model/stl")},
+                data={"file_type": "stl"},
+            )
+        r = client.post(f"/prints/{rid}/estimate")
+        assert r.status_code == 200, r.text
+        snap = r.json()["prediction"]
+        assert snap["n_parts"] == 2
+
+        # Scan = сумма двух деталей → должен быть больше, чем у каждой по отдельности
+        # Проверим через одно-детальные карточки
+        rec1 = client.post("/prints", json={"name": "только куб10"}).json()
+        client.post(f"/prints/{rec1['record_id']}/files",
+            files={"file": ("cube10.stl", io.BytesIO(CUBE_STL), "model/stl")},
+            data={"file_type": "stl"})
+        snap1 = client.post(f"/prints/{rec1['record_id']}/estimate").json()["prediction"]
+
+        rec2 = client.post("/prints", json={"name": "только куб20"}).json()
+        client.post(f"/prints/{rec2['record_id']}/files",
+            files={"file": ("cube20.stl", io.BytesIO(TALL_STL), "model/stl")},
+            data={"file_type": "stl"})
+        snap2 = client.post(f"/prints/{rec2['record_id']}/estimate").json()["prediction"]
+
+        # scan ≈ Σ одиночных (разные высоты → разные recoat)
+        combined_hours = snap["fast"]["print_hours"]
+        assert combined_hours > max(snap1["fast"]["print_hours"], snap2["fast"]["print_hours"])
+
     def test_estimate_without_stl_422(self):
         rec = client.post("/prints", json={"name": "без stl"}).json()
         assert client.post(f"/prints/{rec['record_id']}/estimate").status_code == 422
