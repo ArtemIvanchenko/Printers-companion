@@ -1723,9 +1723,12 @@
             try {
                 const r = await fetch('/upload/logs', { method: 'POST', body: fd });
                 const d = await r.json();
-                const ok  = (d.saved  || []).map(f => `<div style="color:#10b981;">✅ ${f.name} (${(f.size_bytes/1024/1024).toFixed(1)} МБ)</div>`).join('');
-                const bad = (d.skipped|| []).map(f => `<div style="color:#ef4444;">❌ ${f.name} — ${f.reason}</div>`).join('');
-                res.innerHTML = ok + bad + (d.saved.length ? '<div style="color:#a0aec0;margin-top:8px;">Данные импортируются автоматически. Обновите страницу через минуту.</div>' : '');
+                if (!r.ok) throw new Error(d.detail || r.status);
+                const saved  = d.saved || [];
+                const skipped = d.skipped || [];
+                const ok  = saved.map(f => `<div style="color:#10b981;">✅ ${f.name} (${(f.size_bytes/1024/1024).toFixed(1)} МБ)</div>`).join('');
+                const bad = skipped.map(f => `<div style="color:#ef4444;">❌ ${f.name} — ${f.reason}</div>`).join('');
+                res.innerHTML = ok + bad + (saved.length ? '<div style="color:#a0aec0;margin-top:8px;">Данные импортируются автоматически. Обновите страницу через минуту.</div>' : '');
             } catch(e) {
                 res.innerHTML = '<span style="color:#ef4444;">Ошибка: ' + e + '</span>';
             }
@@ -2750,7 +2753,8 @@
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || r.status);
                 const skipped = (d.skipped || []).length;
-                alert(`Загружено файлов: ${d.saved.length}${skipped ? `, пропущено: ${skipped}` : ''}.\n${d.note}`);
+                const savedCount = (d.saved || []).length;
+                alert(`Загружено файлов: ${savedCount}${skipped ? `, пропущено: ${skipped}` : ''}.\n${d.note}`);
                 _pollRecordLink(recordId);
             } catch (e) {
                 alert('Ошибка загрузки логов: ' + e.message);
