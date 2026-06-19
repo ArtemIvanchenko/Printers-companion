@@ -447,7 +447,7 @@ async def upload_print_file(
     repo.db.commit()
     # Деталь без поддержек → автоматический прогноз времени/стоимости в фоне,
     # чтобы пара «прогноз/факт» образовалась без ручного нажатия 📐
-    if file_type == "stl" and not (record.get("metadata_json") or {}).get("prediction"):
+    if file_type == "stl":
         background_tasks.add_task(_auto_estimate, record_id)
     logger.info("prints: attached %s (%s, %d bytes) to %s", file_name, file_type, len(data), record_id)
     return saved
