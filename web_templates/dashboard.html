@@ -2479,7 +2479,9 @@
             const fd = new FormData();
             fd.append('file', file);
             try {
-                const r = await fetch('/upload/stl-estimate', { method: 'POST', body: fd });
+                const url = new URL('/upload/stl-estimate', location.origin);
+                url.searchParams.set('method', 'accurate');
+                const r = await fetch(url, { method: 'POST', body: fd });
                 const d = await r.json();
                 const _estH = (d.prediction?.available && d.prediction?.print_hours != null)
                     ? d.prediction.print_hours
