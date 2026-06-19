@@ -14,7 +14,10 @@ from pathlib import Path
 
 
 def _read_version() -> str:
-    if v := os.environ.get("APP_VERSION", "").strip():
+    # "dev" is the Dockerfile default — treat it as "not set" so the VERSION
+    # file takes precedence over the baked-in placeholder.
+    v = os.environ.get("APP_VERSION", "").strip()
+    if v and v != "dev":
         return v
     # Walk up from this file to find the VERSION file (repo root)
     here = Path(__file__).resolve()
