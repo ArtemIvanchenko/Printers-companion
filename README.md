@@ -29,29 +29,38 @@
 
 ### 1. Установить Docker
 
-Проект требует только Docker Engine и Docker Compose — GUI не нужен.
+Проект требует только Docker Engine и Docker Compose — тяжёлый GUI (Docker Desktop) не нужен.
 
-**macOS** — [OrbStack](https://orbstack.dev) (рекомендуется): нативный, запускается за секунду, бесплатный для личного использования. Альтернатива: Docker Desktop.
+**macOS** — [OrbStack](https://orbstack.dev): ~50 МБ, запускается мгновенно, бесплатный для личного использования.
 
 ```bash
 brew install orbstack
+# или скачать напрямую: https://orbstack.dev
 ```
 
-**Windows** — [Rancher Desktop](https://rancherdesktop.io) (рекомендуется): open source, легче Docker Desktop. При установке выбрать движок **dockerd (moby)**. Альтернатива: Docker Desktop.
+**Windows** — WSL2 + Docker Engine внутри него: ~300–400 МБ суммарно, никакого GUI.
 
-**Linux** — Docker Desktop не нужен, только Docker Engine:
+```powershell
+# Шаг 1 — включить WSL2 и установить Ubuntu (встроено в Windows 10/11)
+wsl --install -d Ubuntu
+# после перезагрузки открыть Ubuntu из меню Пуск и задать имя пользователя
+```
 
 ```bash
-# Debian / Ubuntu
-sudo apt-get install docker-ce docker-ce-cli docker-compose-plugin
-# или одной командой:
+# Шаг 2 — внутри Ubuntu установить Docker Engine
 curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# перезапустить терминал Ubuntu, затем проверить:
+docker compose version
 ```
 
-Проверить установку:
+Все дальнейшие команды выполняются в терминале Ubuntu (WSL2), не в PowerShell.
+
+**Linux** — только Docker Engine, без GUI:
 
 ```bash
-docker compose version
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
 ```
 
 ### 2. Скачать проект
