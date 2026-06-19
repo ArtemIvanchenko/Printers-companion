@@ -1,5 +1,7 @@
 .env
 .venv/
+.idea/
+sample_logs/
 venv/
 __pycache__/
 *.py[cod]

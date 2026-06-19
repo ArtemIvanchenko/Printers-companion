@@ -1,5 +1,7 @@
 .git
 .pytest_cache
+sample_logs/
+.idea/
 **/__pycache__
 **/*.py[cod]
 .env
