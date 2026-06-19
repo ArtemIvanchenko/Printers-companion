@@ -328,7 +328,7 @@ def _merge_preset(params: dict, preset: dict) -> dict:
     return merged
 
 
-def _geometry_prediction(
+async def _geometry_prediction(
     data: bytes, material: str, mode: str = "excel", hatch_distance_mm: float | None = None,
     powder_cost_override: float | None = None,
 ) -> dict:
@@ -377,10 +377,15 @@ def _geometry_prediction(
         from analytics.prediction.cost_estimator import estimate_cost
         from analytics.prediction.print_time import EstimationError, estimate_print_time
         from analytics.prediction.stl_slicer import slice_stl
+        import asyncio
 
-        slices = slice_stl(data, float(params["layer_thickness_mm"]))
-        time_est = estimate_print_time(slices, params, material, stl_bytes=data, mode=mode)
-        cost_est = estimate_cost(slices, params, material, time_est, powder_cost_override=powder_cost)
+        def _compute():
+            slices = slice_stl(data, float(params["layer_thickness_mm"]))
+            time_est = estimate_print_time(slices, params, material, stl_bytes=data, mode=mode)
+            cost_est = estimate_cost(slices, params, material, time_est, powder_cost_override=powder_cost)
+            return slices, time_est, cost_est
+
+        slices, time_est, cost_est = await asyncio.to_thread(_compute)
     except EstimationError as exc:
         return {"available": False, "reason": str(exc)}
     except Exception:
@@ -440,7 +445,7 @@ async def stl_estimate(
 
     warnings = _stl_warnings(file.filename or "", volume_cm3)
     mode = "pyslm" if method == "accurate" else "excel"
-    prediction = _geometry_prediction(
+    prediction = await _geometry_prediction(
         data, (material or "steel").strip().lower(), mode=mode, hatch_distance_mm=hatch_distance_mm,
     )
 
