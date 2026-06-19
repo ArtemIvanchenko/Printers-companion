@@ -2426,8 +2426,13 @@
         // =========================================================
         // MODELS — history + Three.js 3D preview
         // =========================================================
-        const _MODEL_KEY = 'pla_models_v1';
+        const _MODEL_KEY = 'pla_models_v2'; // v2: est_hours is geometry-based, not session average
         const _stlFileBuffers = {}; // session memory: filename → ArrayBuffer
+
+        // One-time migration: drop stale v1 cache that stored avg_session_hours
+        if (localStorage.getItem('pla_models_v1')) {
+            localStorage.removeItem('pla_models_v1');
+        }
         let _viewerRenderer = null, _viewerScene = null, _viewerCamera = null;
         let _viewerControls = null, _viewerAnimId = null;
 
