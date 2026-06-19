@@ -326,6 +326,7 @@
                 <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('telemetry',null)">🌡️ Телеметрия</button>
                 <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('patterns',null)">🔍 Тренды</button>
             </div>
+            <div id="home-upload-result" style="margin-top:8px;font-size:13px;min-height:1em;"></div>
 
             <!-- Key metrics -->
             <div class="stats" style="margin-bottom:24px;">
@@ -1722,7 +1723,7 @@
             uploadFiles(e.dataTransfer.files);
         }
         async function uploadFiles(fileList) {
-            const res = document.getElementById('upload-result');
+            const res = document.getElementById('upload-result') || document.getElementById('home-upload-result');
             if (!fileList || !fileList.length) return;
             const files = [...fileList];
             let html = '';
@@ -1752,7 +1753,7 @@
         }
 
         async function rescanFolder() {
-            const res = document.getElementById('upload-result');
+            const res = document.getElementById('upload-result') || document.getElementById('home-upload-result');
             res.innerHTML = '<span style="color:#60a5fa;">Сканирование папки…</span>';
             try {
                 const r = await fetch('/upload/rescan', { method: 'POST' });

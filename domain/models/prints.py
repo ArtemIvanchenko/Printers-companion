@@ -48,6 +48,34 @@ class PrintRecordFile(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class MachinePreset(Base):
+    """Named scanning-parameter set for one material/mode (e.g. Al 60 µm).
+
+    Presets are per-material overlays: the estimation code merges the active
+    preset for the requested material on top of the global MachineParams row
+    before running time/cost calculations. Fields left NULL fall back to the
+    global value in machine_params.
+    """
+
+    __tablename__ = "machine_presets"
+
+    preset_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(240), nullable=False)
+    material: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    layer_thickness_mm: Mapped[float | None] = mapped_column(Float)
+    hatch_speed_mm_s: Mapped[float | None] = mapped_column(Float)
+    contour_speed_mm_s: Mapped[float | None] = mapped_column(Float)
+    hatch_distance_mm: Mapped[float | None] = mapped_column(Float)
+    jump_speed_mm_s: Mapped[float | None] = mapped_column(Float)
+    jump_delay_ms: Mapped[float | None] = mapped_column(Float)
+    laser_power_w: Mapped[float | None] = mapped_column(Float)
+    # When True this preset is used by default for its material in estimations
+    is_default: Mapped[bool] = mapped_column(default=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class MachineParams(Base):
     """Single-row table (id=1) with all machine/cost parameters, edited via UI.
 
