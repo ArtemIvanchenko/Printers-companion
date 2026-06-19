@@ -496,13 +496,22 @@ async def import_logs_for_print(
         if Path(name).suffix.lower() not in _ALLOWED_SUFFIXES:
             skipped.append({"name": name, "reason": "неподдерживаемый тип файла"})
             continue
-        data = await f.read()
-        if len(data) > _MAX_FILE_MB * 1024 * 1024:
+        total = 0
+        target = dest / name
+        too_big = False
+        with open(target, "wb") as buf:
+            while chunk := await f.read(16 * 1024 * 1024):
+                total += len(chunk)
+                if total > _MAX_FILE_MB * 1024 * 1024:
+                    too_big = True
+                    break
+                buf.write(chunk)
+        if too_big:
+            target.unlink(missing_ok=True)
             skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
-            continue
-        (dest / name).write_bytes(data)
-        saved.append({"name": name, "size_bytes": len(data)})
-        printed_at_hint = printed_at_hint or _date_from_text(name)
+        else:
+            saved.append({"name": name, "size_bytes": total})
+            printed_at_hint = printed_at_hint or _date_from_text(name)
 
     updates: dict = {}
     if not record.get("printed_at") and printed_at_hint:

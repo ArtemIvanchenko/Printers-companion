@@ -18,7 +18,7 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 # ── Step 2: log file upload ────────────────────────────────────────────────────
 
 _ALLOWED_SUFFIXES = {".log", ".zip"}
-_MAX_FILE_MB = 600
+_MAX_FILE_MB = 2000
 
 
 @router.post("/logs")
@@ -41,11 +41,20 @@ async def upload_logs(files: list[UploadFile]) -> dict:
             skipped.append({"name": name, "reason": "неподдерживаемый тип файла"})
             continue
         target = dest / name
-        data = await f.read()
-        if len(data) > _MAX_FILE_MB * 1024 * 1024:
+        total = 0
+        too_big = False
+        with open(target, "wb") as buf:
+            while chunk := await f.read(16 * 1024 * 1024):
+                total += len(chunk)
+                if total > _MAX_FILE_MB * 1024 * 1024:
+                    too_big = True
+                    break
+                buf.write(chunk)
+        if too_big:
+            target.unlink(missing_ok=True)
             skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
-            continue
-        target.write_bytes(data)
+        else:
+            saved.append({"name": name, "size_bytes": total})
         logger.info("upload_logs: saved %s (%d bytes) → %s", name, len(data), target)
         saved.append({"name": name, "size_bytes": len(data)})
 
