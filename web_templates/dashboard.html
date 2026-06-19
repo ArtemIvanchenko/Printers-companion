@@ -2447,10 +2447,10 @@
         }
         function _setModels(arr) { localStorage.setItem(_MODEL_KEY, JSON.stringify(arr)); }
 
-        function _saveModelEntry(name, volume_cm3, est_hours) {
+        function _saveModelEntry(name, volume_cm3, est_hours, height_mm) {
             const models = _getModels();
             const idx = models.findIndex(m => m.name === name);
-            const entry = { name, volume_cm3, est_hours: est_hours ?? '—', added_at: new Date().toISOString() };
+            const entry = { name, volume_cm3, est_hours: est_hours ?? '—', height_mm: height_mm ?? null, added_at: new Date().toISOString() };
             if (idx >= 0) models[idx] = entry;
             else models.unshift(entry);
             _setModels(models);
@@ -2475,6 +2475,7 @@
                         <div class="model-name" title="${m.name}">${m.name}</div>
                         <div class="model-meta">
                             <span>📦 ${m.volume_cm3} см³</span>
+                            ${m.height_mm != null ? `<span>↕ ${m.height_mm} мм</span>` : ''}
                             <span>⏱️ ~${m.est_hours} ч</span>
                             <span>${date}</span>
                         </div>
@@ -2497,7 +2498,7 @@
                 const _estH = (d.prediction?.available && d.prediction?.print_hours != null)
                     ? d.prediction.print_hours
                     : d.estimate?.avg_session_hours;
-                _saveModelEntry(file.name, d.volume_cm3, _estH);
+                _saveModelEntry(file.name, d.volume_cm3, _estH, d.prediction?.height_mm ?? null);
                 loadModelHistory();
                 openViewer(0);
             } catch(e) {
