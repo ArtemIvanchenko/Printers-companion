@@ -17,6 +17,5 @@ jobs:
       - name: Restart services
         shell: cmd
         run: |
-          docker compose pull --quiet
           docker compose up -d --build --remove-orphans
           docker compose ps
