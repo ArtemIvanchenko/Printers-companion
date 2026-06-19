@@ -28,7 +28,7 @@ services:
         source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
     tmpfs:
-      - /tmp:size=256m,mode=1777
+      - /tmp:size=4g,mode=1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -37,7 +37,7 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 1G
+          memory: 4g
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10)"]
       interval: 30s
