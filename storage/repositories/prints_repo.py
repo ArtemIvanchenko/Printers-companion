@@ -5,12 +5,18 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from domain.models.prints import MachineParams, PrintRecord, PrintRecordFile
+from domain.models.prints import MachineParams, MachinePreset, PrintRecord, PrintRecordFile
 
 _RECORD_FIELDS = (
     "name", "material", "session_id", "status", "notes", "metadata_json",
     "printed_at", "powder_cost_rub_per_kg",
 )
+_PRESET_FIELDS = (
+    "name", "material", "layer_thickness_mm", "hatch_speed_mm_s",
+    "contour_speed_mm_s", "hatch_distance_mm", "jump_speed_mm_s", "jump_delay_ms",
+    "laser_power_w", "is_default", "notes",
+)
+
 _PARAM_FIELDS = (
     "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm", "layer_thickness_mm",
     "laser_count", "recoat_time_ms", "time_correction_factor",
@@ -47,6 +53,25 @@ def _file_to_dict(row: PrintRecordFile) -> dict[str, Any]:
         "size_bytes": row.size_bytes,
         "checksum": row.checksum,
         "uploaded_at": row.uploaded_at.isoformat() if row.uploaded_at else None,
+    }
+
+
+def _preset_to_dict(row: MachinePreset) -> dict[str, Any]:
+    return {
+        "preset_id": row.preset_id,
+        "name": row.name,
+        "material": row.material,
+        "layer_thickness_mm": row.layer_thickness_mm,
+        "hatch_speed_mm_s": row.hatch_speed_mm_s,
+        "contour_speed_mm_s": row.contour_speed_mm_s,
+        "hatch_distance_mm": row.hatch_distance_mm,
+        "jump_speed_mm_s": row.jump_speed_mm_s,
+        "jump_delay_ms": row.jump_delay_ms,
+        "laser_power_w": row.laser_power_w,
+        "is_default": row.is_default,
+        "notes": row.notes,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
 
 
@@ -243,3 +268,70 @@ class PrintsRepository:
         row.updated_at = datetime.now(timezone.utc)
         self.db.flush()
         return _params_to_dict(row)
+
+    # ── Material scanning presets ──────────────────────────────────────────────
+
+    def list_presets(self) -> list[dict[str, Any]]:
+        rows = self.db.scalars(
+            select(MachinePreset).order_by(MachinePreset.material, MachinePreset.preset_id)
+        ).all()
+        return [_preset_to_dict(r) for r in rows]
+
+    def get_preset(self, preset_id: int) -> dict[str, Any] | None:
+        row = self.db.get(MachinePreset, preset_id)
+        return _preset_to_dict(row) if row else None
+
+    def get_active_preset_for_material(self, material: str) -> dict[str, Any] | None:
+        row = self.db.scalars(
+            select(MachinePreset)
+            .where(MachinePreset.material == material.lower())
+            .where(MachinePreset.is_default.is_(True))
+            .limit(1)
+        ).first()
+        return _preset_to_dict(row) if row else None
+
+    def create_preset(self, values: dict[str, Any]) -> dict[str, Any]:
+        row = MachinePreset(**{k: v for k, v in values.items() if k in _PRESET_FIELDS})
+        if "material" in values:
+            row.material = values["material"].lower().strip()
+        self.db.add(row)
+        self.db.flush()
+        return _preset_to_dict(row)
+
+    def update_preset(self, preset_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
+        row = self.db.get(MachinePreset, preset_id)
+        if not row:
+            return None
+        for key in _PRESET_FIELDS:
+            if key in values:
+                setattr(row, key, values[key])
+        if "material" in values and values["material"]:
+            row.material = values["material"].lower().strip()
+        row.updated_at = datetime.now(timezone.utc)
+        self.db.flush()
+        return _preset_to_dict(row)
+
+    def set_default_preset(self, preset_id: int) -> dict[str, Any] | None:
+        """Mark one preset as default for its material, clearing the old default."""
+        row = self.db.get(MachinePreset, preset_id)
+        if not row:
+            return None
+        # Clear previous default for this material
+        prev = self.db.scalars(
+            select(MachinePreset)
+            .where(MachinePreset.material == row.material)
+            .where(MachinePreset.is_default.is_(True))
+        ).all()
+        for p in prev:
+            p.is_default = False
+        row.is_default = True
+        self.db.flush()
+        return _preset_to_dict(row)
+
+    def delete_preset(self, preset_id: int) -> bool:
+        row = self.db.get(MachinePreset, preset_id)
+        if not row:
+            return False
+        self.db.delete(row)
+        self.db.flush()
+        return True

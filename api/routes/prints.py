@@ -26,6 +26,11 @@ _FILE_TYPES = {"stl", "stl_supports", "magics", "photo", "doc"}
 _MAX_UPLOAD_MB = 600
 # Materials offered when machine_params has no densities configured yet
 _DEFAULT_MATERIALS = ["steel", "aluminum", "titanium", "other"]
+# Scanning fields that a material preset overrides in machine_params
+_PRESET_SCANNING_KEYS = (
+    "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm",
+    "layer_thickness_mm", "jump_speed_mm_s", "jump_delay_ms",
+)
 
 
 def _bucket_for(file_type: str) -> str:
@@ -132,7 +137,9 @@ def list_prints(
 def print_defaults(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
     """Prefill values for the new-print form: last powder price + known materials."""
     params = repo.get_machine_params() or {}
-    materials = sorted((params.get("material_densities") or {}).keys()) or _DEFAULT_MATERIALS
+    preset_materials = sorted({p["material"] for p in repo.list_presets()})
+    density_materials = sorted((params.get("material_densities") or {}).keys())
+    materials = preset_materials or density_materials or _DEFAULT_MATERIALS
     return {
         "powder_cost_rub_per_kg": repo.last_powder_cost(),
         "materials": materials,
@@ -237,7 +244,11 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
 
     from api.routes.machine_settings import params_configured
 
+    material = record["material"]
     params = repo.get_machine_params()
+    preset = repo.get_active_preset_for_material(material)
+    if preset:
+        params = {**(params or {}), **{k: v for k, v in preset.items() if k in _PRESET_SCANNING_KEYS and v is not None}}
     if not params_configured(params):
         raise HTTPException(
             422, "Заполните параметры машины (вкладка Настройки → Машина) перед расчётом"
@@ -252,7 +263,6 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
             raise HTTPException(503, f"STL недоступен в хранилище: {f['file_name']}")
         blobs.append(data)
 
-    material = record["material"]
     powder_cost = record.get("powder_cost_rub_per_kg") or repo.last_powder_cost()
     snapshot: dict = {"estimated_at": datetime.now(timezone.utc).isoformat(), "n_parts": len(blobs)}
     for key, mode in (("fast", "excel"), ("accurate", "pyslm")):

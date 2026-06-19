@@ -28,7 +28,7 @@ async def upload_logs(files: list[UploadFile]) -> dict:
     """Save uploaded log files to the raw-logs folder (C:\\PrinterLogs).
 
     The startup-import task and watcher pick them up automatically.
-    Accepts .log and .zip files up to 600 MB each.
+    Accepts .log and .zip files up to 2000 MB each.
     """
     settings = get_settings()
     dest = Path(settings.raw_logs_container_path)
@@ -313,6 +313,21 @@ def _historical_rate() -> dict:
         return {"sessions_used": 0, "avg_duration_min": None}
 
 
+_PRESET_SCANNING_KEYS = (
+    "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm",
+    "layer_thickness_mm", "jump_speed_mm_s", "jump_delay_ms",
+)
+
+
+def _merge_preset(params: dict, preset: dict) -> dict:
+    """Overlay material-specific preset scanning params onto global machine_params."""
+    merged = dict(params)
+    for key in _PRESET_SCANNING_KEYS:
+        if preset.get(key) is not None:
+            merged[key] = preset[key]
+    return merged
+
+
 def _geometry_prediction(
     data: bytes, material: str, mode: str = "excel", hatch_distance_mm: float | None = None,
     powder_cost_override: float | None = None,
@@ -335,10 +350,17 @@ def _geometry_prediction(
         with SessionLocal() as db:
             repo = PrintsRepository(db)
             params = repo.get_machine_params()
+            preset = repo.get_active_preset_for_material(material)
             powder_cost = powder_cost_override if powder_cost_override is not None else repo.last_powder_cost()
     except Exception:
         logger.exception("stl_estimate: machine params unavailable")
         return {"available": False, "reason": "База параметров машины недоступна"}
+
+    # Merge material preset over global params (preset wins for scanning fields)
+    if preset and params is not None:
+        params = _merge_preset(params, preset)
+    elif preset and params is None:
+        params = preset
 
     if hatch_distance_mm and hatch_distance_mm > 0 and params is not None:
         params = {**params, "hatch_distance_mm": float(hatch_distance_mm)}

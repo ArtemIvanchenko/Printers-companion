@@ -99,3 +99,106 @@ def update_machine_params(
     repo.flush()
     logger.info("machine_settings: updated %s", sorted(values.keys()))
     return {"params": params, "configured": params_configured(params)}
+
+
+# ── Material scanning presets ──────────────────────────────────────────────────
+
+_PRESET_NUMERIC = {
+    "layer_thickness_mm", "hatch_speed_mm_s", "contour_speed_mm_s",
+    "hatch_distance_mm", "jump_speed_mm_s", "jump_delay_ms", "laser_power_w",
+}
+
+
+def _validate_preset_payload(payload: dict) -> dict:
+    values: dict = {}
+    for key, raw in payload.items():
+        if key == "name":
+            name = (raw or "").strip()
+            if not name:
+                raise HTTPException(422, "Поле 'name' не может быть пустым")
+            values["name"] = name
+        elif key == "material":
+            mat = (raw or "").strip().lower()
+            if not mat:
+                raise HTTPException(422, "Поле 'material' не может быть пустым")
+            values["material"] = mat
+        elif key in _PRESET_NUMERIC:
+            if raw is None:
+                values[key] = None
+                continue
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(422, f"Поле '{key}' должно быть числом")
+            if v < 0:
+                raise HTTPException(422, f"Поле '{key}' не может быть отрицательным")
+            values[key] = v
+        elif key == "is_default":
+            values["is_default"] = bool(raw)
+        elif key == "notes":
+            values["notes"] = (raw or "").strip() or None
+    return values
+
+
+@router.get("/presets")
+def list_presets(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
+    """All material scanning presets."""
+    return {"presets": repo.list_presets()}
+
+
+@router.post("/presets")
+def create_preset(payload: dict, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
+    """Create a material scanning preset."""
+    if "name" not in payload or "material" not in payload:
+        raise HTTPException(422, "Поля 'name' и 'material' обязательны")
+    values = _validate_preset_payload(payload)
+    preset = repo.create_preset(values)
+    repo.flush()
+    logger.info("machine_settings: created preset %s (%s)", preset["name"], preset["material"])
+    return {"preset": preset}
+
+
+@router.get("/presets/material/{material}")
+def get_preset_for_material(
+    material: str, repo: PrintsRepository = Depends(get_prints_repository)
+) -> dict:
+    """Active (default) preset for the given material; null when none configured."""
+    return {"preset": repo.get_active_preset_for_material(material)}
+
+
+@router.put("/presets/{preset_id}")
+def update_preset(
+    preset_id: int, payload: dict, repo: PrintsRepository = Depends(get_prints_repository)
+) -> dict:
+    """Partial update of a preset."""
+    values = _validate_preset_payload(payload)
+    if not values:
+        raise HTTPException(422, "Нет известных полей для обновления")
+    preset = repo.update_preset(preset_id, values)
+    if not preset:
+        raise HTTPException(404, "Пресет не найден")
+    repo.flush()
+    return {"preset": preset}
+
+
+@router.post("/presets/{preset_id}/set-default")
+def set_default_preset(
+    preset_id: int, repo: PrintsRepository = Depends(get_prints_repository)
+) -> dict:
+    """Mark this preset as the default for its material."""
+    preset = repo.set_default_preset(preset_id)
+    if not preset:
+        raise HTTPException(404, "Пресет не найден")
+    repo.flush()
+    return {"preset": preset}
+
+
+@router.delete("/presets/{preset_id}")
+def delete_preset(
+    preset_id: int, repo: PrintsRepository = Depends(get_prints_repository)
+) -> dict:
+    """Delete a material scanning preset."""
+    if not repo.delete_preset(preset_id):
+        raise HTTPException(404, "Пресет не найден")
+    repo.flush()
+    return {"deleted": preset_id}
