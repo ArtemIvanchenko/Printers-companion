@@ -25,33 +25,72 @@
 | MinIO | хранилище файлов (STL, magics, фото) |
 | Docker Compose | оркестрация |
 
-## Быстрый старт
+## Установка
 
-Требования: Docker Desktop.
+### 1. Установить Docker Desktop
+
+| ОС | Ссылка |
+|---|---|
+| Windows | https://docs.docker.com/desktop/install/windows-install/ |
+| macOS | https://docs.docker.com/desktop/install/mac-install/ |
+| Linux | https://docs.docker.com/desktop/install/linux-install/ |
+
+Запустить Docker Desktop и дождаться зелёного значка.
+
+### 2. Скачать проект
 
 ```bash
 git clone https://github.com/ArtemIvanchenko/Printers-companion.git
 cd Printers-companion
+```
+
+### 3. Настроить окружение
+
+```bash
 cp .env.example .env
 ```
 
-В `.env` указать папку с логами принтера:
+Обязательно изменить в `.env`:
 
-```env
-# Windows
-RAW_LOGS_HOST_PATH=C:\PrinterLogs
+| Параметр | Windows | macOS / Linux |
+|---|---|---|
+| `RAW_LOGS_HOST_PATH` | `C:\PrinterLogs` | `./raw_logs` |
+| `LLM_PROVIDER` | `lmstudio` (если есть LM Studio) | `null` (без LLM) |
 
-# macOS / Linux
-RAW_LOGS_HOST_PATH=./raw_logs
-```
+Пароли `POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD`, `API_SERVICE_TOKEN` сменить на любые — хранятся только локально.
+
+### 4. Запустить
 
 ```bash
 docker compose up -d
 ```
 
-Первый запуск собирает образы (~15 мин). Дашборд: `http://localhost:8000`.
+Первый запуск собирает образы из исходников — занимает 15–30 минут в зависимости от скорости интернета. Последующие запуски стартуют за ~1 минуту.
 
-**Автозапуск на Windows** — ярлык `deploy\autostart-windows.bat` в `shell:startup`.
+Дашборд: `http://localhost:8000`
+
+Чтобы убедиться что всё поднялось:
+
+```bash
+docker compose ps        # все сервисы в состоянии healthy
+curl localhost:8000/health
+```
+
+### 5. Автозапуск (Windows)
+
+Положить ярлык `deploy\autostart-windows.bat` в папку автозагрузки:
+
+```
+Win+R → shell:startup → создать ярлык на autostart-windows.bat
+```
+
+### Остановка и перезапуск
+
+```bash
+docker compose down      # остановить (данные сохраняются в томах)
+docker compose up -d     # запустить снова
+docker compose down -v   # остановить и удалить все данные
+```
 
 ## Обновление
 
