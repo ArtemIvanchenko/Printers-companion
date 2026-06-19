@@ -27,9 +27,13 @@ _START_TIME = datetime.now(timezone.utc)
 _REDIS_KEY   = "pla:update:last_event"
 _REDIS_TTL   = 60 * 60 * 24 * 90
 
-_GITHUB_REPO     = "ArtemIvanchenko/Printers-companion"
-_GITHUB_WORKFLOW = "deploy.yml"
-_GITHUB_BRANCH   = "main"
+_GITHUB_REPO   = "ArtemIvanchenko/Printers-companion"
+_GITHUB_BRANCH = "main"
+
+# Host-shared control directory. The container has NO Docker access — it can only
+# drop a flag file here. The launcher (Запустить.command) reads the flag on its
+# next start and performs the fixed update (git pull + docker compose build).
+_CONTROL_DIR = os.environ.get("CONTROL_DIR", "/mnt/control")
 
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 
@@ -156,73 +160,36 @@ async def check_for_update() -> dict:
         return {"update_available": False, "error": str(exc), "current_commit": current}
 
 
-# ── Update: trigger via GitHub Actions workflow_dispatch ──────────────────────
+# ── Update: request a local update (flag file applied by the launcher) ────────
 
 @router.post("/update")
 async def trigger_update() -> dict:
-    """Trigger deploy.yml on the self-hosted runner via GitHub API."""
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if not token:
-        raise HTTPException(
-            status_code=503,
-            detail="GITHUB_TOKEN не задан — добавьте токен в .env (права: repo + workflow)",
-        )
+    """Request an update of THIS machine.
+
+    Writes a flag file into the host-shared control directory. The container has
+    no Docker access — it can only drop this marker, never run a command. The
+    launcher (Запустить.command) sees the flag on its next start and performs the
+    fixed update (git pull from GitHub + docker compose build), then clears it.
+    """
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                f"https://api.github.com/repos/{_GITHUB_REPO}/actions/workflows/{_GITHUB_WORKFLOW}/dispatches",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
-                json={"ref": _GITHUB_BRANCH},
-            )
-            r.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=f"GitHub API: {exc.response.text}")
+        os.makedirs(_CONTROL_DIR, exist_ok=True)
+        flag_path = os.path.join(_CONTROL_DIR, "update.request")
+        with open(flag_path, "w", encoding="utf-8") as f:
+            f.write(datetime.now(timezone.utc).isoformat())
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"GitHub API недоступен: {exc}")
+        raise HTTPException(status_code=500, detail=f"Не удалось записать запрос обновления: {exc}")
 
     event = {
         "at": datetime.now(timezone.utc).isoformat(),
         "source": "dashboard",
-        "trigger": "workflow_dispatch",
+        "trigger": "flag_file",
     }
     await asyncio.get_running_loop().run_in_executor(None, _store_update_event, event)
-    return {"ok": True, "message": "Задание отправлено. Runner начнёт обновление через несколько секунд."}
-
-
-# ── Update: workflow run status ───────────────────────────────────────────────
-
-@router.get("/update/run-status")
-async def update_run_status() -> dict:
-    """Latest deploy.yml run status (public GitHub API — no auth required for public repos)."""
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"https://api.github.com/repos/{_GITHUB_REPO}/actions/workflows/{_GITHUB_WORKFLOW}/runs",
-                headers=headers,
-                params={"per_page": 1, "branch": _GITHUB_BRANCH},
-            )
-            r.raise_for_status()
-            runs = r.json().get("workflow_runs", [])
-        if not runs:
-            return {"status": "unknown"}
-        run = runs[0]
-        return {
-            "status":     run["status"],      # queued | in_progress | completed
-            "conclusion": run["conclusion"],  # success | failure | None
-            "created_at": run["created_at"],
-            "updated_at": run["updated_at"],
-            "run_id":     run["id"],
-            "url":        run["html_url"],
-        }
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
+    return {
+        "ok": True,
+        "message": "Обновление запрошено. Закройте систему и запустите «Запустить.command» ещё раз — "
+                   "новая версия установится при следующем старте.",
+    }
 
 
 # ── Update: history ───────────────────────────────────────────────────────────
