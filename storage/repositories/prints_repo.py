@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete as sql_delete, func, select
 from sqlalchemy.orm import Session
 
 from domain.models.prints import MachineParams, MachinePreset, PrintRecord, PrintRecordFile
@@ -175,12 +175,14 @@ class PrintsRepository:
         row = self.db.get(PrintRecord, record_id)
         if not row:
             return []
-        files = self.db.scalars(
-            select(PrintRecordFile).where(PrintRecordFile.record_id == record_id)
-        ).all()
-        uris = [f.object_uri for f in files]
-        for f in files:
-            self.db.delete(f)
+        uris = [
+            f.object_uri
+            for f in self.db.scalars(
+                select(PrintRecordFile).where(PrintRecordFile.record_id == record_id)
+            ).all()
+        ]
+        # Delete child rows first via SQL to avoid FK ordering issues with ORM unit-of-work
+        self.db.execute(sql_delete(PrintRecordFile).where(PrintRecordFile.record_id == record_id))
         self.db.delete(row)
         self.db.flush()
         return uris
