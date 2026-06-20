@@ -27,87 +27,68 @@
 
 ## Установка
 
-### 1. Установить Docker
+Два пути — выберите подходящий:
 
-Проект требует только Docker Engine и Docker Compose — тяжёлый GUI (Docker Desktop) не нужен.
+---
 
-**macOS** — [OrbStack](https://orbstack.dev): ~50 МБ, запускается мгновенно, бесплатный для личного использования.
+### Путь А — лаунчер (для пользователей, без терминала)
 
-```bash
-brew install orbstack
-# или скачать напрямую: https://orbstack.dev
-```
+Готовые скрипты в `deploy/launchers/` сделают всё сами: скачают проект,
+настроят конфиг, соберут образы и откроют браузер.
 
-**Windows** — WSL2 + Docker Engine внутри него: ~300–400 МБ суммарно, никакого GUI.
+**Шаг 1.**
+- macOS → установить [OrbStack](https://orbstack.dev): скачать `.dmg`, перетащить в «Программы», открыть.
+- Windows → установить [Docker Desktop](https://www.docker.com/products/docker-desktop/): скачать установщик, запустить, перезагрузить.
 
-```powershell
-# Шаг 1 — включить WSL2 и установить Ubuntu (встроено в Windows 10/11)
-wsl --install -d Ubuntu
-# после перезагрузки открыть Ubuntu из меню Пуск и задать имя пользователя
-```
+**Шаг 2.** Скачать папку `deploy/launchers/` из репозитория и дважды кликнуть:
+- macOS → `Запустить.command` (при первом запуске: правая кнопка → «Открыть»)
+- Windows → `Запустить.bat`
 
-```bash
-# Шаг 2 — внутри Ubuntu установить Docker Engine
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-# перезапустить терминал Ubuntu, затем проверить:
-docker compose version
-```
+Первый запуск займёт 15–30 минут (скачивается и собирается проект).
+Дальше — просто двойной клик, система поднимается за ~1 минуту.
 
-Все дальнейшие команды выполняются в терминале Ubuntu (WSL2), не в PowerShell.
+---
 
-**Linux** — только Docker Engine, без GUI:
-
-```bash
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-```
-
-### 2. Скачать проект
+### Путь Б — вручную (для разработчиков)
 
 ```bash
 git clone https://github.com/ArtemIvanchenko/Printers-companion.git
 cd Printers-companion
-```
-
-### 3. Настроить окружение
-
-```bash
 cp .env.example .env
 ```
 
-Обязательно изменить в `.env`:
+Изменить в `.env` путь к логам:
 
-| Параметр | Windows | macOS / Linux |
-|---|---|---|
-| `RAW_LOGS_HOST_PATH` | `C:\PrinterLogs` | `./raw_logs` |
-| `LLM_PROVIDER` | `lmstudio` (если есть LM Studio) | `null` (без LLM) |
+```env
+# Windows
+RAW_LOGS_HOST_PATH=C:\PrinterLogs
 
-Пароли `POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD`, `API_SERVICE_TOKEN` сменить на любые — хранятся только локально.
-
-### 4. Запустить
+# macOS / Linux
+RAW_LOGS_HOST_PATH=./raw_logs
+```
 
 ```bash
 docker compose up -d
 ```
 
-Первый запуск собирает образы из исходников — занимает 15–30 минут в зависимости от скорости интернета. Последующие запуски стартуют за ~1 минуту.
-
 Дашборд: `http://localhost:8000`
 
-Чтобы убедиться что всё поднялось:
+**Docker (macOS)** — [OrbStack](https://orbstack.dev) (`brew install orbstack`)
+или Docker Desktop.
 
+**Docker (Windows)** — WSL2 + Docker Engine (легковесно, без GUI):
+
+```powershell
+wsl --install -d Ubuntu   # перезагрузить, задать имя пользователя
+```
 ```bash
-docker compose ps        # все сервисы в состоянии healthy
-curl localhost:8000/health
+# внутри Ubuntu:
+curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER
 ```
 
-### 5. Автозапуск (Windows)
-
-Положить ярлык `deploy\autostart-windows.bat` в папку автозагрузки:
-
-```
-Win+R → shell:startup → создать ярлык на autostart-windows.bat
+**Docker (Linux):**
+```bash
+curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER
 ```
 
 ### Остановка и перезапуск
