@@ -27,9 +27,26 @@
 
 ## Установка
 
-Нужен [Docker](https://docs.docker.com/get-docker/) (macOS: [OrbStack](https://orbstack.dev), Windows: [Docker Desktop](https://www.docker.com/products/docker-desktop/)).
-
+**macOS**
 ```bash
+brew install orbstack
+git clone https://github.com/ArtemIvanchenko/Printers-companion.git
+cd Printers-companion
+docker compose up -d
+```
+
+**Windows**
+```powershell
+winget install Docker.DockerDesktop
+# перезапустить терминал после установки
+git clone https://github.com/ArtemIvanchenko/Printers-companion.git
+cd Printers-companion
+docker compose up -d
+```
+
+**Linux**
+```bash
+curl -fsSL https://get.docker.com | sh
 git clone https://github.com/ArtemIvanchenko/Printers-companion.git
 cd Printers-companion
 docker compose up -d
