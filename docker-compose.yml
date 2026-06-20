@@ -1,17 +1,75 @@
+# All application settings have inline defaults — the stack starts without any
+# .env file. Create .env (copy from .env.example) only to override defaults.
+#
+# Quick start:
+#   git clone https://github.com/ArtemIvanchenko/Printers-companion.git
+#   cd Printers-companion
+#   docker compose up -d
+
+x-app-env: &app-env
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    APP_ENV:                             ${APP_ENV:-local}
+    LOG_LEVEL:                           ${LOG_LEVEL:-INFO}
+    DATABASE_URL:                        ${DATABASE_URL:-postgresql+psycopg://printer_logs:change-me@postgres:5432/printer_logs}
+    REDIS_URL:                           ${REDIS_URL:-redis://redis:6379/0}
+    MINIO_ENDPOINT:                      ${MINIO_ENDPOINT:-minio:9000}
+    MINIO_ROOT_USER:                     ${MINIO_ROOT_USER:-minioadmin}
+    MINIO_ROOT_PASSWORD:                 ${MINIO_ROOT_PASSWORD:-change-me-minio}
+    MINIO_BUCKET_RAW:                    ${MINIO_BUCKET_RAW:-raw-logs}
+    MINIO_BUCKET_REPORTS:                ${MINIO_BUCKET_REPORTS:-reports}
+    MINIO_BUCKET_STLS:                   ${MINIO_BUCKET_STLS:-stls}
+    MINIO_BUCKET_MAGICS:                 ${MINIO_BUCKET_MAGICS:-magics}
+    MINIO_BUCKET_PHOTOS:                 ${MINIO_BUCKET_PHOTOS:-photos}
+    MINIO_BUCKET_DOCS:                   ${MINIO_BUCKET_DOCS:-docs}
+    MINIO_SECURE:                        ${MINIO_SECURE:-false}
+    RAW_LOGS_CONTAINER_PATH:             ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
+    INCOMING_PATH:                       ${INCOMING_PATH:-/mnt/raw_logs}
+    WATCH_MODE:                          ${WATCH_MODE:-filesystem_events}
+    REQUIRE_OPERATOR_IMPORT_CONFIRMATION: ${REQUIRE_OPERATOR_IMPORT_CONFIRMATION:-true}
+    FILE_STABILITY_SECONDS:              ${FILE_STABILITY_SECONDS:-60}
+    FILE_STABILITY_RETRY_SECONDS:        ${FILE_STABILITY_RETRY_SECONDS:-30}
+    FILE_STABILITY_MAX_RETRIES:          ${FILE_STABILITY_MAX_RETRIES:-10}
+    IMPORT_CONFIRMATION_TIMEOUT_HOURS:   ${IMPORT_CONFIRMATION_TIMEOUT_HOURS:-24}
+    PRINT_LINK_WINDOW_HOURS:             ${PRINT_LINK_WINDOW_HOURS:-24.0}
+    API_HOST:                            ${API_HOST:-0.0.0.0}
+    API_PORT:                            ${API_PORT:-8000}
+    INTERNAL_API_URL:                    ${INTERNAL_API_URL:-http://api:8000}
+    WORKER_CONCURRENCY:                  ${WORKER_CONCURRENCY:-2}
+    LLM_PROVIDER:                        ${LLM_PROVIDER:-null}
+    LLM_BASE_URL:                        ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+    LLM_MODEL:                           ${LLM_MODEL:-qwen3.6}
+    LLM_API_KEY:                         ${LLM_API_KEY:-lm-studio}
+    LLM_TIMEOUT_SEC:                     ${LLM_TIMEOUT_SEC:-300}
+    LLM_TEMPERATURE:                     ${LLM_TEMPERATURE:-0.1}
+    LLM_TOP_P:                           ${LLM_TOP_P:-0.9}
+    LLM_MAX_TOKENS:                      ${LLM_MAX_TOKENS:-8192}
+    AGENT_API_TOKEN:                     ${AGENT_API_TOKEN:-change-me-agent-token}
+    API_SERVICE_TOKEN:                   ${API_SERVICE_TOKEN:-change-me-service-token}
+    CORS_ORIGINS:                        ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    RATE_LIMIT_CHAT_RPM:                 ${RATE_LIMIT_CHAT_RPM:-20}
+    RATE_LIMIT_AGENT_RPM:                ${RATE_LIMIT_AGENT_RPM:-30}
+    LOG_RETENTION_DAYS:                  ${LOG_RETENTION_DAYS:-90}
+    DAILY_REVIEW_CRON:                   ${DAILY_REVIEW_CRON:-0 20 * * *}
+    HISTORICAL_REANALYSIS_CRON:          ${HISTORICAL_REANALYSIS_CRON:-0 2 * * *}
+    HISTORICAL_REANALYSIS_WINDOW_DAYS:   ${HISTORICAL_REANALYSIS_WINDOW_DAYS:-90}
+    HISTORICAL_REANALYSIS_MAX_ITERATIONS: ${HISTORICAL_REANALYSIS_MAX_ITERATIONS:-10}
+    TELEGRAM_BOT_TOKEN_HASH:             ${TELEGRAM_BOT_TOKEN_HASH:-}
+    TELEGRAM_DEFAULT_CHAT_ID:            ${TELEGRAM_DEFAULT_CHAT_ID:-}
+    VOICE_TRANSCRIPTION_ENABLED:         ${VOICE_TRANSCRIPTION_ENABLED:-false}
+    VOICE_TRANSCRIPTION_PROVIDER:        ${VOICE_TRANSCRIPTION_PROVIDER:-null}
+
 services:
   api:
+    <<: *app-env
     image: ghcr.io/artemivanchenko/printers-companion:api
     build:
       context: .
       dockerfile: Dockerfile.api
-    env_file: .env
-    # Run migrations once here (before the 4 workers fork) so the schema
-    # auto-updates on deploy without a per-worker race.
     command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4"
     ports:
-      # Bind to localhost only: each employee runs their own copy and opens
-      # http://localhost:8000. Not reachable from the network → /admin/* and
-      # /upload/* (no app-level auth) are not exposed to other machines.
       - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
@@ -28,10 +86,8 @@ services:
     read_only: true
     volumes:
       - type: bind
-        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        source: ${RAW_LOGS_HOST_PATH:-./raw_logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
-      # Control dir — the dashboard "Обновить" button drops an update-request
-      # flag here; the launcher applies it on next start. No Docker access needed.
       - type: bind
         source: ${CONTROL_HOST_PATH:-./control}
         target: /mnt/control
@@ -54,15 +110,15 @@ services:
       start_period: 120s
 
   worker:
+    <<: *app-env
     image: ghcr.io/artemivanchenko/printers-companion:worker
     build:
       context: .
       dockerfile: Dockerfile.worker
-    env_file: .env
     command: python -m worker.tasks
     volumes:
       - type: bind
-        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        source: ${RAW_LOGS_HOST_PATH:-./raw_logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
         read_only: true
     depends_on:
@@ -89,15 +145,15 @@ services:
           memory: 8g
 
   watcher:
+    <<: *app-env
     image: ghcr.io/artemivanchenko/printers-companion:watcher
     build:
       context: .
       dockerfile: Dockerfile.worker
-    env_file: .env
     command: python -m worker.watcher
     volumes:
       - type: bind
-        source: ${RAW_LOGS_HOST_PATH:-C:\PrinterLogs}
+        source: ${RAW_LOGS_HOST_PATH:-./raw_logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
         read_only: true
     depends_on:
@@ -119,11 +175,11 @@ services:
           memory: 2g
 
   scheduler:
+    <<: *app-env
     image: ghcr.io/artemivanchenko/printers-companion:scheduler
     build:
       context: .
       dockerfile: Dockerfile.scheduler
-    env_file: .env
     command: python -m scheduler.jobs
     depends_on:
       postgres:
@@ -151,10 +207,12 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-printer_logs}
-      POSTGRES_USER: ${POSTGRES_USER:-printer_logs}
+      POSTGRES_DB:       ${POSTGRES_DB:-printer_logs}
+      POSTGRES_USER:     ${POSTGRES_USER:-printer_logs}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -188,15 +246,15 @@ services:
   minio:
     image: minio/minio:RELEASE.2024-05-10T01-41-38Z
     command: server /data --console-address ":9001"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio}
     volumes:
       - minio_data:/data
     ports:
-      # Localhost only — object store is an internal dependency, not exposed to
-      # the network. :9001 is the MinIO console (also localhost-only).
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     networks:
@@ -211,12 +269,12 @@ services:
       retries: 5
 
   mcp:
+    <<: *app-env
     profiles: ["mcp"]
     image: ghcr.io/artemivanchenko/printers-companion:mcp
     build:
       context: .
       dockerfile: Dockerfile.mcp
-    env_file: .env
     ports:
       - "8100:8100"
     depends_on:

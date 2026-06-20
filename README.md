@@ -27,69 +27,41 @@
 
 ## Установка
 
-Два пути — выберите подходящий:
+### Без терминала (macOS / Windows)
+
+Скачать `deploy/launchers/Запустить.command` (macOS) или `Запустить.bat` (Windows) и дважды кликнуть. Лаунчер сам установит всё что нужно.
+
+Предварительно установить среду запуска контейнеров:
+- macOS → [OrbStack](https://orbstack.dev): скачать `.dmg`, перетащить в «Программы», открыть
+- Windows → [Docker Desktop](https://www.docker.com/products/docker-desktop/): скачать установщик, запустить, перезагрузить
 
 ---
 
-### Путь А — лаунчер (для пользователей, без терминала)
-
-Готовые скрипты в `deploy/launchers/` сделают всё сами: скачают проект,
-настроят конфиг, соберут образы и откроют браузер.
-
-**Шаг 1.**
-- macOS → установить [OrbStack](https://orbstack.dev): скачать `.dmg`, перетащить в «Программы», открыть.
-- Windows → установить [Docker Desktop](https://www.docker.com/products/docker-desktop/): скачать установщик, запустить, перезагрузить.
-
-**Шаг 2.** Скачать папку `deploy/launchers/` из репозитория и дважды кликнуть:
-- macOS → `Запустить.command` (при первом запуске: правая кнопка → «Открыть»)
-- Windows → `Запустить.bat`
-
-Первый запуск займёт 15–30 минут (скачивается и собирается проект).
-Дальше — просто двойной клик, система поднимается за ~1 минуту.
-
----
-
-### Путь Б — вручную (для разработчиков)
+### С терминалом (разработчикам)
 
 ```bash
 git clone https://github.com/ArtemIvanchenko/Printers-companion.git
 cd Printers-companion
-cp .env.example .env
-```
-
-Изменить в `.env` путь к логам:
-
-```env
-# Windows
-RAW_LOGS_HOST_PATH=C:\PrinterLogs
-
-# macOS / Linux
-RAW_LOGS_HOST_PATH=./raw_logs
-```
-
-```bash
 docker compose up -d
 ```
 
 Дашборд: `http://localhost:8000`
 
-**Docker (macOS)** — [OrbStack](https://orbstack.dev) (`brew install orbstack`)
-или Docker Desktop.
+Файл `.env` не обязателен — все настройки работают с дефолтами из коробки.
+Чтобы изменить путь к логам или включить LLM: `cp .env.example .env`.
 
-**Docker (Windows)** — WSL2 + Docker Engine (легковесно, без GUI):
+**Docker (macOS):** `brew install orbstack`
 
+**Docker (Windows, без GUI):**
 ```powershell
-wsl --install -d Ubuntu   # перезагрузить, задать имя пользователя
+wsl --install -d Ubuntu
 ```
 ```bash
 # внутри Ubuntu:
 curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER
 ```
 
-**Docker (Linux):**
-```bash
-curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER
-```
+**Docker (Linux):** `curl -fsSL https://get.docker.com | sh`
 
 ### Остановка и перезапуск
 
