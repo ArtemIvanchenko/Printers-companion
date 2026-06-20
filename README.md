@@ -36,12 +36,9 @@
 Готовые скрипты в `deploy/launchers/` сделают всё сами: скачают проект,
 настроят конфиг, соберут образы и откроют браузер.
 
-**Шаг 1.** Установить Docker:
-
-| ОС | Что установить |
-|---|---|
-| macOS | [OrbStack](https://orbstack.dev) — скачать и открыть (~50 МБ) |
-| Windows | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
+**Шаг 1.**
+- macOS → установить [OrbStack](https://orbstack.dev): скачать `.dmg`, перетащить в «Программы», открыть.
+- Windows → установить [Docker Desktop](https://www.docker.com/products/docker-desktop/): скачать установщик, запустить, перезагрузить.
 
 **Шаг 2.** Скачать папку `deploy/launchers/` из репозитория и дважды кликнуть:
 - macOS → `Запустить.command` (при первом запуске: правая кнопка → «Открыть»)
