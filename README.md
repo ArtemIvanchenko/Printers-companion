@@ -27,17 +27,7 @@
 
 ## Установка
 
-### Без терминала (macOS / Windows)
-
-Скачать `deploy/launchers/Запустить.command` (macOS) или `Запустить.bat` (Windows) и дважды кликнуть. Лаунчер сам установит всё что нужно.
-
-Предварительно установить среду запуска контейнеров:
-- macOS → [OrbStack](https://orbstack.dev): скачать `.dmg`, перетащить в «Программы», открыть
-- Windows → [Docker Desktop](https://www.docker.com/products/docker-desktop/): скачать установщик, запустить, перезагрузить
-
----
-
-### С терминалом (разработчикам)
+Нужен [Docker](https://docs.docker.com/get-docker/) (macOS: [OrbStack](https://orbstack.dev), Windows: [Docker Desktop](https://www.docker.com/products/docker-desktop/)).
 
 ```bash
 git clone https://github.com/ArtemIvanchenko/Printers-companion.git
@@ -47,28 +37,11 @@ docker compose up -d
 
 Дашборд: `http://localhost:8000`
 
-Файл `.env` не обязателен — все настройки работают с дефолтами из коробки.
-Чтобы изменить путь к логам или включить LLM: `cp .env.example .env`.
-
-**Docker (macOS):** `brew install orbstack`
-
-**Docker (Windows, без GUI):**
-```powershell
-wsl --install -d Ubuntu
-```
-```bash
-# внутри Ubuntu:
-curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER
-```
-
-**Docker (Linux):** `curl -fsSL https://get.docker.com | sh`
-
-### Остановка и перезапуск
+`.env` не нужен — все настройки работают из коробки. Для изменений (путь к логам, LLM): `cp .env.example .env`.
 
 ```bash
-docker compose down      # остановить (данные сохраняются в томах)
-docker compose up -d     # запустить снова
-docker compose down -v   # остановить и удалить все данные
+docker compose down     # остановить (данные сохраняются)
+docker compose down -v  # сбросить все данные
 ```
 
 ## Обновление
