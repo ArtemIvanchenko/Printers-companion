@@ -12,7 +12,6 @@ from domain.services.import_jobs import retry_import_job
 from domain.services.ingestion import IngestionService
 from profiles.m350.profile import build_registry, get_profile
 from reporting.json_report.generator import generate_session_json_report
-from storage.db.init_db import create_all
 from storage.db.session import SessionLocal
 from storage.repositories.runtime import RuntimeRepository
 
@@ -147,9 +146,6 @@ def main() -> None:
     exit_on_failure(report)
     for warn in report.warnings:
         logger.warning("PREFLIGHT: %s", warn)
-    if settings.app_env == "local":
-        create_all()
-    
     stop = False
     backoff = ExponentialBackoff(base_delay=5.0, max_delay=60.0)
 

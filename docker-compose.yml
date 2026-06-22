@@ -62,6 +62,12 @@ x-app-env: &app-env
     VOICE_TRANSCRIPTION_PROVIDER:        ${VOICE_TRANSCRIPTION_PROVIDER:-null}
 
 services:
+  base:
+    image: ghcr.io/artemivanchenko/printers-companion:base
+    build:
+      context: .
+      dockerfile: Dockerfile.base
+
   api:
     <<: *app-env
     image: ghcr.io/artemivanchenko/printers-companion:api
