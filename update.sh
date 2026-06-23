@@ -35,8 +35,9 @@ fi
 # Rebuild and restart all currently running app services (dynamic — respects active profiles).
 RUNNING=$(docker compose ps --services --filter status=running 2>/dev/null | tr '\n' ' ')
 SERVICES="${RUNNING:-api worker watcher scheduler}"
+NEW_GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 # shellcheck disable=SC2086
-docker compose up -d --build $SERVICES >> "$LOG" 2>&1
+GIT_COMMIT="$NEW_GIT_COMMIT" docker compose up -d --build $SERVICES >> "$LOG" 2>&1
 
 echo "$REMOTE" > "$DEPLOYED_FILE"
 

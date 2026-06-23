@@ -86,7 +86,8 @@ fi
 
 # 6. Запустить систему
 say "Запускаю систему…"
-(cd "$REPO_DIR" && $COMPOSE up -d >>"$LOG" 2>&1) \
+GIT_COMMIT=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+(cd "$REPO_DIR" && GIT_COMMIT="$GIT_COMMIT" $COMPOSE up -d >>"$LOG" 2>&1) \
   || fail "Не удалось запустить. Подробности в файле launch.log."
 
 # 7. Дождаться API
