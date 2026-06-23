@@ -76,7 +76,10 @@ def test_confirm_runs_import_analysis_and_report_after_stability(tmp_path: Path)
 
     result = confirm_import_job(job, registry=build_registry(), profile=get_profile(), settings=settings)
 
-    assert result.job.status == ImportJobStatus.needs_operator_context
+    # Context questions (material/powder/gas) are non-blocking — import always
+    # completes with `done`. Missing context is stored in missing_context_questions
+    # for display but does not stall the pipeline.
+    assert result.job.status == ImportJobStatus.done
     assert result.job.session_ids
     assert result.job.report_ids
     assert result.reports[result.job.report_ids[0]]["markdown"].startswith("# Session Report")

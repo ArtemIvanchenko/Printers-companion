@@ -93,7 +93,10 @@ def link_operator_event_session(
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     event = _get(event_id, repo)
-    event["session_id"] = payload["session_id"]
+    session_id = payload.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    event["session_id"] = session_id
     repo.save_operator_event(event)
     repo.flush()
     return event
@@ -106,7 +109,10 @@ def link_operator_event_anomaly(
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     event = _get(event_id, repo)
-    event.setdefault("linked_machine_events", []).append(payload["anomaly_id"])
+    anomaly_id = payload.get("anomaly_id")
+    if not anomaly_id:
+        raise HTTPException(status_code=400, detail="anomaly_id is required")
+    event.setdefault("linked_machine_events", []).append(anomaly_id)
     repo.save_operator_event(event)
     repo.flush()
     return event

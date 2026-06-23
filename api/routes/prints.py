@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
 
 from api.deps.repositories import get_prints_repository
+from api.upload_limits import read_upload_capped
 from api.pagination import LimitParam, PaginatedResponse, SkipParam
 from core.config.settings import get_settings
 from parsers.common.timestamps import date_hint_from_filename
@@ -416,11 +417,9 @@ async def upload_print_file(
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
 
-    data = await file.read()
+    data = await read_upload_capped(file, _MAX_UPLOAD_MB * 1024 * 1024)
     if not data:
         raise HTTPException(422, "Пустой файл")
-    if len(data) > _MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, f"Файл > {_MAX_UPLOAD_MB} МБ")
 
     file_name = (file.filename or "unknown").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     # MagicsX support exports use the s_ prefix — classify them automatically

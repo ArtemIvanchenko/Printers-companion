@@ -1,4 +1,5 @@
 """HTML Dashboard with all analytics charts."""
+import html
 import json
 import re
 from collections import Counter
@@ -13,6 +14,28 @@ from domain.models.sessions import BuildSession
 from storage.db.session import session_scope
 
 router = APIRouter(tags=["dashboard"])
+
+
+def esc(value) -> str:
+    """HTML-escape a value before interpolating it into dashboard markup.
+
+    User-supplied fields (defect types, session ids, notes) flow into the
+    template, so every interpolated value must be escaped to prevent XSS.
+    """
+    return html.escape(str(value), quote=True)
+
+
+_dumps = json.dumps  # raw alias, so the hardened wrapper below isn't self-rewritten
+
+
+def _js_json(obj) -> str:
+    """json.dumps hardened for embedding inside a <script> block.
+
+    Plain json.dumps does not escape '/', so a user string containing
+    '</script>' would close the tag and allow script injection. Escaping '</'
+    keeps the output valid JSON while making breakout impossible.
+    """
+    return _dumps(obj).replace("</", "<\\/")
 
 
 def get_sessions_paginated(db: Session, skip: int = 0, limit: int = 100):
@@ -165,10 +188,10 @@ def _quality_table_rows(quality: list) -> str:
         return '<tr><td colspan="4" style="text-align:center;color:#6b7280;">Нет данных о качестве</td></tr>'
     return "".join(
         f'''<tr>
-                            <td>{q.get('timestamp', '')[:10] if q.get('timestamp') else '-'}</td>
-                            <td><span class="type-badge {'type-real' if q.get('result')=='accepted' else 'type-unknown'}">{q.get('result', '-')}</span></td>
-                            <td>{q.get('defect_type', '-') or '-'}</td>
-                            <td>{q.get('session_id', '-')[:20]}</td>
+                            <td>{esc(q.get('timestamp', '')[:10] if q.get('timestamp') else '-')}</td>
+                            <td><span class="type-badge {'type-real' if q.get('result')=='accepted' else 'type-unknown'}">{esc(q.get('result', '-'))}</span></td>
+                            <td>{esc(q.get('defect_type', '-') or '-')}</td>
+                            <td>{esc(q.get('session_id', '-')[:20])}</td>
                         </tr>'''
         for q in quality[:20]
     )
@@ -186,10 +209,10 @@ def _data_quality_badge(score, issues: int) -> str:
 def _session_table_rows(sessions: list) -> str:
     return "".join(
         f'''<tr>
-                            <td>{s['id'][:25]}...</td>
-                            <td>{s['date']}</td>
-                            <td><span class="type-badge {'type-real' if s['type']=='REAL_PRINT' else 'type-unknown'}">{s['type']}</span></td>
-                            <td>{s['first_time']} - {s['last_time']}</td>
+                            <td>{esc(s['id'][:25])}...</td>
+                            <td>{esc(s['date'])}</td>
+                            <td><span class="type-badge {'type-real' if s['type']=='REAL_PRINT' else 'type-unknown'}">{esc(s['type'])}</span></td>
+                            <td>{esc(s['first_time'])} - {esc(s['last_time'])}</td>
                             <td>{s['duration_min']} мин</td>
                             <td>{_data_quality_badge(s.get('data_quality_score'), s.get('data_quality_issues', 0))}</td>
                             <td>{s['total_lines']:,}</td>
@@ -203,8 +226,8 @@ def _gas_table_rows(gas_events: list) -> str:
         return '<tr><td colspan="3" style="text-align:center;color:#6b7280;">Нет данных о расходе</td></tr>'
     return "".join(
         f'''<tr>
-                            <td>{e.get('timestamp', '')[:10] if e.get('timestamp') else '-'}</td>
-                            <td>{e.get('value', '-')}</td>
+                            <td>{esc(e.get('timestamp', '')[:10] if e.get('timestamp') else '-')}</td>
+                            <td>{esc(e.get('value', '-'))}</td>
                             <td>-</td>
                         </tr>'''
         for e in gas_events[:20]
@@ -218,7 +241,7 @@ async def dashboard():
     from profiles.thresholds import load_thresholds
     _profile = _get_profile()
     _thresholds = load_thresholds(_profile)
-    _thr_js = json.dumps(_thresholds.to_dict())
+    _thr_js = _js_json(_thresholds.to_dict())
     machine_info = (
         f"{_profile.model_family} &nbsp;·&nbsp; "
         f"s/n {_profile.serial_number}" if _profile.serial_number else _profile.model_family
@@ -255,22 +278,22 @@ async def dashboard():
     pause_labels = [s['date'] for s in sessions]
     
     # Pre-compute JS-safe color arrays (avoids undefined-variable ReferenceError in browser)
-    duration_colors = json.dumps(
+    duration_colors = _js_json(
         ["#10b981" if d > 500 else "#f59e0b" if d > 100 else "#60a5fa" for d in durations]
     )
-    pause_colors = json.dumps(
+    pause_colors = _js_json(
         ["#f59e0b" if p > 0 else "#60a5fa" for p in pauses]
     )
 
     # --- Process telemetry (decoded sensor series) for the latest real print ---
-    tel_time = json.dumps(telemetry.get("time", []))
+    tel_time = _js_json(telemetry.get("time", []))
     tel_oxygen = telemetry.get("oxygen", {})
     tel_temps = telemetry.get("temperatures", {})
     tel_humidity = telemetry.get("humidity", {})
     tel_pressure = telemetry.get("pressure", {})
     tel_burn = telemetry.get("layer_burn_times", [])
-    tel_burn_labels = json.dumps([b["layer"] for b in tel_burn])
-    tel_burn_data = json.dumps([b["duration_sec"] for b in tel_burn])
+    tel_burn_labels = _js_json([b["layer"] for b in tel_burn])
+    tel_burn_data = _js_json([b["duration_sec"] for b in tel_burn])
     has_telemetry = bool(telemetry.get("time"))
     if tel_label and tel_start_ts:
         _d = tel_start_ts.day
@@ -331,10 +354,10 @@ async def dashboard():
         _alarm_dataset(f"Норма {_thresholds.pressure_nominal} бар", _thresholds.pressure_nominal, "#10b981"),
     ]
 
-    oxygen_datasets = json.dumps(_datasets(tel_oxygen, _o2_colors) + _o2_alarms)
-    temp_datasets = json.dumps(_datasets(tel_temps, _temp_colors) + _temp_alarms)
-    humidity_datasets = json.dumps(_datasets(tel_humidity, {}, "#06b6d4") + _hum_alarms)
-    pressure_datasets = json.dumps(_datasets(tel_pressure, {}, "#a78bfa") + _press_alarms)
+    oxygen_datasets = _js_json(_datasets(tel_oxygen, _o2_colors) + _o2_alarms)
+    temp_datasets = _js_json(_datasets(tel_temps, _temp_colors) + _temp_alarms)
+    humidity_datasets = _js_json(_datasets(tel_humidity, {}, "#06b6d4") + _hum_alarms)
+    pressure_datasets = _js_json(_datasets(tel_pressure, {}, "#a78bfa") + _press_alarms)
 
     # --- Alarm detection: check last N points of each series against thresholds ---
     # Returns True if ANY of the tail values exceeds the alarm threshold.
@@ -430,32 +453,32 @@ async def dashboard():
         "EXPR40": _thresholds.pressure_nominal,
         "EXPR41": f"{_thresholds.humidity_alarm_high:.0f}",
         "EXPR42": _thr_js,
-        "EXPR43": json.dumps(list(types.keys())),
-        "EXPR44": json.dumps(list(types.values())),
-        "EXPR45": json.dumps(list(materials.keys())),
-        "EXPR46": json.dumps(list(materials.values())),
-        "EXPR47": json.dumps(dates_labels),
-        "EXPR48": json.dumps(durations),
+        "EXPR43": _js_json(list(types.keys())),
+        "EXPR44": _js_json(list(types.values())),
+        "EXPR45": _js_json(list(materials.keys())),
+        "EXPR46": _js_json(list(materials.values())),
+        "EXPR47": _js_json(dates_labels),
+        "EXPR48": _js_json(durations),
         "EXPR49": duration_colors,
-        "EXPR50": json.dumps([s['date'] for s in sessions]),
-        "EXPR51": json.dumps([s['total_lines'] for s in sessions]),
-        "EXPR52": json.dumps(dates_labels),
-        "EXPR53": json.dumps([d/60 for d in durations]),
-        "EXPR54": json.dumps(pause_labels),
-        "EXPR55": json.dumps(pauses),
+        "EXPR50": _js_json([s['date'] for s in sessions]),
+        "EXPR51": _js_json([s['total_lines'] for s in sessions]),
+        "EXPR52": _js_json(dates_labels),
+        "EXPR53": _js_json([d/60 for d in durations]),
+        "EXPR54": _js_json(pause_labels),
+        "EXPR55": _js_json(pauses),
         "EXPR56": pause_colors,
-        "EXPR57": json.dumps([s['date'] for s in sessions]),
-        "EXPR58": json.dumps([s.get('burn_events', 0) for s in sessions]),
-        "EXPR59": json.dumps([s['date'] for s in sessions]),
-        "EXPR60": json.dumps([s['total_lines'] for s in sessions]),
-        "EXPR61": json.dumps(list(quality_stats.keys())),
-        "EXPR62": json.dumps(list(quality_stats.values())),
-        "EXPR63": json.dumps(list(defects.keys())),
-        "EXPR64": json.dumps(list(defects.values())),
-        "EXPR65": json.dumps([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in gas_events[:15]]),
-        "EXPR66": json.dumps([e.get('value', 0) for e in gas_events[:15]]),
-        "EXPR67": json.dumps([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in powder_events[:15]]),
-        "EXPR68": json.dumps([e.get('value', 0) for e in powder_events[:15]]),
+        "EXPR57": _js_json([s['date'] for s in sessions]),
+        "EXPR58": _js_json([s.get('burn_events', 0) for s in sessions]),
+        "EXPR59": _js_json([s['date'] for s in sessions]),
+        "EXPR60": _js_json([s['total_lines'] for s in sessions]),
+        "EXPR61": _js_json(list(quality_stats.keys())),
+        "EXPR62": _js_json(list(quality_stats.values())),
+        "EXPR63": _js_json(list(defects.keys())),
+        "EXPR64": _js_json(list(defects.values())),
+        "EXPR65": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in gas_events[:15]]),
+        "EXPR66": _js_json([e.get('value', 0) for e in gas_events[:15]]),
+        "EXPR67": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in powder_events[:15]]),
+        "EXPR68": _js_json([e.get('value', 0) for e in powder_events[:15]]),
         "EXPR69": tel_time,
         "EXPR70": oxygen_datasets,
         "EXPR71": temp_datasets,
@@ -466,7 +489,7 @@ async def dashboard():
         "EXPR_QUALITY_ROWS": _quality_table_rows(quality),
         "EXPR_SESSION_ROWS": _session_table_rows(sessions),
         "EXPR_GAS_ROWS": _gas_table_rows(gas_events),
-        "EXPR_TEL_SESSION_ID": json.dumps(tel_session_id),
+        "EXPR_TEL_SESSION_ID": _js_json(tel_session_id),
     }
 
     return HTMLResponse(_render_template(ctx))

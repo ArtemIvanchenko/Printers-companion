@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
 from background_reanalysis.job_planner import plan_historical_reanalysis
@@ -42,7 +42,10 @@ def list_verdicts(repo: RuntimeRepository = Depends(get_runtime_repository)) -> 
 
 @router.get("/verdicts/{verdict_id}")
 def get_verdict(verdict_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
-    return repo.get_historical_verdict(verdict_id) or {"error": "not_found"}
+    verdict = repo.get_historical_verdict(verdict_id)
+    if not verdict:
+        raise HTTPException(status_code=404, detail="Historical verdict not found")
+    return verdict
 
 
 @router.get("/daily-review")

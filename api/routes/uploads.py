@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+from api.upload_limits import read_upload_capped
 from core.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -310,6 +311,7 @@ def _historical_rate() -> dict:
         avg = sum(durations) / len(durations)
         return {"sessions_used": total_sessions, "avg_duration_min": round(avg, 1)}
     except Exception:
+        logger.exception("historical-rate computation failed; returning empty estimate")
         return {"sessions_used": 0, "avg_duration_min": None}
 
 
@@ -432,9 +434,7 @@ async def stl_estimate(
     if hatch_distance_mm is not None and hatch_distance_mm <= 0:
         raise HTTPException(422, "hatch_distance_mm должен быть > 0")
 
-    data = await file.read()
-    if len(data) > 200 * 1024 * 1024:
-        raise HTTPException(413, "Файл > 200 МБ")
+    data = await read_upload_capped(file, 200 * 1024 * 1024)
 
     volume_cm3 = _stl_volume_cm3(data)
     hist = _historical_rate()

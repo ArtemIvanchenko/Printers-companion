@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from domain.models.events import OperatorEvent
@@ -22,8 +23,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
 # Simple in-process cache so repeated dashboard loads don't re-analyze.
+# Guarded by a lock: sync handlers run in a threadpool, so concurrent requests
+# would otherwise race the dict update against the snapshot read.
 _CACHE: dict[str, Any] = {}
 _CACHE_TTL_SEC = 300   # 5 min
+_CACHE_LOCK = threading.Lock()
 
 
 def _cache_fresh() -> bool:
@@ -115,14 +119,18 @@ def get_patterns(force: bool = False) -> dict[str, Any]:
     """Return cross-session analysis findings (cached for 5 min)."""
     if force or not _cache_fresh():
         try:
-            _CACHE.update(_compute())
-            _CACHE["computed_at"] = datetime.now(timezone.utc)
+            # Compute outside the lock (expensive); only the swap is guarded.
+            computed = _compute()
+            with _CACHE_LOCK:
+                _CACHE.update(computed)
+                _CACHE["computed_at"] = datetime.now(timezone.utc)
         except Exception as exc:
             logger.exception("Analysis failed: %s", exc)
             return {"error": str(exc), "trends": [], "before_after": [], "anomalies": []}
 
     # Return JSON-safe copy (replace datetime object with str).
-    out = dict(_CACHE)
+    with _CACHE_LOCK:
+        out = dict(_CACHE)
     if isinstance(out.get("computed_at"), datetime):
         out["computed_at"] = out["computed_at"].isoformat()
     return out
@@ -202,7 +210,7 @@ def defect_risk_one(session_id: str) -> dict[str, Any]:
 
     target = next((s for s in sessions if s["session_id"] == session_id), None)
     if target is None:
-        return {"error": "session not found", "session_id": session_id}
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
     labelled = [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
     model = train_defect_model(labelled)
     pred = predict_defect_risk(target["group"], model)

@@ -17,7 +17,11 @@ import re
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import hmac
+
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+
+from core.config.settings import get_settings
 
 from profiles.thresholds import ChartThresholds
 from profiles.base.profile import load_yaml
@@ -146,7 +150,13 @@ def _sim_frame() -> dict:
 
 
 @router.websocket("/ws/realtime")
-async def realtime_telemetry(ws: WebSocket):
+async def realtime_telemetry(ws: WebSocket, token: str | None = Query(default=None)):
+    # Live telemetry is sensitive; require the service token (passed as a query
+    # param since browser WebSocket clients cannot set request headers).
+    expected = get_settings().api_service_token
+    if not token or not hmac.compare_digest(token, expected):
+        await ws.close(code=1008)  # 1008 = policy violation
+        return
     await ws.accept()
     header: list[str] = []
     live_path: Path | None = None

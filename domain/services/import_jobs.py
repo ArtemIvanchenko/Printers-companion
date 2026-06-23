@@ -464,7 +464,10 @@ def execute_confirmed_import(
 
         job.status = ImportJobStatus.reporting
         job.updated_at = now
-        final_status = ImportJobStatus.needs_operator_context if job.missing_context_questions else ImportJobStatus.done
+        # Context questions (material / powder batch / gas cylinder) are recorded
+        # for display but do NOT block the import — the operator fills them in
+        # separately via print records. Always mark as done here.
+        final_status = ImportJobStatus.done
         job.status = final_status
         job.updated_at = now
         job.audit_trail.append(
