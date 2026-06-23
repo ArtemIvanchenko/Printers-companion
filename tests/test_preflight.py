@@ -1,7 +1,6 @@
-"""Preflight credential checks: default secrets must block production startup
-but only warn in local/test environments."""
+"""Preflight checks: credentials and database URL validation."""
 from core.config.settings import Settings
-from core.preflight import check_environ, PreflightReport
+from core.preflight import check_environ, check_database_url, PreflightReport
 
 
 def _report_for(app_env: str) -> PreflightReport:
@@ -43,4 +42,28 @@ def test_unique_tokens_pass_in_production() -> None:
     )
     report = PreflightReport()
     check_environ(report, settings)
+    assert not report.errors
+
+
+def test_bare_postgresql_url_is_error() -> None:
+    """postgresql:// requires psycopg2 which is not installed — must be caught early."""
+    settings = Settings(
+        app_env="local",
+        database_url="postgresql://printer_logs:change-me@postgres:5432/printer_logs",
+        llm_provider="null",
+    )
+    report = PreflightReport()
+    check_database_url(report, settings)
+    assert report.errors
+    assert "postgresql+psycopg://" in report.errors[0]
+
+
+def test_correct_psycopg3_url_passes() -> None:
+    settings = Settings(
+        app_env="local",
+        database_url="postgresql+psycopg://printer_logs:change-me@postgres:5432/printer_logs",
+        llm_provider="null",
+    )
+    report = PreflightReport()
+    check_database_url(report, settings)
     assert not report.errors

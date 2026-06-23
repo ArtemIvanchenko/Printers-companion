@@ -23,3 +23,6 @@ update.log
 
 # Dashboard→launcher update-request flag (runtime only)
 control/
+
+# Dev-only overrides — never commit to production
+docker-compose.override.yml

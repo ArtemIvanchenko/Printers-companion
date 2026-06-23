@@ -21,6 +21,7 @@ def run_preflight(settings: "Settings", component: str = "api") -> PreflightRepo
     report = PreflightReport()
 
     check_environ(report, settings)
+    check_database_url(report, settings)
     check_secrets(report, settings)
     check_llm(report, settings)
 
@@ -48,6 +49,25 @@ def check_environ(report: PreflightReport, settings: "Settings") -> None:
                 report.errors.append(msg)
             else:
                 report.warnings.append(msg)
+
+
+def check_database_url(report: PreflightReport, settings: "Settings") -> None:
+    """Catch the psycopg2→psycopg3 migration trap.
+
+    SQLAlchemy picks the driver from the URL scheme:
+      postgresql://   → tries psycopg2 (not installed → ModuleNotFoundError at import)
+      postgresql+psycopg:// → psycopg v3 (the installed driver)
+
+    This produces a clear error instead of a cryptic traceback buried in uvicorn startup.
+    """
+    url = settings.database_url
+    if url.startswith("postgresql://") or url.startswith("postgres://"):
+        report.errors.append(
+            f"DATABASE_URL uses the bare 'postgresql://' scheme which requires psycopg2 "
+            f"(not installed). Change it to 'postgresql+psycopg://' in your .env file.\n"
+            f"  Current:  {url[:60]}{'...' if len(url) > 60 else ''}\n"
+            f"  Fix:      {url.replace('postgresql://', 'postgresql+psycopg://', 1).replace('postgres://', 'postgresql+psycopg://', 1)[:60]}"
+        )
 
 
 def check_secrets(report: PreflightReport, settings: "Settings") -> None:
