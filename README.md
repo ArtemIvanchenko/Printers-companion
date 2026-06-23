@@ -151,7 +151,7 @@ docker compose logs -f api  # логи API в реальном времени
 Или вручную из папки проекта:
 
 ```bash
-git pull && docker compose up -d --build
+git pull && GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
 ```
 
 ## Стек

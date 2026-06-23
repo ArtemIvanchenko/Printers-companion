@@ -74,6 +74,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4"
     ports:
       - "127.0.0.1:8000:8000"
@@ -97,6 +99,9 @@ services:
       - type: bind
         source: ${CONTROL_HOST_PATH:-./control}
         target: /mnt/control
+      - type: volume
+        source: app_logs
+        target: /app/logs
     tmpfs:
       - /tmp:size=4g,mode=1777
     security_opt:
@@ -330,3 +335,4 @@ volumes:
   postgres_data:
   redis_data:
   minio_data:
+  app_logs:
