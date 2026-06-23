@@ -26,3 +26,5 @@ control/
 
 # Dev-only overrides — never commit to production
 docker-compose.override.yml
+.claude/
+CLAUDE.md
