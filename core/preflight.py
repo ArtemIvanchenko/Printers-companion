@@ -32,14 +32,22 @@ def check_environ(report: PreflightReport, settings: "Settings") -> None:
     defaults = {
         "AGENT_API_TOKEN": "change-me-agent-token",
         "API_SERVICE_TOKEN": "change-me-service-token",
+        "MINIO_ROOT_PASSWORD": "change-me-minio",
     }
+    # Only "local" and "test" are treated as safe dev environments; anything else
+    # (production, prod, staging, …) must not boot with default credentials.
+    is_production = settings.app_env not in ("local", "test")
     for name, default in defaults.items():
         actual = getattr(settings, name.lower(), None)
         if actual == default:
-            report.warnings.append(
+            msg = (
                 f"{name} is still set to the default '{default}'. "
                 "Set a unique value in .env for production."
             )
+            if is_production:
+                report.errors.append(msg)
+            else:
+                report.warnings.append(msg)
 
 
 def check_secrets(report: PreflightReport, settings: "Settings") -> None:

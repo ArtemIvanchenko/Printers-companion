@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
 from api.routes.imports import create_detected_import, handle_import_callback
@@ -89,7 +89,10 @@ def agent_import_detected(
     payload: dict,
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
-    result = create_detected_import(payload["source_path"], repo)
+    source_path = payload.get("source_path")
+    if not source_path:
+        raise HTTPException(status_code=400, detail="source_path is required")
+    result = create_detected_import(source_path, repo)
     return {
         "job": result.job.model_dump(mode="json"),
         "notifications": [notification.model_dump(mode="json") for notification in result.notifications],

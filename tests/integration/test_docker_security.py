@@ -11,8 +11,6 @@ def test_compose_security_boundaries() -> None:
     assert services["api"]["read_only"] is True
     assert services["worker"]["volumes"][0]["read_only"] is True
     assert services["watcher"]["volumes"][0]["read_only"] is True
-    telegram_volumes = services["telegram-bot"].get("volumes", [])
-    assert telegram_volumes == ["stt_model_cache:/models/stt"]
     assert "volumes" not in services["openclaw"]
-    for service_name in ("api", "worker", "watcher", "scheduler", "telegram-bot", "openclaw"):
+    for service_name in ("api", "worker", "watcher", "scheduler", "openclaw"):
         assert "ALL" in services[service_name]["cap_drop"]

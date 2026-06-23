@@ -120,42 +120,11 @@ class Settings(BaseSettings):
                 )
         return self
 
-    @model_validator(mode="after")
-    def _discover_llm(self):
-        # Skip blocking network discovery in tests: probing candidate URLs at
-        # settings-construction time makes imports slow and non-deterministic.
-        if self.llm_provider == "null" or self.app_env == "test":
-            return self
-        import json
-        import urllib.request
-
-        empty_server: str | None = None
-        for url in LMSTUDIO_CANDIDATE_URLS:
-            try:
-                req = urllib.request.Request(
-                    f"{url.rstrip('/')}/models",
-                    method="GET",
-                    headers={"User-Agent": "printer-log-analytics/1.0"},
-                )
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    if resp.status != 200:
-                        continue
-                    body = json.loads(resp.read().decode("utf-8"))
-            except Exception:
-                continue
-            models = [m.get("id") for m in body.get("data", []) if m.get("id")]
-            if not models:
-                # Server is up but no model is loaded — remember it but keep looking
-                # for a candidate that actually has a usable model.
-                empty_server = empty_server or url
-                continue
-            self.llm_base_url = url
-            if self.llm_model not in models:
-                self.llm_model = models[0]
-            return self
-        if empty_server:
-            self.llm_base_url = empty_server
-        return self
+    # NOTE: LM Studio auto-discovery is intentionally NOT done here. Probing
+    # candidate URLs at settings-construction time blocked every import (and thus
+    # process startup) for up to ~8s. Discovery now runs lazily/in the background
+    # — at API startup via a non-blocking task, or on demand via POST /llm/discover
+    # (see reporting/llm/discovery.discover_lmstudio).
 
     @property
     def repo_root(self) -> Path:

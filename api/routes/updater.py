@@ -45,6 +45,7 @@ def _redis_client() -> _redis.Redis | None:
         s = get_settings()
         return _redis.from_url(s.redis_url, socket_connect_timeout=1, socket_timeout=1, decode_responses=True)
     except Exception:
+        logger.debug("Redis client unavailable", exc_info=True)
         return None
 
 
@@ -206,6 +207,7 @@ async def update_notify(request: Request) -> dict:
     try:
         body = await request.json()
     except Exception:
+        logger.debug("update_notify received an invalid JSON body; treating as empty", exc_info=True)
         body = {}
     event = {
         "at":      datetime.now(timezone.utc).isoformat(),

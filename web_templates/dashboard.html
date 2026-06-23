@@ -101,6 +101,18 @@
         .file-chip { display: inline-flex; align-items: center; gap: 6px; background: #1e2433; border: 1px solid #2d3748; border-radius: 6px; padding: 4px 10px; margin: 3px 4px 0 0; font-size: 12px; color: #a0aec0; }
         .file-chip a { color: #60a5fa; text-decoration: none; cursor: pointer; }
 
+        /* Telemetry session picker cards */
+        .tel-cards { display:flex; gap:10px; overflow-x:auto; padding-bottom:8px; scrollbar-width:thin; scrollbar-color:#2d3748 transparent; }
+        .tel-cards::-webkit-scrollbar { height:4px; }
+        .tel-cards::-webkit-scrollbar-thumb { background:#2d3748; border-radius:4px; }
+        .tel-card { flex-shrink:0; background:#1e2535; border:2px solid #2d3748; border-radius:12px; padding:12px 14px; cursor:pointer; transition:border-color 0.15s, background 0.15s; text-align:center; min-width:84px; }
+        .tel-card:hover { border-color:#4a5568; background:#232b3e; }
+        .tel-card.active { border-color:#3b82f6; background:#162036; }
+        .tel-card-icon { font-size:18px; margin-bottom:4px; }
+        .tel-card-date { font-size:15px; font-weight:700; color:#e2e8f0; line-height:1.2; }
+        .tel-card-time { font-size:12px; color:#a0aec0; margin-top:2px; }
+        .tel-card-dur { font-size:12px; color:#60a5fa; margin-top:4px; }
+
         /* Gear / dropdown shared */
         .nav-more { position: relative; }
         .nav-more > a { margin: 0 !important; }
@@ -391,14 +403,16 @@
         <!-- Telemetry Page -->
         <div id="page-telemetry" style="display:none;">
             <div class="section" style="margin-bottom:20px;">
-                <div style="display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin-bottom:8px;">
-                    <h2 style="margin:0;">🌡️ Телеметрия</h2>
-                    <select id="tel-session-select" class="mp-input"
-                        style="max-width:300px;flex:1;"
-                        onchange="loadTelemetryForSession(this.value)">
-                        <option value="">Загрузка печатей...</option>
-                    </select>
-                    <span id="tel-subtitle" style="color:#60a5fa;font-size:13px;">{!EXPR8!}</span>
+                <div style="margin-bottom:12px;">
+                    <h2 style="margin:0 0 14px;">🌡️ Телеметрия</h2>
+                    <div id="tel-session-cards" class="tel-cards">
+                        <div class="tel-card" id="tel-card-alltime" onclick="loadAllTimeTelemetry()">
+                            <div class="tel-card-icon">📊</div>
+                            <div class="tel-card-date">Все</div>
+                            <div class="tel-card-time">сессии</div>
+                        </div>
+                    </div>
+                    <span id="tel-subtitle" style="color:#60a5fa;font-size:13px;display:block;margin-top:8px;">{!EXPR8!}</span>
                 </div>
                 <p style="color:#6b7280;font-size:13px;margin-top:6px;">
                     Сигналы расшифрованы по словарю M-450-M: O₂ — окисление,
@@ -921,6 +935,62 @@
                         💾 Сохранить
                     </button>
                     <span id="mp-status" style="font-size:13px;color:#6b7280;"></span>
+                </div>
+            </div>
+
+            <!-- Export section -->
+            <div class="section" style="max-width:760px;margin:0 auto 28px;">
+                <h2 style="margin-bottom:6px;">📦 Экспорт базы данных</h2>
+                <p style="color:#6b7280;font-size:12px;margin-bottom:20px;">
+                    Выберите типы данных и скачайте всё одним JSON-файлом.
+                </p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:20px;">
+                    <label style="display:flex;align-items:flex-start;gap:10px;background:#1e2433;border:1px solid #2d3748;border-radius:10px;padding:14px;cursor:pointer;">
+                        <input type="checkbox" id="exp-operator" checked style="margin-top:2px;accent-color:#3b82f6;">
+                        <div>
+                            <div style="color:#e2e8f0;font-size:13px;font-weight:600;">📝 Записи оператора</div>
+                            <div style="color:#6b7280;font-size:11px;margin-top:3px;">Карточки печати, заметки, журнал, события</div>
+                        </div>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:10px;background:#1e2433;border:1px solid #2d3748;border-radius:10px;padding:14px;cursor:pointer;">
+                        <input type="checkbox" id="exp-sessions" checked style="margin-top:2px;accent-color:#3b82f6;">
+                        <div>
+                            <div style="color:#e2e8f0;font-size:13px;font-weight:600;">📂 Сессии и логи</div>
+                            <div style="color:#6b7280;font-size:11px;margin-top:3px;">Импортированные сессии, файлы, события слоёв</div>
+                        </div>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:10px;background:#1e2433;border:1px solid #2d3748;border-radius:10px;padding:14px;cursor:pointer;">
+                        <input type="checkbox" id="exp-analytics" checked style="margin-top:2px;accent-color:#3b82f6;">
+                        <div>
+                            <div style="color:#e2e8f0;font-size:13px;font-weight:600;">📊 Аналитика и отчёты</div>
+                            <div style="color:#6b7280;font-size:11px;margin-top:3px;">LLM-отчёты, инсайты, аномалии, гипотезы</div>
+                        </div>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:10px;background:#1e2433;border:1px solid #2d3748;border-radius:10px;padding:14px;cursor:pointer;">
+                        <input type="checkbox" id="exp-models" style="margin-top:2px;accent-color:#3b82f6;">
+                        <div>
+                            <div style="color:#e2e8f0;font-size:13px;font-weight:600;">🧱 3D-модели и детали</div>
+                            <div style="color:#6b7280;font-size:11px;margin-top:3px;">Детали, задания, расстановки, слои</div>
+                        </div>
+                    </label>
+                    <label style="display:flex;align-items:flex-start;gap:10px;background:#1e2433;border:1px solid #2d3748;border-radius:10px;padding:14px;cursor:pointer;">
+                        <input type="checkbox" id="exp-maintenance" checked style="margin-top:2px;accent-color:#3b82f6;">
+                        <div>
+                            <div style="color:#e2e8f0;font-size:13px;font-weight:600;">🔧 Обслуживание и расходники</div>
+                            <div style="color:#6b7280;font-size:11px;margin-top:3px;">ТО, порошок, газ, материалы, пресеты</div>
+                        </div>
+                    </label>
+                </div>
+                <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+                    <button onclick="exportDatabase()"
+                        style="background:#3b82f6;color:white;border:none;border-radius:10px;padding:12px 28px;font-size:14px;font-weight:600;cursor:pointer;">
+                        ⬇️ Скачать
+                    </button>
+                    <button onclick="document.querySelectorAll('[id^=exp-]').forEach(c=>c.checked=true)"
+                        style="background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:10px;padding:12px 18px;font-size:13px;cursor:pointer;">
+                        Выбрать всё
+                    </button>
+                    <span id="export-status" style="font-size:13px;color:#6b7280;"></span>
                 </div>
             </div>
         </div>
@@ -1664,14 +1734,25 @@
         }
 
         // Import status bar
+        // Terminal statuses — jobs in these states are excluded from "active" and
+        // never shown in the progress bar. "done" is the backend's success terminal
+        // (ImportJobStatus.done); "completed" is kept for forward-compat.
+        const TERMINAL_STATUSES = new Set(['done', 'completed', 'needs_operator_context', 'ignored', 'failed']);
         const statusMap = {
-            'awaiting_operator_confirmation': { label: 'Ожидает подтверждения', pct: 10, icon: '⏳' },
-            'checking_stability': { label: 'Проверка файлов', pct: 25, icon: '🔍' },
-            'pending': { label: 'В очереди', pct: 40, icon: '⏳' },
-            'processing': { label: 'Импорт...', pct: 60, icon: '⚙️' },
-            'completed': { label: 'Готово', pct: 100, icon: '✅' },
-            'failed': { label: 'Ошибка', pct: 0, icon: '❌' },
-            'ignored': { label: 'Пропущен', pct: 0, icon: '⏭️' }
+            'detected':                      { label: 'Обнаружен',               pct: 5,   icon: '🔎' },
+            'awaiting_operator_confirmation':{ label: 'Ожидает подтверждения',   pct: 10,  icon: '⏳' },
+            'needs_operator_context':        { label: 'Нужен контекст',           pct: 15,  icon: '❓' },
+            'postponed':                     { label: 'Отложен',                 pct: 20,  icon: '🕐' },
+            'checking_stability':            { label: 'Проверка файлов',         pct: 30,  icon: '🔍' },
+            'pending':                       { label: 'В очереди',               pct: 40,  icon: '⏳' },
+            'importing':                     { label: 'Импорт...',               pct: 55,  icon: '⚙️' },
+            'processing':                    { label: 'Обработка...',            pct: 60,  icon: '⚙️' },
+            'analyzing':                     { label: 'Анализ...',               pct: 75,  icon: '📊' },
+            'reporting':                     { label: 'Отчёт...',                pct: 90,  icon: '📝' },
+            'done':                          { label: 'Готово',                  pct: 100, icon: '✅' },
+            'completed':                     { label: 'Готово',                  pct: 100, icon: '✅' },
+            'failed':                        { label: 'Ошибка',                  pct: 0,   icon: '❌' },
+            'ignored':                       { label: 'Пропущен',                pct: 0,   icon: '⏭️' },
         };
         async function updateImportStatus() {
             try {
@@ -1680,15 +1761,15 @@
                 // /imports returns a paginated envelope: {items: [...], total, skip, limit}
                 const jobs = Array.isArray(payload) ? payload : (payload.items || []);
                 const bar = document.getElementById('import-status-bar');
-                const active = jobs.filter(j => !['completed','ignored','failed'].includes(j.status));
+                const active = jobs.filter(j => !TERMINAL_STATUSES.has(j.status));
                 if (active.length === 0) { bar.style.display = 'none'; return; }
                 bar.style.display = 'block';
                 const info = statusMap[active[0].status] || { label: active[0].status, pct: 50, icon: '⏳' };
                 document.getElementById('import-icon').textContent = info.icon;
                 document.getElementById('import-text').textContent = info.label + ': ' + active[0].source_name;
                 document.getElementById('import-progress-bar').style.width = info.pct + '%';
-                const done = jobs.filter(j => j.status === 'completed').length;
-                const total = jobs.filter(j => !['ignored','failed'].includes(j.status) || j.status === 'completed').length;
+                const done = jobs.filter(j => j.status === 'done' || j.status === 'completed').length;
+                const total = jobs.filter(j => j.status !== 'ignored').length;
                 document.getElementById('import-count').textContent = done + '/' + total;
             } catch(e) { /* ignore */ }
         }
@@ -1752,7 +1833,12 @@
         }
 
         async function rescanFolder() {
-            const res = document.getElementById('upload-result') || document.getElementById('home-upload-result');
+            // Pick the result div on whichever page is currently visible.
+            const uploadPage = document.getElementById('page-upload');
+            const res = (uploadPage && uploadPage.style.display !== 'none')
+                ? document.getElementById('upload-result')
+                : document.getElementById('home-upload-result');
+            if (!res) return;
             res.innerHTML = '<span style="color:#60a5fa;">Сканирование папки…</span>';
             try {
                 const r = await fetch('/upload/rescan', { method: 'POST' });
@@ -3004,21 +3090,48 @@
             return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()} · ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
         }
 
+        // Cache for all-time aggregated data so we don't re-fetch on every visit
+        let _telAllTimeCache = null;
+        // Full session list cache (populated once by loadTelemetrySessions)
+        let _telSessionList = [];
+
+        function _setActiveCard(id) {
+            document.querySelectorAll('#tel-session-cards .tel-card').forEach(c => c.classList.remove('active'));
+            const card = document.getElementById(id);
+            if (card) { card.classList.add('active'); card.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' }); }
+        }
+
         async function loadTelemetrySessions() {
-            const sel = document.getElementById('tel-session-select');
-            if (!sel) return;
+            const container = document.getElementById('tel-session-cards');
+            if (!container) return;
             try {
                 const list = await fetch('/sessions/telemetry-list').then(r => r.json());
-                if (!list.length) { sel.innerHTML = '<option>Нет сессий с телеметрией</option>'; return; }
-                sel.innerHTML = list.map(s => {
-                    const label = _fmtTelDate(s.start_ts);
-                    const dur   = s.duration_min != null ? ` · ${(s.duration_min/60).toFixed(1)} ч` : '';
-                    const cur   = _telCharts.currentSessionId;
-                    const sel_  = (cur && s.session_id.includes(cur)) ? ' selected' : '';
-                    return `<option value="${s.session_id}"${sel_}>${label}${dur}</option>`;
-                }).join('');
+                _telSessionList = list;
+                // Remove old session cards (keep the "all" card)
+                container.querySelectorAll('.tel-card:not(#tel-card-alltime)').forEach(c => c.remove());
+                if (!list.length) return;
+                const months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+                list.forEach(s => {
+                    const d = s.start_ts ? new Date(s.start_ts) : null;
+                    const dateStr  = d && !isNaN(d) ? `${d.getDate()} ${months[d.getMonth()]}` : s.session_id.slice(0,10);
+                    const yearStr  = d && !isNaN(d) ? String(d.getFullYear()) : '';
+                    const timeStr  = d && !isNaN(d) ? `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}` : '';
+                    const durStr   = s.duration_min != null ? `${(s.duration_min/60).toFixed(1)} ч` : '';
+                    const card = document.createElement('div');
+                    card.className = 'tel-card';
+                    card.id = 'tel-card-' + s.session_id;
+                    card.innerHTML = `<div class="tel-card-date">${dateStr}</div>`
+                        + `<div class="tel-card-time">${yearStr}${yearStr && timeStr ? ' · ' : ''}${timeStr}</div>`
+                        + (durStr ? `<div class="tel-card-dur">${durStr}</div>` : '');
+                    card.onclick = () => loadTelemetryForSession(s.session_id);
+                    container.appendChild(card);
+                });
+                // Auto-select the most recent session (first in list = newest)
+                if (list.length && !_telCharts.currentSessionId) {
+                    loadTelemetryForSession(list[0].session_id);
+                }
             } catch(e) {
-                sel.innerHTML = '<option>Ошибка загрузки</option>';
+                console.error('loadTelemetrySessions:', e);
             }
         }
 
@@ -3054,6 +3167,7 @@
         async function loadTelemetryForSession(sessionId) {
             if (!sessionId) return;
             _telCharts.currentSessionId = sessionId;
+            _setActiveCard('tel-card-' + sessionId);
             try {
                 const d = await fetch('/sessions/' + encodeURIComponent(sessionId) + '/telemetry').then(r => r.json());
                 const tel  = d.telemetry || {};
@@ -3070,6 +3184,99 @@
                     _telCharts.burn.update('none');
                 }
             } catch(e) { console.error('loadTelemetryForSession:', e); }
+        }
+
+        async function loadAllTimeTelemetry() {
+            _setActiveCard('tel-card-alltime');
+            _telCharts.currentSessionId = null;
+            document.getElementById('tel-subtitle').textContent = 'Загрузка всех сессий…';
+            try {
+                // Use cached list if available, otherwise fetch
+                const list = _telSessionList.length ? _telSessionList
+                    : await fetch('/sessions/telemetry-list').then(r => r.json());
+                if (!list.length) {
+                    document.getElementById('tel-subtitle').textContent = 'Нет данных';
+                    return;
+                }
+
+                // Fetch all sessions (use cache when available)
+                if (!_telAllTimeCache) {
+                    const results = await Promise.all(
+                        list.map(s => fetch('/sessions/' + encodeURIComponent(s.session_id) + '/telemetry')
+                            .then(r => r.json()).catch(() => null))
+                    );
+                    _telAllTimeCache = list.map((s, i) => ({ meta: s, data: results[i] })).filter(x => x.data);
+                }
+                const sessions = _telAllTimeCache;
+
+                // Build x-axis: short date per session (oldest → newest for left-to-right trend)
+                const months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+                const labels = sessions.slice().reverse().map(({ meta }) => {
+                    const d = meta.start_ts ? new Date(meta.start_ts) : null;
+                    return d && !isNaN(d) ? `${d.getDate()} ${months[d.getMonth()]}` : meta.session_id.slice(0,10);
+                });
+
+                // Helper: average of an array of numbers
+                const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+
+                // Per-session averages for each signal group
+                function avgSeries(sessions, group) {
+                    const keys = new Set(sessions.flatMap(({ data }) => Object.keys((data.telemetry || {})[group] || {})));
+                    const series = {};
+                    keys.forEach(k => {
+                        series[k] = sessions.slice().reverse().map(({ data }) => {
+                            const vals = ((data.telemetry || {})[group] || {})[k] || [];
+                            return avg(vals.map(Number).filter(v => !isNaN(v)));
+                        });
+                    });
+                    return series;
+                }
+
+                _updateLineChart(_telCharts.o2,    labels, avgSeries(sessions, 'oxygen'));
+                _updateLineChart(_telCharts.temp,   labels, avgSeries(sessions, 'temperatures'));
+                _updateLineChart(_telCharts.hum,    labels, avgSeries(sessions, 'humidity'));
+                _updateLineChart(_telCharts.press,  labels, avgSeries(sessions, 'pressure'));
+
+                if (_telCharts.burn) {
+                    const burnAvgs = sessions.slice().reverse().map(({ data }) => {
+                        const burns = ((data.telemetry || {}).layer_burn_times) || [];
+                        return avg(burns.map(b => b.duration_sec).filter(v => v != null));
+                    });
+                    _telCharts.burn.data.labels = labels;
+                    _telCharts.burn.data.datasets[0].data = burnAvgs;
+                    _telCharts.burn.update('none');
+                }
+
+                document.getElementById('tel-subtitle').textContent =
+                    `${sessions.length} сессий · средние значения по сессии`;
+            } catch(e) {
+                console.error('loadAllTimeTelemetry:', e);
+                document.getElementById('tel-subtitle').textContent = 'Ошибка загрузки';
+            }
+        }
+
+        async function exportDatabase() {
+            const MAP = {operator:'exp-operator', sessions:'exp-sessions', analytics:'exp-analytics', models:'exp-models', maintenance:'exp-maintenance'};
+            const cats = Object.entries(MAP).filter(([, id]) => document.getElementById(id)?.checked).map(([k]) => k);
+            if (!cats.length) { document.getElementById('export-status').textContent = 'Выберите хотя бы один тип данных'; return; }
+            const status = document.getElementById('export-status');
+            status.textContent = '⏳ Формирование файла…';
+            try {
+                const qs = cats.map(c => 'cat=' + encodeURIComponent(c)).join('&');
+                const r = await fetch('/export/download?' + qs);
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                const blob = await r.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = r.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'export.json';
+                a.click();
+                URL.revokeObjectURL(url);
+                status.textContent = '✅ Готово';
+                setTimeout(() => { status.textContent = ''; }, 4000);
+            } catch(e) {
+                status.textContent = '❌ Ошибка: ' + e.message;
+            }
         }
 
         async function saveMachineParams() {

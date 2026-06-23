@@ -1,3 +1,4 @@
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -18,25 +19,32 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 _REPORT_CACHE_MAX = 256
 _report_cache: OrderedDict[tuple[str, bool], dict] = OrderedDict()
+# Sync route handlers run in a threadpool, so cache access is concurrent. Guard
+# every read/modify/write — an unlocked OrderedDict can corrupt or raise
+# "mutated during iteration".
+_cache_lock = threading.Lock()
 
 
 def _invalidate_cache(session_id: str) -> None:
-    for key in [k for k in _report_cache if k[0] == session_id]:
-        _report_cache.pop(key, None)
+    with _cache_lock:
+        for key in [k for k in _report_cache if k[0] == session_id]:
+            _report_cache.pop(key, None)
 
 
 def _cache_get(key: tuple[str, bool]) -> dict | None:
-    if key not in _report_cache:
-        return None
-    _report_cache.move_to_end(key)
-    return _report_cache[key]
+    with _cache_lock:
+        if key not in _report_cache:
+            return None
+        _report_cache.move_to_end(key)
+        return _report_cache[key]
 
 
 def _cache_set(key: tuple[str, bool], value: dict) -> None:
-    _report_cache[key] = value
-    _report_cache.move_to_end(key)
-    while len(_report_cache) > _REPORT_CACHE_MAX:
-        _report_cache.popitem(last=False)
+    with _cache_lock:
+        _report_cache[key] = value
+        _report_cache.move_to_end(key)
+        while len(_report_cache) > _REPORT_CACHE_MAX:
+            _report_cache.popitem(last=False)
 
 
 @router.post("/ingest")

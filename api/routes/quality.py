@@ -36,7 +36,10 @@ def link_outcome_session(
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     outcome = get_outcome(outcome_id, repo)
-    outcome["session_id"] = payload["session_id"]
+    session_id = payload.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    outcome["session_id"] = session_id
     repo.save_quality_outcome(outcome)
     repo.flush()
     return outcome

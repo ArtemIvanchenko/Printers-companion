@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
 from core.config.settings import get_settings
@@ -61,7 +61,10 @@ def llm_providers() -> list[dict]:
 
 @reports_router.get("/{report_id}")
 def get_report(report_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
-    return repo.get_report(report_id) or {"error": "not_found"}
+    report = repo.get_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
 
 
 @reports_router.post("/{report_id}/llm-enhance")
@@ -71,7 +74,7 @@ async def llm_enhance_report(
 ) -> dict:
     report = repo.get_report(report_id)
     if not report:
-        return {"error": "not_found"}
+        raise HTTPException(status_code=404, detail="Report not found")
     evidence = build_evidence_package(report).model_dump(mode="json")
     result = await get_llm_provider().generate_markdown(evidence)
     if result.success:

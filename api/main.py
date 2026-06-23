@@ -4,8 +4,9 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.routes import (
@@ -16,6 +17,7 @@ from api.routes import (
     background,
     chat,
     dashboard,
+    exports,
     imports,
     insights,
     knowledge,
@@ -35,7 +37,7 @@ from api.routes import (
 )
 from core.config.settings import get_settings
 from core.logging.config import RequestIDMiddleware, configure_logging
-from core.preflight import run_preflight
+from core.preflight import run_preflight, exit_on_failure
 from core.versioning.version import APP_VERSION
 from storage.db.migrate import upgrade_to_head
 
@@ -116,6 +118,30 @@ async def _startup_import(raw_logs_path: str) -> None:
         logger.exception("startup_import: failed (non-fatal)")
 
 
+async def _startup_llm_discovery() -> None:
+    """Auto-connect to a local LM Studio server without blocking startup.
+
+    Replaces the old blocking probe that ran at Settings construction (and held
+    up every process import for up to ~8s). Runs once, in the background.
+    """
+    if settings.llm_provider in ("null", "none", ""):
+        return
+    try:
+        from reporting.llm.discovery import discover_lmstudio
+
+        result = await discover_lmstudio(preferred_model=settings.llm_model)
+        if result.available and result.base_url:
+            settings.llm_base_url = result.base_url
+            if result.selected_model:
+                settings.llm_model = result.selected_model
+            logger.info("startup: LM Studio discovered at %s (model=%s)", settings.llm_base_url, settings.llm_model)
+        else:
+            logger.info("startup: no LM Studio auto-discovered (%s); using configured %s",
+                        result.error, settings.llm_base_url)
+    except Exception:
+        logger.exception("startup: LM Studio discovery failed (non-fatal)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Local dev (single process) auto-migrates here; prod runs `alembic upgrade
@@ -125,6 +151,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     report = run_preflight(settings, component="api")
     for warn in report.warnings:
         logging.getLogger("preflight").warning(warn)
+    # Refuse to start in production with default credentials / failed checks.
+    exit_on_failure(report)
 
     # Best-effort: create all MinIO buckets so file uploads work immediately.
     try:
@@ -143,6 +171,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
 
+    # Non-blocking LM Studio auto-discovery (was a blocking probe at import time).
+    llm_task = asyncio.create_task(_startup_llm_discovery())
+    _BG_TASKS.add(llm_task)
+    llm_task.add_done_callback(_BG_TASKS.discard)
+
     yield
 
 
@@ -159,18 +192,81 @@ app = FastAPI(
 app.add_middleware(RequestIDMiddleware)
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+if origins:
+    cors_kwargs = {"allow_origins": origins, "allow_credentials": True}
+else:
+    # Never combine a wildcard origin with credentials (browsers reject it, and
+    # it would be a security hole if they didn't). No configured origins → block
+    # cross-origin requests rather than silently opening to "*".
+    logger.warning("CORS_ORIGINS is empty — cross-origin browser requests will be blocked")
+    cors_kwargs = {"allow_origins": [], "allow_credentials": False}
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins or ["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    **cors_kwargs,
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "JSONResponse":
+    """Catch-all so unexpected errors return a clean JSON 500 (with the request id
+    for log correlation) instead of leaking a stack trace."""
+    request_id = getattr(request.state, "request_id", None)
+    logger.exception("Unhandled error on %s %s (request_id=%s)", request.method, request.url.path, request_id)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "request_id": request_id},
+    )
 
 
 @app.get("/health")
 def health() -> dict:
+    """Liveness: the process is up. Cheap, never touches dependencies."""
     return {"status": "ok", "version": APP_VERSION, "llm_provider": settings.llm_provider}
+
+
+@app.get("/health/ready")
+def health_ready() -> JSONResponse:
+    """Readiness: verify the backing services (PostgreSQL, Redis, MinIO) respond.
+
+    Returns 503 if any dependency is unreachable so orchestrators don't route
+    traffic to a pod that can't actually serve requests."""
+    checks: dict[str, bool] = {}
+
+    try:
+        from sqlalchemy import text
+        from storage.db.session import session_scope
+
+        with session_scope() as db:
+            db.execute(text("SELECT 1"))
+        checks["database"] = True
+    except Exception:
+        logger.exception("readiness: database check failed")
+        checks["database"] = False
+
+    try:
+        import redis as _redis
+
+        client = _redis.from_url(settings.redis_url, socket_connect_timeout=1, socket_timeout=1)
+        checks["redis"] = bool(client.ping())
+    except Exception:
+        logger.exception("readiness: redis check failed")
+        checks["redis"] = False
+
+    try:
+        from storage.object_store.minio_client import ObjectStore
+
+        checks["minio"] = ObjectStore().is_available()
+    except Exception:
+        logger.exception("readiness: minio check failed")
+        checks["minio"] = False
+
+    ready = all(checks.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "checks": checks, "version": APP_VERSION},
+    )
 
 
 app.include_router(sessions.router)
@@ -196,6 +292,7 @@ app.include_router(analysis.router)
 app.include_router(updater.router)
 app.include_router(uploads.router)
 app.include_router(prints.router)
+app.include_router(exports.router)
 app.include_router(machine_settings.router)
 
 
