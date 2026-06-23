@@ -190,7 +190,7 @@ async def trigger_update() -> dict:
     await asyncio.get_running_loop().run_in_executor(None, _store_update_event, event)
     return {
         "ok": True,
-        "message": "Обновление запрошено. Закройте систему и запустите «Запустить.command» ещё раз — новая версия установится при следующем старте.",
+        "message": "Обновление запрошено. На macOS начнётся автоматически (~15 сек). На Windows — в течение 1 минуты (если установлена задача планировщика).",
     }
 
 

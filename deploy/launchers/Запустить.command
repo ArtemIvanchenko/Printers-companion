@@ -73,6 +73,17 @@ fi
 # Папка для связи с дашбордом (туда кнопка «Обновить» кладёт запрос).
 mkdir -p "$REPO_DIR/control"
 
+# Установить launchd-агент автообновления (один раз).
+# После этого кнопка «Обновить» в дашборде запускает пересборку мгновенно —
+# launchd видит появление update.request и вызывает update.sh без задержки.
+PLIST_SRC="$REPO_DIR/deploy/com.printers-companion.updater.plist"
+PLIST_DST="$HOME/Library/LaunchAgents/com.printers-companion.updater.plist"
+if [ -f "$PLIST_SRC" ] && [ ! -f "$PLIST_DST" ]; then
+  REPO_ABS="$(cd "$REPO_DIR" && pwd)"
+  sed "s|REPO_DIR|$REPO_ABS|g" "$PLIST_SRC" > "$PLIST_DST"
+  launchctl load "$PLIST_DST" 2>/dev/null && say "Агент автообновления установлен." || true
+fi
+
 # 5.5 Применить запрошенное обновление (если в прошлой сессии нажали «Обновить»)
 if [ -f "$REPO_DIR/control/update.request" ]; then
   say "Запрошено обновление — скачиваю новую версию и пересобираю…"

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.printers-companion.updater</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>REPO_DIR/update.sh</string>
+    </array>
+
+    <!-- Fire immediately when this file is created (button click in dashboard) -->
+    <key>WatchPaths</key>
+    <array>
+        <string>REPO_DIR/control/update.request</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>REPO_DIR/update.log</string>
+    <key>StandardErrorPath</key>
+    <string>REPO_DIR/update.log</string>
+
+    <!-- Do not run on load — only when WatchPaths fires -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

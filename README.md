@@ -148,7 +148,26 @@ docker compose logs -f api  # логи API в реальном времени
 
 Кнопка **«Обновить»** на вкладке «О системе» в дашборде.
 
-Или вручную из папки проекта:
+### macOS — автоматически
+
+При первом запуске `Запустить.command` устанавливается launchd-агент. После этого кнопка «Обновить» запускает пересборку мгновенно — без ручного рестарта.
+
+### Windows — автоматически
+
+Один раз запустить от **администратора** из папки проекта:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\install-updater-windows.ps1
+```
+
+После этого кнопка «Обновить» запускает пересборку в течение ~1 минуты.
+
+Удалить задачу:
+```powershell
+Unregister-ScheduledTask -TaskName PrintersCompanionUpdater -TaskPath '\PrintersCompanion\' -Confirm:$false
+```
+
+### Вручную
 
 ```bash
 git pull && GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
