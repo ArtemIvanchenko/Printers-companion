@@ -148,9 +148,11 @@ async def check_for_update() -> dict:
             data = r.json()
         latest_sha   = data["sha"]
         latest_short = latest_sha[:8]
-        update_available = current not in ("unknown", "") and current != latest_short
+        version_unknown = current in ("unknown", "")
+        update_available = not version_unknown and current != latest_short
         return {
             "update_available": update_available,
+            "version_unknown": version_unknown,
             "current_commit": current,
             "latest_commit": latest_short,
             "latest_date": data["commit"]["committer"]["date"],

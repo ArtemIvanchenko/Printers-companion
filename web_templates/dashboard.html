@@ -2105,13 +2105,8 @@
             // Кнопка «Обновить» доступна всегда — обновление можно запросить в любой
             // момент (git pull без новых коммитов просто ничего не меняет). Проверка
             // версии лишь подсказывает, есть ли что-то новое, но не блокирует кнопку.
-            if (btn) {
-                btn.disabled         = false;
-                btn.style.background  = '#3b82f6';
-                btn.style.color       = 'white';
-                btn.style.cursor      = 'pointer';
-            }
             if (dot) { dot.style.background = '#6b7280'; label.textContent = 'Проверка…'; }
+            if (btn) btn.style.display = 'none';
             try {
                 const d = await fetch('/admin/update/check').then(r => r.json());
                 if (d.latest_commit) {
@@ -2122,22 +2117,30 @@
                 if (d.update_available) {
                     dot.style.background   = '#f59e0b';
                     label.textContent      = `Доступно обновление → ${d.latest_commit}`;
+                    if (btn) { btn.style.display = ''; btn.disabled = false; btn.style.background = '#3b82f6'; btn.style.color = 'white'; btn.style.cursor = 'pointer'; }
                     if (!_updateDismissed && !_updatePolling) {
                         const banner = document.getElementById('update-banner');
                         const msg    = document.getElementById('update-banner-msg');
                         const dt     = d.latest_date ? new Date(d.latest_date).toLocaleString('ru') : '';
-                        msg.textContent     = `${d.latest_commit} · ${dt} — ${d.latest_message || ''}`;
+                        msg.textContent      = `${d.latest_commit} · ${dt} — ${d.latest_message || ''}`;
                         banner.style.display = 'flex';
                     }
                 } else if (d.error) {
                     dot.style.background = '#ef4444';
-                    label.textContent    = `Проверка версии недоступна — обновить можно вручную`;
+                    label.textContent    = 'Проверка версии недоступна';
+                    if (btn) { btn.style.display = ''; btn.disabled = false; btn.textContent = '🔄 Обновить вручную'; btn.style.background = '#374151'; btn.style.color = '#e2e8f0'; btn.style.cursor = 'pointer'; }
+                } else if (d.version_unknown) {
+                    dot.style.background = '#6b7280';
+                    label.textContent    = 'Запущенная версия неизвестна';
+                    if (btn) { btn.style.display = ''; btn.disabled = false; btn.style.background = '#374151'; btn.style.color = '#e2e8f0'; btn.style.cursor = 'pointer'; }
                 } else {
                     dot.style.background = '#10b981';
                     label.textContent    = 'Установлена последняя версия';
+                    // Кнопка скрыта — обновлять нечего
                 }
             } catch(e) {
-                if (dot) { dot.style.background = '#ef4444'; label.textContent = 'Проверка версии недоступна — обновить можно вручную'; }
+                if (dot) { dot.style.background = '#ef4444'; label.textContent = 'Проверка версии недоступна'; }
+                if (btn) { btn.style.display = ''; btn.disabled = false; btn.style.background = '#374151'; btn.style.color = '#e2e8f0'; }
             }
         }
 

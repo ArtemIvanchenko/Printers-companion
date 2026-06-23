@@ -90,26 +90,73 @@ async def rescan_logs() -> dict:
 
 
 def _trigger_rescan(path: str) -> None:
-    """Ask the API's startup-import logic to re-run in background."""
+    """Re-import files in the raw-logs folder that haven't been processed yet.
+
+    The heavy work (file I/O + log parsing) runs in a thread-pool worker so the
+    async event loop is never blocked — the API stays responsive during a scan.
+    """
     import asyncio
+
+    def _do_parse(folder: Path, known_paths: set[str]) -> tuple:
+        """Blocking work — runs in a thread via asyncio.to_thread."""
+        from domain.services.ingestion import IngestionService
+        from domain.services.session_grouping import group_files_into_sessions
+        from profiles.m350.profile import build_registry, get_profile
+
+        svc = IngestionService(build_registry(), get_profile())
+        # Scan first (cheap) so we can skip files already in source_files.
+        scan_result = svc.scan(folder)
+        new_files = [f for f in scan_result.files if f.path not in known_paths]
+        if not new_files:
+            return [], 0
+        # Parse only genuinely new files.
+        for item in new_files:
+            from parsers.context import ParserContext
+            profile = get_profile()
+            context = ParserContext(
+                profile_id=profile.profile_id,
+                profile_version=profile.version,
+                signal_mappings=profile.signal_mappings,
+            )
+            try:
+                item.parse_result = svc.registry.parse(Path(item.path), item.classification.family, context)
+            except Exception:
+                item.parse_result = None
+        groups = group_files_into_sessions(new_files)
+        return groups, len(new_files)
 
     async def _run() -> None:
         try:
-            from domain.services.ingestion import IngestionService
-            from domain.services.session_grouping import group_files_into_sessions
+            from domain.services.print_linking import auto_link_print_records
             from domain.services.session_overview import build_group_overview
-            from profiles.m350.profile import build_registry, get_profile
             from storage.db.session import session_scope
             from storage.repositories.runtime import RuntimeRepository
 
             folder = Path(path)
-            result = IngestionService(build_registry(), get_profile()).parse(folder)
-            groups = group_files_into_sessions(result.files)
+
+            # Fetch already-known file paths and session IDs before parsing.
             with session_scope() as db:
                 repo = RuntimeRepository(db)
-                existing = {sid for sid, _ in repo.list_session_payloads()}
+                existing_sessions = {sid for sid, _ in repo.list_session_payloads()}
+                from sqlalchemy import select, text
+                try:
+                    rows = db.execute(text("SELECT original_path FROM source_files")).fetchall()
+                    known_paths = {r[0] for r in rows}
+                except Exception:
+                    known_paths = set()
+
+            # CPU/IO-bound parsing runs in a thread — event loop stays free.
+            groups, n_parsed = await asyncio.to_thread(_do_parse, folder, known_paths)
+
+            if not groups:
+                logger.info("upload rescan: no new files found")
+                return
+
+            with session_scope() as db:
+                repo = RuntimeRepository(db)
+                imported = 0
                 for group in groups:
-                    if group.group_id in existing:
+                    if group.group_id in existing_sessions:
                         continue
                     overview = build_group_overview(
                         group.group_id, group.files,
@@ -118,21 +165,17 @@ def _trigger_rescan(path: str) -> None:
                     )
                     repo.save_session_payload(
                         group.group_id,
-                        # Strip parse_result (events): tiny payload; events re-read
-                        # from disk on demand (avoids ~96 MB/session in the DB).
                         {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
                     )
-                from domain.services.print_linking import auto_link_print_records
-
+                    imported += 1
                 auto_link_print_records(db)
-            logger.info("upload rescan: complete, %d groups", len(groups))
+            logger.info("upload rescan: %d new file(s) parsed, %d session(s) imported", n_parsed, imported)
         except Exception:
             logger.exception("upload rescan: failed")
 
     try:
         loop = asyncio.get_running_loop()
         task = loop.create_task(_run())
-        # Prevent GC from cancelling the task
         _RESCAN_TASKS.add(task)
         task.add_done_callback(_RESCAN_TASKS.discard)
     except RuntimeError:
