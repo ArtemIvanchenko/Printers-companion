@@ -79,75 +79,67 @@ class TestSlicer:
 
 
 class TestPrintTime:
-    def test_excel_mode_uses_physics_formula(self):
-        """Режим excel использует физическую формулу A/(hd·v) + P/v_c."""
-        from analytics.prediction.stl_slicer import SliceResult
-
-        s = SliceResult(
-            volume_mm3=132000, height_mm=60, layer_count=2000, layer_thickness_mm=0.03,
-            section_zs=[0.015], section_areas_mm2=[2270.0], section_perimeters_mm=[190.578],
-        )
-        params = {**PARAMS, "hatch_distance_mm": 0.12, "laser_count": 1,
-                  "contour_speed_mm_s": 430.0, "recoat_time_ms": None}
-        t = estimate_print_time(s, params, "steel", mode="excel")
-        assert t.method == "excel"
-        # t_section = (2270/0.12)/1000 + 190.578/430 = 18.917 + 0.443 = 19.36 s
-        # scan_hours = 19.36 × 2000 / 1 / 3600
-        expected = (2270.0 / 0.12 / 1000.0 + 190.578 / 430.0) * 2000 / 1 / 3600.0
-        assert t.scan_hours == pytest.approx(expected, rel=0.01)
-
-    def test_excel_mode_cube_math(self):
-        # t_section = (100/0.1)/1000 + 40/500 = 1.0 + 0.08 = 1.08 s
-        # scan_hours = 1.08 × 200 / 2 / 3600
+    def test_pyslm_uses_real_vectors(self):
         s = slice_stl(CUBE_STL, 0.05)
-        t = estimate_print_time(s, PARAMS, "steel", mode="excel")
-        expected_scan_h = 1.08 * 200 / 2 / 3600
-        assert t.scan_hours == pytest.approx(expected_scan_h, rel=0.01)
-        assert t.recoat_hours == pytest.approx(200 * 9.0 / 3600, abs=0.01)
-
-    def test_pyslm_mode_uses_real_vectors(self):
-        s = slice_stl(CUBE_STL, 0.05)
-        t = estimate_print_time(s, PARAMS, "steel", stl_bytes=CUBE_STL, mode="pyslm")
+        t = estimate_print_time(s, PARAMS, "steel", stl_bytes=CUBE_STL)
         assert t.method == "pyslm"
+        assert t.breakdown["build_axis"] == "Z"
+        assert t.breakdown["layer_count"] == 200
         # Физика: ~(100/0.1)/1000 + 40/500 = 1.08 c/слой → ×200/2 = 108 c
         assert t.scan_hours == pytest.approx(108 / 3600, rel=0.35)
+        assert t.recoat_hours == pytest.approx(200 * 9.0 / 3600, abs=0.01)
 
-    def test_pyslm_mode_without_bytes_degrades_to_physics(self):
+    def test_without_bytes_raises(self):
+        """Нет fallback на кривую формулу — без траекторий честная ошибка."""
         s = slice_stl(CUBE_STL, 0.05)
-        t = estimate_print_time(s, PARAMS, "steel", mode="pyslm")  # без stl_bytes
-        assert t.method == "physics"
-        assert any("PySLM" in w for w in t.warnings)
+        with pytest.raises(EstimationError):
+            estimate_print_time(s, PARAMS, "steel")  # без stl_bytes → PySLM не запустить
+
+    def test_per_material_correction_scales_total(self):
+        s = slice_stl(CUBE_STL, 0.05)
+        base = estimate_print_time(s, PARAMS, "steel", stl_bytes=CUBE_STL)
+        corrected = estimate_print_time(
+            s, {**PARAMS, "time_correction_by_mat": {"steel": 1.5}}, "steel", stl_bytes=CUBE_STL,
+        )
+        assert corrected.correction_factor == 1.5
+        assert corrected.print_hours == pytest.approx(base.print_hours * 1.5, rel=0.01)
+        # raw остаётся некалиброванным — на нём строится обучение
+        assert corrected.raw_print_hours == pytest.approx(base.raw_print_hours, rel=0.01)
+
+    def test_per_material_factor_overrides_global(self):
+        s = slice_stl(CUBE_STL, 0.05)
+        params = {**PARAMS, "time_correction_factor": 2.0,
+                  "time_correction_by_mat": {"steel": 1.2}}
+        steel = estimate_print_time(s, params, "steel", stl_bytes=CUBE_STL)
+        alu = estimate_print_time(s, params, "aluminum", stl_bytes=CUBE_STL)  # нет в by_mat → глобальный
+        assert steel.correction_factor == 1.2
+        assert alu.correction_factor == 2.0
 
     def test_material_hatch_speed_override(self):
         params = {**PARAMS, "hatch_speeds_by_mat": {"steel": 2000.0}}
         s = slice_stl(CUBE_STL, 0.05)
-        fast = estimate_print_time(s, params, "steel", mode="excel")
-        slow = estimate_print_time(s, params, "aluminum", mode="excel")  # фоллбэк на 1000
+        fast = estimate_print_time(s, params, "steel", stl_bytes=CUBE_STL)
+        slow = estimate_print_time(s, params, "aluminum", stl_bytes=CUBE_STL)  # фоллбэк на 1000
         assert fast.scan_hours < slow.scan_hours
 
     def test_missing_speed_raises(self):
         s = slice_stl(CUBE_STL, 0.05)
         with pytest.raises(EstimationError):
-            estimate_print_time(s, {**PARAMS, "hatch_speed_mm_s": None}, "steel")
+            estimate_print_time(s, {**PARAMS, "hatch_speed_mm_s": None}, "steel", stl_bytes=CUBE_STL)
 
     def test_missing_hatch_distance_raises(self):
         s = slice_stl(CUBE_STL, 0.05)
         with pytest.raises(EstimationError):
-            estimate_print_time(s, {**PARAMS, "hatch_distance_mm": None}, "steel")
+            estimate_print_time(s, {**PARAMS, "hatch_distance_mm": None}, "steel", stl_bytes=CUBE_STL)
 
     def test_missing_lasers_raises(self):
         s = slice_stl(CUBE_STL, 0.05)
         with pytest.raises(EstimationError):
-            estimate_print_time(s, {**PARAMS, "laser_count": None}, "steel")
-
-    def test_unknown_mode_raises(self):
-        s = slice_stl(CUBE_STL, 0.05)
-        with pytest.raises(EstimationError):
-            estimate_print_time(s, PARAMS, "steel", mode="magic")
+            estimate_print_time(s, {**PARAMS, "laser_count": None}, "steel", stl_bytes=CUBE_STL)
 
     def test_missing_recoat_uses_default(self):
         s = slice_stl(CUBE_STL, 0.05)
-        t = estimate_print_time(s, {**PARAMS, "recoat_time_ms": None}, "steel", mode="excel")
+        t = estimate_print_time(s, {**PARAMS, "recoat_time_ms": None}, "steel", stl_bytes=CUBE_STL)
         # Дефолт 9500 мс/слой, 200 слоёв
         assert t.recoat_hours == pytest.approx(200 * 9.5 / 3600, rel=0.01)
         assert any("9.5" in w for w in t.warnings)
@@ -156,7 +148,7 @@ class TestPrintTime:
 class TestCost:
     def _time(self, params=PARAMS):
         s = slice_stl(CUBE_STL, 0.05)
-        return s, estimate_print_time(s, params, "steel", mode="excel")
+        return s, estimate_print_time(s, params, "steel", stl_bytes=CUBE_STL)
 
     def test_all_items_present(self):
         s, t = self._time()
@@ -203,32 +195,30 @@ class TestStlEstimateEndpoint:
         })
         assert put.status_code == 200 and put.json()["configured"]
 
-        fast = client.post(
-            "/upload/stl-estimate?material=steel&method=fast",
+        r = client.post(
+            "/upload/stl-estimate?material=steel",
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
         )
-        assert fast.status_code == 200
-        pred = fast.json()["prediction"]
+        assert r.status_code == 200
+        pred = r.json()["prediction"]
         assert pred["available"] is True
         assert pred["layer_count"] == 200
+        assert pred["build_axis"] == "Z"
         assert pred["print_hours"] > 0
-        assert pred["method"] == "excel"
+        assert pred["method"] == "pyslm"
+        assert pred["correction_factor"] == 1.0
         assert pred["cost_breakdown"].get("порошок") is not None
 
-        accurate = client.post(
-            "/upload/stl-estimate?material=steel&method=accurate",
-            files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
-        )
-        pred_acc = accurate.json()["prediction"]
-        assert pred_acc["method"] in ("pyslm", "physics")
-        assert pred_acc["print_hours"] > 0
-
-    def test_invalid_method_rejected(self, client):
+    def test_no_misleading_historical_fallback(self, client):
+        """Без истории avg_session_hours = None, а не магические 0.8 ч."""
         r = client.post(
-            "/upload/stl-estimate?method=guess",
+            "/upload/stl-estimate?material=steel",
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
         )
-        assert r.status_code == 422
+        assert r.status_code == 200
+        est = r.json()["estimate"]
+        if not est["sessions_used"]:
+            assert est["avg_session_hours"] is None
 
     def test_hatch_distance_override(self, client):
         client.put("/settings/machine", json={
@@ -236,13 +226,13 @@ class TestStlEstimateEndpoint:
             "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9500,
             "powder_cost_rub_per_kg": 7000, "material_densities": {"steel": 7.9},
         })
-        # Шаг штриховки 0.12 (override) → меньше сканирования, чем при 0.10 из параметров
+        # Шаг штриховки 0.12 (override) → меньше сканирования, чем при 0.06
         wide = client.post(
-            "/upload/stl-estimate?material=steel&method=fast&hatch_distance_mm=0.12",
+            "/upload/stl-estimate?material=steel&hatch_distance_mm=0.12",
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
         )
         narrow = client.post(
-            "/upload/stl-estimate?material=steel&method=fast&hatch_distance_mm=0.06",
+            "/upload/stl-estimate?material=steel&hatch_distance_mm=0.06",
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
         )
         assert wide.status_code == 200 and narrow.status_code == 200

@@ -1,9 +1,16 @@
 # syntax=docker/dockerfile:1.7
+# worker image — ingestion + JSON report generation. Needs the light analytics tier
+# (polars for telemetry parsing, scipy for robust stats) but none of the heavy
+# ML / SLM / 3D packages. Carries: base + analytics.
 FROM ghcr.io/artemivanchenko/printers-companion:base
+
+COPY requirements.analytics.txt /app/
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off -r requirements.analytics.txt
 
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 --no-deps -e .
+    pip install --progress-bar off --no-deps -e .
 USER app
 
 ARG APP_VERSION=dev

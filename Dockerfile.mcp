@@ -1,24 +1,15 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.11-slim
+# mcp image — Model Context Protocol server. Needs only the core tier plus the `mcp`
+# package; no analytics. Inherits FROM base so it shares the core layer with every
+# other service instead of duplicating a standalone python:3.11-slim install.
+FROM ghcr.io/artemivanchenko/printers-companion:base
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_DEFAULT_TIMEOUT=120
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off "mcp>=1.0.0"
 
-RUN groupadd --system app && useradd --system --gid app --uid 10001 app
-WORKDIR /app
-
-COPY pyproject.toml README.md requirements.base.txt requirements.heavy.txt /app/
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip setuptools wheel
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 -r requirements.base.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 "mcp>=1.0.0"
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 --no-deps -e .
+    pip install --progress-bar off --no-deps -e .
 
 EXPOSE 8100
 USER app

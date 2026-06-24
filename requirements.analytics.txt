@@ -1,0 +1,7 @@
+# Light analytics tier — pure-Python / pre-built-wheel packages, no compiler needed.
+# Used by worker (telemetry parsing + robust stats during report generation),
+# scheduler (causal graph in background re-analysis) and api (which also pulls
+# requirements.heavy.txt on top). Reached only via lazy imports at runtime.
+polars==0.20.31
+scipy==1.13.1
+networkx>=3.3

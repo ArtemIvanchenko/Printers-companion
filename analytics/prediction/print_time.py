@@ -1,18 +1,17 @@
-"""Print-time estimation for SLM builds.
+"""Print-time estimation for SLM builds — PySLM vector engine only.
 
-Two operator-selectable modes:
+The estimate hatches a sample of layers with PySLM and times the **real scan
+vectors** (hatch + contour + laser-off jumps and delays), then scales to the
+true layer count and divides across lasers. There is no longer a fast "Excel"
+area formula: it systematically under-predicted (ignored jumps, supports and
+everything outside the single sliced part) and only misled the operator. When
+PySLM cannot build the trajectories for a file we raise ``EstimationError``
+rather than return a wrong number.
 
-* ``excel`` («рассчитать быстро») — fast analytic estimate, per section
-  ``t = A/(hd·v) + P/v_contour`` (area scanned at hatch spacing + contour),
-  scaled to layer count and divided across lasers. Quick, but it ignores
-  laser jumps/delays and any geometry not in the sliced part (supports,
-  extra copies), so on real builds it UNDER-predicts — treat it as a rough
-  lower bound. ("excel" is a legacy mode id; the original operator
-  spreadsheet was replaced by this physics formula.)
-
-* ``pyslm`` («рассчитать точно») — PySLM hatches sample layers and times the
-  real scan vectors. Needs ``stl_bytes``; degrades to the fast formula when
-  PySLM is unavailable.
+Accuracy is closed-loop: the raw geometric estimate (``raw_print_hours``) is
+multiplied by a calibration factor learned per material from predicted-vs-actual
+history (``time_correction_by_mat`` → falls back to the global
+``time_correction_factor``). See ``analytics.prediction.accuracy``.
 
 ``hatch_speed_mm_s`` is the real laser speed (mm/s); ``hatch_distance_mm`` is
 required. Machine parameters come from the machine_params table; the only
@@ -49,11 +48,13 @@ class EstimationError(ValueError):
 
 @dataclass
 class PrintTimeEstimate:
-    scan_hours: float           # laser-on time, already divided across lasers
+    scan_hours: float           # laser-on time, divided across lasers (after correction)
     recoat_hours: float         # powder recoating, sequential regardless of lasers
-    print_hours: float          # scan + recoat = machine busy time
+    print_hours: float          # scan + recoat = machine busy time (after correction)
     total_days: float           # continuous printing, 24 h/day
-    method: str                 # "excel" (fast area formula) | "pyslm" | "physics"
+    method: str                 # "pyslm"
+    raw_print_hours: float = 0.0    # geometric estimate BEFORE calibration (for accuracy loop)
+    correction_factor: float = 1.0  # calibration multiplier applied (per-material → global)
     breakdown: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
@@ -73,17 +74,17 @@ def _resolve_params(params: dict, material: str) -> tuple[float, float, float, i
     return float(hatch_speed), float(contour_speed), float(hatch_distance), laser_count
 
 
-def _physics_section_times(
-    slices: SliceResult, hatch_speed: float, contour_speed: float, hatch_distance: float,
-) -> list[float]:
-    """Per-section time, seconds — scan path = area/hatch_distance + contours."""
-    times = []
-    for area, perimeter in zip(slices.section_areas_mm2, slices.section_perimeters_mm):
-        t = (area / hatch_distance) / hatch_speed
-        if contour_speed > 0:
-            t += perimeter / contour_speed
-        times.append(t)
-    return times
+def resolve_correction_factor(params: dict, material: str) -> float:
+    """Calibration multiplier for this material: per-material → global → 1.0."""
+    by_mat = params.get("time_correction_by_mat") or {}
+    factor = by_mat.get(material)
+    if factor is None:
+        factor = params.get("time_correction_factor")
+    try:
+        factor = float(factor)
+    except (TypeError, ValueError):
+        return 1.0
+    return factor if factor > 0 else 1.0
 
 
 def _pyslm_layer_metrics(
@@ -174,56 +175,40 @@ def estimate_print_time(
     params: dict,
     material: str,
     stl_bytes: bytes | None = None,
-    mode: str = "excel",
 ) -> PrintTimeEstimate:
-    """Estimate machine time from sliced geometry and machine parameters.
+    """Estimate machine time from real PySLM scan trajectories.
 
-    mode="excel"  — быстрая аналитическая формула по площади сечения («быстро»);
-                    занижает на реальных сборках (без перескоков/поддержек).
-    mode="pyslm"  — реальные траектории PySLM («точно»); требует stl_bytes,
-                    при сбое деградирует к физической формуле с предупреждением.
+    Build direction is the STL's +Z axis (the slicer's layer-stacking axis);
+    ``slices`` already carries the layer count / height for that orientation.
+
+    Raises ``EstimationError`` when PySLM cannot build trajectories for the
+    file — we never silently fall back to a less accurate formula.
     """
     hatch_speed, contour_speed, hatch_distance, laser_count = _resolve_params(params, material)
     recoat_ms = params.get("recoat_time_ms")
     warnings: list[str] = list(slices.warnings)
 
-    def _physics_scan_seconds() -> float:
-        """Fast area formula: mean section time × layers / lasers."""
-        section_times = _physics_section_times(slices, hatch_speed, contour_speed, hatch_distance)
-        mean = sum(section_times) / len(section_times) if section_times else 0.0
-        return mean * slices.layer_count / laser_count
+    if not contour_speed:
+        warnings.append("Скорость контуров не задана — контуры не учтены.")
 
-    if mode == "excel":
-        method = "excel"
-        scan_seconds = _physics_scan_seconds()
-    elif mode == "pyslm":
-        method = "pyslm"
-        if not contour_speed:
-            warnings.append("Скорость контуров не задана — контуры не учтены.")
-        metrics = _pyslm_layer_metrics(stl_bytes, slices, hatch_distance) \
-            if stl_bytes is not None else None
-        if metrics is not None:
-            hatch_len, contour_len, jump_len, n_jumps = metrics
-            jump_speed = params.get("jump_speed_mm_s") or _DEFAULT_JUMP_SPEED_MM_S
-            jump_delay_s = (params.get("jump_delay_ms") or _DEFAULT_JUMP_DELAY_MS) / 1000.0
-            # Время слоя по реальным векторам: прожиг + контур + перескоки + задержки
-            layer_seconds = hatch_len / hatch_speed
-            if contour_speed > 0:
-                layer_seconds += contour_len / contour_speed
-            layer_seconds += jump_len / jump_speed + n_jumps * jump_delay_s
-            scan_seconds = layer_seconds * slices.layer_count / laser_count
-            if not params.get("jump_speed_mm_s"):
-                warnings.append("Скорость перескока не задана — взято значение по умолчанию.")
-        else:
-            method = "physics"
-            warnings.append("PySLM-хэтчинг недоступен — использована быстрая формула без перескоков.")
-            scan_seconds = _physics_scan_seconds()
-        # Поправка по истории predicted-vs-actual (учёт остаточных эффектов)
-        correction = params.get("time_correction_factor")
-        if correction and correction > 0:
-            scan_seconds *= float(correction)
-    else:
-        raise EstimationError(f"Неизвестный режим расчёта: {mode}")
+    metrics = _pyslm_layer_metrics(stl_bytes, slices, hatch_distance) if stl_bytes is not None else None
+    if metrics is None:
+        raise EstimationError(
+            "Точный расчёт недоступен: не удалось построить траектории PySLM. "
+            "Проверьте STL (геометрия, ориентация, масштаб)."
+        )
+
+    hatch_len, contour_len, jump_len, n_jumps = metrics
+    jump_speed = params.get("jump_speed_mm_s") or _DEFAULT_JUMP_SPEED_MM_S
+    jump_delay_s = (params.get("jump_delay_ms") or _DEFAULT_JUMP_DELAY_MS) / 1000.0
+    # Время слоя по реальным векторам: прожиг + контур + перескоки + задержки
+    layer_seconds = hatch_len / hatch_speed
+    if contour_speed > 0:
+        layer_seconds += contour_len / contour_speed
+    layer_seconds += jump_len / jump_speed + n_jumps * jump_delay_s
+    scan_seconds = layer_seconds * slices.layer_count / laser_count
+    if not params.get("jump_speed_mm_s"):
+        warnings.append("Скорость перескока не задана — взято значение по умолчанию.")
 
     if recoat_ms:
         recoat_seconds = slices.layer_count * float(recoat_ms) / 1000.0
@@ -234,19 +219,29 @@ def estimate_print_time(
             f"{_DEFAULT_RECOAT_MS / 1000:.1f} с/слой."
         )
 
-    scan_hours = scan_seconds / 3600.0
-    recoat_hours = recoat_seconds / 3600.0
-    print_hours = scan_hours + recoat_hours
+    raw_scan_hours = scan_seconds / 3600.0
+    raw_recoat_hours = recoat_seconds / 3600.0
+    raw_print_hours = raw_scan_hours + raw_recoat_hours
 
-    # Full precision here; API layers round for display
+    # Calibration: scale the whole estimate by the per-material factor learned
+    # from predicted-vs-actual history (so total print_hours tracks reality).
+    factor = resolve_correction_factor(params, material)
+    scan_hours = raw_scan_hours * factor
+    recoat_hours = raw_recoat_hours * factor
+    print_hours = raw_print_hours * factor
+
     return PrintTimeEstimate(
         scan_hours=scan_hours,
         recoat_hours=recoat_hours,
         print_hours=print_hours,
         total_days=print_hours / 24.0,
-        method=method,
+        method="pyslm",
+        raw_print_hours=raw_print_hours,
+        correction_factor=factor,
         breakdown={
+            "build_axis": "Z",  # построение вдоль Z, плита = z_min
             "layer_count": slices.layer_count,
+            "height_mm": round(slices.height_mm, 2),
             "avg_section_area_mm2": round(slices.avg_area_mm2, 1),
             "avg_section_perimeter_mm": round(slices.avg_perimeter_mm, 1),
             "hatch_speed": hatch_speed,
@@ -254,6 +249,7 @@ def estimate_print_time(
             "hatch_distance_mm": hatch_distance,
             "laser_count": laser_count,
             "material": material,
+            "correction_factor": factor,
         },
         warnings=warnings,
     )

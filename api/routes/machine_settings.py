@@ -23,7 +23,8 @@ _NUMERIC_FIELDS = {
     "build_area_cm2", "time_correction_factor",
 }
 _INT_FIELDS = {"laser_count"}
-_DICT_FIELDS = {"material_densities", "hatch_speeds_by_mat"}
+_DICT_FIELDS = {"material_densities", "hatch_speeds_by_mat", "time_correction_by_mat"}
+_BOOL_FIELDS = {"correction_locked"}
 
 # Fields the time/cost estimators cannot work without
 _REQUIRED_FOR_ESTIMATION = (
@@ -46,6 +47,8 @@ def get_machine_params(repo: PrintsRepository = Depends(get_prints_repository)) 
         params = {field: None for field in _PARAM_FIELDS}
         params["material_densities"] = {}
         params["hatch_speeds_by_mat"] = {}
+        params["time_correction_by_mat"] = {}
+        params["correction_locked"] = False
         params["updated_at"] = None
     return {"params": params, "configured": params_configured(params)}
 
@@ -90,7 +93,15 @@ def update_machine_params(
                 except (TypeError, ValueError):
                     raise HTTPException(422, f"Значение '{key}.{mat}' должно быть числом")
             values[key] = cleaned
+        elif key in _BOOL_FIELDS:
+            values[key] = bool(raw)
         # Unknown keys are ignored — keeps the endpoint forward-compatible
+
+    # Manually editing a correction factor pins it: auto-calibration must not
+    # overwrite the operator's value unless they explicitly unlock.
+    if ("time_correction_by_mat" in values or "time_correction_factor" in values) \
+            and "correction_locked" not in values:
+        values["correction_locked"] = True
 
     if not values:
         raise HTTPException(422, "Нет известных полей для обновления")

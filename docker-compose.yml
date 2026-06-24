@@ -160,7 +160,7 @@ services:
     image: ghcr.io/artemivanchenko/printers-companion:watcher
     build:
       context: .
-      dockerfile: Dockerfile.worker
+      dockerfile: Dockerfile.watcher
     command: python -m worker.watcher
     volumes:
       - type: bind

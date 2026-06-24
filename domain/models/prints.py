@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from storage.db.base import Base
@@ -92,9 +92,13 @@ class MachineParams(Base):
     # Distance between hatch lines. When set, hatch_speed is the real laser
     # speed (mm/s); when NULL the Excel-style areal rate (mm²/s) is assumed.
     hatch_distance_mm: Mapped[float | None] = mapped_column(Float)
-    # Multiplier applied to the PySLM/physics scan time; calibrated from
-    # predicted-vs-actual history (1.0 = no correction).
+    # Global multiplier applied to the PySLM print time; calibrated from
+    # predicted-vs-actual history (1.0 = no correction). Kept as a fallback for
+    # materials that have no per-material factor yet (see time_correction_by_mat).
     time_correction_factor: Mapped[float | None] = mapped_column(Float)
+    # When True the operator has pinned the correction factor(s) manually —
+    # auto-calibration must not overwrite them.
+    correction_locked: Mapped[bool] = mapped_column(Boolean, default=False)
     layer_thickness_mm: Mapped[float | None] = mapped_column(Float)
     laser_count: Mapped[int | None] = mapped_column(Integer)
     recoat_time_ms: Mapped[float | None] = mapped_column(Float)
@@ -112,5 +116,8 @@ class MachineParams(Base):
     # Per-material maps: {"steel": 7.9, "aluminum": 2.7, ...}
     material_densities: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
     hatch_speeds_by_mat: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
+    # Per-material time-correction factors: {"steel": 1.15, "aluminum": 1.08, ...}
+    # Auto-calibrated from predicted-vs-actual history per material.
+    time_correction_by_mat: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
     build_area_cm2: Mapped[float | None] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

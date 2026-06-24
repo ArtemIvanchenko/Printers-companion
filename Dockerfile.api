@@ -1,9 +1,31 @@
 # syntax=docker/dockerfile:1.7
+# api image — the only service that runs the heavy SLM / ML / 3D code paths
+# (STL slicing, print-time, defect-risk ML, cross-session change-point) inline.
+# Carries: base + analytics + heavy.
 FROM ghcr.io/artemivanchenko/printers-companion:base
+
+# Analytics tier (pre-built wheels, no compiler needed).
+COPY requirements.analytics.txt /app/
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off -r requirements.analytics.txt
+
+# Heavy tier. Two kinds of native deps:
+#   - libgomp1: OpenMP runtime that lightgbm dlopen's at import time — must PERSIST.
+#     Installed explicitly (marked manual) so the --auto-remove below won't strip it.
+#   - build-essential/cmake: needed only to compile PythonSLM + pymeshfix C extensions,
+#     purged afterwards to keep the layer small.
+COPY requirements.heavy.txt /app/
+RUN --mount=type=cache,target=/root/.cache/pip \
+    apt-get update -qq \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends build-essential cmake \
+    && pip install --progress-bar off -r requirements.heavy.txt \
+    && apt-get purge -y --auto-remove build-essential cmake \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 --no-deps -e .
+    pip install --progress-bar off --no-deps -e .
 # Create writable directories before dropping to the app user.
 RUN mkdir -p /app/logs && chown app:app /app/logs
 USER app

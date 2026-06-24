@@ -1,6 +1,6 @@
 """Tests for Phase 3: predicted-vs-actual, calibration, shifts (ruptures), LightGBM."""
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import trimesh
@@ -17,17 +17,22 @@ CUBE_STL = trimesh.creation.box(extents=[10, 10, 10]).export(file_type="stl")
 
 
 class TestAccuracyReport:
-    def _seed_pair(self, db, idx: int, predicted: float, actual_hours: float) -> None:
-        start = datetime(2028, 1, idx, 8, 0, tzinfo=timezone.utc)
-        end = start.replace(hour=8 + int(actual_hours), minute=int((actual_hours % 1) * 60))
+    def _seed_pair(self, db, idx: int, raw_predicted: float, actual_hours: float,
+                   material: str = "steel") -> None:
+        start = datetime(2028, 1, 1, 8, 0, tzinfo=timezone.utc) + timedelta(days=idx)
+        end = start + timedelta(hours=actual_hours)
         sid = f"s_acc_{idx}"
         db.add(BuildSession(session_id=sid, status="x", context={}, start_ts=start, end_ts=end))
         db.add(PrintRecord(
-            record_id=f"pr_acc_{idx}", name=f"acc{idx}", session_id=sid,
+            record_id=f"pr_acc_{idx}", name=f"acc{idx}", session_id=sid, material=material,
             metadata_json={"prediction": {
                 "estimated_at": start.isoformat(),
-                "fast": {"method": "excel", "print_hours": predicted * 3, "cost_total_rub": 1},
-                "accurate": {"method": "pyslm", "print_hours": predicted, "cost_total_rub": 1},
+                "material": material,
+                "method": "pyslm",
+                "print_hours": raw_predicted,
+                "raw_print_hours": raw_predicted,
+                "correction_factor": 1.0,
+                "cost_total_rub": 1,
             }},
         ))
 
@@ -35,23 +40,64 @@ class TestAccuracyReport:
         from analytics.prediction.accuracy import prediction_accuracy
 
         with SessionLocal() as db:
-            # 3 пары: точный прогноз 2ч, факт 4ч → ratio 2.0
+            # 3 пары: сырой прогноз 2ч, факт 4ч → ratio 2.0
             for i in (1, 2, 3):
-                self._seed_pair(db, i, predicted=2.0, actual_hours=4.0)
+                self._seed_pair(db, i, raw_predicted=2.0, actual_hours=4.0)
             db.flush()
             report = prediction_accuracy(db)
             db.rollback()
 
         assert report["n_pairs"] >= 3
         assert report["suggested_correction_factor"] == pytest.approx(2.0, abs=0.1)
+        assert report["by_material"]["steel"]["suggested_factor"] == pytest.approx(2.0, abs=0.1)
         row = next(r for r in report["pairs"] if r["record_id"] == "pr_acc_1")
         assert row["actual_hours"] == pytest.approx(4.0, abs=0.1)
-        assert row["accurate_error_pct"] == pytest.approx(-50.0, abs=2)
+        assert row["error_pct"] == pytest.approx(-50.0, abs=2)
+
+    def test_recalibrate_applies_per_material_within_bounds(self):
+        from analytics.prediction.accuracy import recalibrate_and_apply
+        from storage.repositories.prints_repo import PrintsRepository
+
+        with SessionLocal() as db:
+            repo = PrintsRepository(db)
+            repo.save_machine_params({"hatch_speed_mm_s": 1000, "laser_count": 1})
+            # steel: ratio 1.3 (in range) → applied; aluminum: ratio 5.0 (out of range) → skipped
+            for i in (10, 11, 12):
+                self._seed_pair(db, i, raw_predicted=10.0, actual_hours=13.0, material="steel")
+            for i in (20, 21, 22):
+                self._seed_pair(db, i, raw_predicted=2.0, actual_hours=10.0, material="aluminum")
+            db.flush()
+            result = recalibrate_and_apply(db)
+            params = repo.get_machine_params()
+            db.rollback()
+
+        assert result["applied"].get("steel") == pytest.approx(1.3, abs=0.05)
+        assert (params["time_correction_by_mat"] or {}).get("steel") == pytest.approx(1.3, abs=0.05)
+        assert "aluminum" not in result["applied"]
+        assert any(s["material"] == "aluminum" for s in result["skipped"])
+
+    def test_recalibrate_respects_manual_lock(self):
+        from analytics.prediction.accuracy import recalibrate_and_apply
+        from storage.repositories.prints_repo import PrintsRepository
+
+        with SessionLocal() as db:
+            repo = PrintsRepository(db)
+            repo.save_machine_params({"hatch_speed_mm_s": 1000, "correction_locked": True})
+            for i in (30, 31, 32):
+                self._seed_pair(db, i, raw_predicted=10.0, actual_hours=13.0, material="steel")
+            db.flush()
+            result = recalibrate_and_apply(db)
+            db.rollback()
+
+        assert result["locked"] is True
+        assert result["applied"] == {}
 
     def test_endpoint(self):
         r = client.get("/prints/prediction-accuracy")
         assert r.status_code == 200
-        assert "suggested_correction_factor" in r.json()
+        body = r.json()
+        assert "suggested_correction_factor" in body
+        assert "by_material" in body
 
 
 class TestCorrectionFactor:
@@ -65,13 +111,14 @@ class TestCorrectionFactor:
             "recoat_time_ms": None, "material_densities": {}, "hatch_speeds_by_mat": {},
         }
         s = slice_stl(CUBE_STL, 0.05)
-        base = estimate_print_time(s, params, "steel", mode="pyslm")
-        doubled = estimate_print_time(s, {**params, "time_correction_factor": 2.0}, "steel", mode="pyslm")
+        base = estimate_print_time(s, params, "steel", stl_bytes=CUBE_STL)
+        doubled = estimate_print_time(
+            s, {**params, "time_correction_factor": 2.0}, "steel", stl_bytes=CUBE_STL)
+        # Коэффициент масштабирует всю оценку (скан, отсыпку и итог)
         assert doubled.scan_hours == pytest.approx(base.scan_hours * 2, rel=0.01)
-        # Excel-режим коэффициентом не трогаем — формула уже откалибрована оператором
-        excel = estimate_print_time(s, {**params, "time_correction_factor": 2.0}, "steel", mode="excel")
-        excel_base = estimate_print_time(s, params, "steel", mode="excel")
-        assert excel.scan_hours == pytest.approx(excel_base.scan_hours, rel=0.001)
+        assert doubled.print_hours == pytest.approx(base.print_hours * 2, rel=0.01)
+        # raw остаётся некалиброванным — основа для обучения
+        assert doubled.raw_print_hours == pytest.approx(base.raw_print_hours, rel=0.01)
 
 
 class TestEstimateRecordEndpoint:
@@ -101,10 +148,11 @@ class TestEstimateRecordEndpoint:
         r = client.post(f"/prints/{rec['record_id']}/estimate")
         assert r.status_code == 200
         snap = r.json()["prediction"]
-        assert snap["fast"]["print_hours"] > 0
-        assert snap["accurate"]["print_hours"] > 0
+        assert snap["print_hours"] > 0
+        assert snap["raw_print_hours"] > 0
+        assert snap["method"] == "pyslm"
         stored = client.get(f"/prints/{rec['record_id']}").json()
-        assert stored["metadata_json"]["prediction"]["fast"]["method"] == "excel"
+        assert stored["metadata_json"]["prediction"]["method"] == "pyslm"
 
     def test_estimate_two_stl_aggregates_correctly(self, monkeypatch):
         """Платформа из 2 STL: scan=Σ, recoat=max, объём=Σ."""
@@ -157,8 +205,8 @@ class TestEstimateRecordEndpoint:
         snap2 = client.post(f"/prints/{rec2['record_id']}/estimate").json()["prediction"]
 
         # scan ≈ Σ одиночных (разные высоты → разные recoat)
-        combined_hours = snap["fast"]["print_hours"]
-        assert combined_hours > max(snap1["fast"]["print_hours"], snap2["fast"]["print_hours"])
+        combined_hours = snap["print_hours"]
+        assert combined_hours > max(snap1["print_hours"], snap2["print_hours"])
 
     def test_estimate_without_stl_422(self):
         rec = client.post("/prints", json={"name": "без stl"}).json()
@@ -192,8 +240,8 @@ class TestEstimateRecordEndpoint:
         stored = client.get(f"/prints/{rec['record_id']}").json()
         pred = (stored["metadata_json"] or {}).get("prediction")
         assert pred is not None
-        assert pred["fast"]["print_hours"] > 0
-        assert pred["accurate"]["print_hours"] > 0
+        assert pred["print_hours"] > 0
+        assert pred["raw_print_hours"] > 0
 
     def test_auto_estimate_skipped_without_params(self, monkeypatch):
         """Без параметров машины загрузка STL не падает — прогноз просто пропускается."""

@@ -1,10 +1,13 @@
-polars==0.20.31
-scipy==1.13.1
+# Heavy ML / SLM / 3D-geometry tier — installed ONLY in the api image, which runs
+# STL slicing, print-time estimation, defect-risk ML and cross-session change-point
+# detection inline in its route handlers. PythonSLM + pymeshfix compile C extensions
+# (build-essential + cmake are installed and purged in Dockerfile.api).
+# Requires requirements.analytics.txt (polars, scipy, networkx) to be installed first.
 scikit-learn==1.4.2
-statsmodels==0.14.2
+lightgbm==4.6.0
 trimesh==4.12.2
 shapely==2.1.2
+rtree==1.4.1
 PythonSLM==0.6.1
 pymeshfix==0.18.1
 ruptures==1.1.10
-lightgbm==4.6.0

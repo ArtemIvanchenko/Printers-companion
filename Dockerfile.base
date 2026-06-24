@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1.7
-# Shared base image — heavy Python dependencies that change rarely.
-# Built once; api / worker / scheduler inherit FROM this.
-# Rebuild only when requirements or pinned versions change.
+# Shared base image — CORE web/infra dependencies only (no analytics / ML / 3D).
+# Every service inherits FROM this and layers on its own tier:
+#   watcher  -> base only            (Dockerfile.watcher)
+#   mcp      -> base + mcp pkg        (Dockerfile.mcp)
+#   worker   -> base + analytics      (Dockerfile.worker)
+#   scheduler-> base + analytics      (Dockerfile.scheduler)
+#   api      -> base + analytics + heavy (Dockerfile.api)
+# Rebuild only when requirements.base.txt or pinned versions change.
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -14,41 +19,10 @@ RUN groupadd --system app && useradd --system --gid app --uid 10001 app
 WORKDIR /app
 
 # Copy only dependency manifests — source code is added by child images.
-COPY pyproject.toml README.md requirements.base.txt requirements.heavy.txt /app/
+COPY pyproject.toml README.md requirements.base.txt /app/
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip setuptools wheel
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 -r requirements.base.txt
-
-# Heavy ML/data packages pinned separately for cache efficiency.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 \
-        "polars==0.20.31" "duckdb==0.10.3"
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 \
-        "scipy==1.13.1"
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 \
-        "scikit-learn==1.4.2" "statsmodels==0.14.2"
-
-# 3D geometry (binary wheels — no compiler needed)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 \
-        "trimesh==4.12.2" "shapely==2.1.2" "rtree==1.4.1"
-
-# SLM scan-vector engine + mesh repair (need gcc/cmake to compile C extensions)
-RUN apt-get update -qq && apt-get install -y --no-install-recommends \
-        build-essential cmake \
-    && pip install --progress-bar off --retries 20 --timeout 120 \
-        "PythonSLM==0.6.1" "pymeshfix==0.18.1" \
-    && apt-get purge -y --auto-remove build-essential cmake \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Change-point detection + gradient boosting (Фаза 3)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off --retries 20 --timeout 120 \
-        "ruptures==1.1.10" "lightgbm==4.6.0"
+    pip install --progress-bar off -r requirements.base.txt
