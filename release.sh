@@ -20,7 +20,7 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 REPO="ghcr.io/artemivanchenko/printers-companion"
-SERVICES=(api worker scheduler mcp)
+SERVICES=(api worker scheduler watcher mcp)
 FLASH_MOUNT="/Volumes/SANDISK"
 FLASH_PROJECT="$FLASH_MOUNT/printer-log-analytics"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -145,8 +145,8 @@ COMMON_ARGS=(
   --build-arg "BUILD_DATE=${BUILD_DATE}"
 )
 
-# Step 1: build shared base image first (heavy ML deps).
-# api / worker / scheduler inherit FROM this — their builds are then ~2 min.
+# Step 1: build shared base image first (core web/infra deps only).
+# Every service inherits FROM this and layers on its own tier (analytics / heavy).
 step "Building base image"
 if $PUSH; then
   run docker buildx build \

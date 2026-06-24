@@ -1,12 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# scheduler image — cron jobs + bounded historical re-analysis. Needs the light
-# analytics tier (polars, scipy, networkx for the causal graph) but none of the
-# heavy ML / SLM / 3D packages. Carries: base + analytics (identical tier to worker).
+# watcher image — watches the incoming folder and calls the API over HTTP. Needs only
+# the core tier (config, logging, preflight, httpx, tenacity); no analytics at all.
+# Carries: base only — the smallest of all service images.
 FROM ghcr.io/artemivanchenko/printers-companion:base
-
-COPY requirements.analytics.txt /app/
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off -r requirements.analytics.txt
 
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/pip \

@@ -1,3 +1,6 @@
+# Core web/infra dependencies — shared by EVERY service image.
+# No analytics, ML, or 3D-geometry packages live here (see requirements.analytics.txt
+# and requirements.heavy.txt). watcher and mcp need only this tier.
 fastapi>=0.111
 uvicorn[standard]>=0.29
 pydantic>=2.7
@@ -7,8 +10,6 @@ psycopg[binary]>=3.1
 alembic>=1.13
 redis>=5.0
 minio>=7.2
-plotly>=5.22
-networkx>=3.3
 httpx>=0.27
 PyYAML>=6.0
 python-multipart>=0.0.9
