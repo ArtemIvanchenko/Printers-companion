@@ -19,11 +19,11 @@ _PRESET_FIELDS = (
 
 _PARAM_FIELDS = (
     "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm", "layer_thickness_mm",
-    "laser_count", "recoat_time_ms", "time_correction_factor",
+    "laser_count", "recoat_time_ms", "time_correction_factor", "correction_locked",
     "jump_speed_mm_s", "jump_delay_ms",
     "powder_cost_rub_per_kg", "gas_cost_rub_per_atm", "gas_atm_per_print",
     "filter_cost_rub", "filter_lifetime_hours", "platform_cost_rub",
-    "material_densities", "hatch_speeds_by_mat", "build_area_cm2",
+    "material_densities", "hatch_speeds_by_mat", "time_correction_by_mat", "build_area_cm2",
 )
 
 

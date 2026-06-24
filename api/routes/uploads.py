@@ -374,7 +374,7 @@ def _merge_preset(params: dict, preset: dict) -> dict:
 
 
 async def _geometry_prediction(
-    data: bytes, material: str, mode: str = "excel", hatch_distance_mm: float | None = None,
+    data: bytes, material: str, hatch_distance_mm: float | None = None,
     powder_cost_override: float | None = None,
 ) -> dict:
     """Slice the STL and predict time + cost from machine parameters.
@@ -426,7 +426,7 @@ async def _geometry_prediction(
 
         def _compute():
             slices = slice_stl(data, float(params["layer_thickness_mm"]))
-            time_est = estimate_print_time(slices, params, material, stl_bytes=data, mode=mode)
+            time_est = estimate_print_time(slices, params, material, stl_bytes=data)
             cost_est = estimate_cost(slices, params, material, time_est, powder_cost_override=powder_cost)
             return slices, time_est, cost_est
 
@@ -443,9 +443,12 @@ async def _geometry_prediction(
         "method": time_est.method,
         "layer_count": slices.layer_count,
         "height_mm": round(slices.height_mm, 2),
+        "build_axis": "Z",
         "scan_hours": round(time_est.scan_hours, 2),
         "recoat_hours": round(time_est.recoat_hours, 2),
         "print_hours": round(time_est.print_hours, 2),
+        "raw_print_hours": round(time_est.raw_print_hours, 3),
+        "correction_factor": round(time_est.correction_factor, 3),
         "total_days": round(time_est.total_days, 2),
         "time_breakdown": time_est.breakdown,
         "cost_total_rub": cost_est.total_rub,
@@ -460,20 +463,16 @@ async def _geometry_prediction(
 async def stl_estimate(
     file: UploadFile,
     material: str = "steel",
-    method: str = "fast",
     hatch_distance_mm: float | None = None,
 ) -> dict:
     """Upload an STL file → volume, historical reference and (when machine
     parameters are configured) a geometry-based time + cost prediction.
 
-    method=fast     → операторская Excel-формула («рассчитать быстро»)
-    method=accurate → PySLM, реальные траектории лазера («рассчитать точно»)
+    Time is always the PySLM vector estimate («точно»); there is no fast mode.
     hatch_distance_mm → override шага штриховки на этот расчёт (зависит от режима)
     """
     if not (file.filename or "").lower().endswith(".stl"):
         raise HTTPException(422, "Ожидается файл .stl")
-    if method not in ("fast", "accurate"):
-        raise HTTPException(422, "method должен быть 'fast' или 'accurate'")
     if hatch_distance_mm is not None and hatch_distance_mm <= 0:
         raise HTTPException(422, "hatch_distance_mm должен быть > 0")
 
@@ -482,14 +481,15 @@ async def stl_estimate(
     volume_cm3 = _stl_volume_cm3(data)
     hist = _historical_rate()
 
-    # Average past session duration (hours). Fallback 45 min when no history.
-    avg_duration_min = hist["avg_duration_min"] or 45.0
-    est_hours = round(avg_duration_min / 60, 1)
+    # Average past session duration (hours) — shown only as a rough historical
+    # reference, never as a per-part prediction. No data → no number (the old
+    # 45-min fallback produced a misleading constant 0.8 h for every part).
+    avg_min = hist["avg_duration_min"]
+    avg_session_hours = round(avg_min / 60, 1) if avg_min else None
 
     warnings = _stl_warnings(file.filename or "", volume_cm3)
-    mode = "pyslm" if method == "accurate" else "excel"
     prediction = await _geometry_prediction(
-        data, (material or "steel").strip().lower(), mode=mode, hatch_distance_mm=hatch_distance_mm,
+        data, (material or "steel").strip().lower(), hatch_distance_mm=hatch_distance_mm,
     )
 
     return {
@@ -499,8 +499,9 @@ async def stl_estimate(
         "warnings": warnings,
         "historical": hist,
         "estimate": {
-            "note": "На основе средней длительности предыдущих сессий" if hist["sessions_used"] else "Нет исторических данных",
-            "avg_session_hours": est_hours,
+            "note": "Средняя длительность прошлых сессий (справочно, не прогноз по этой детали)"
+                    if hist["sessions_used"] else "Нет исторических данных",
+            "avg_session_hours": avg_session_hours,
             "sessions_used": hist["sessions_used"],
         },
         "prediction": prediction,

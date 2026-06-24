@@ -149,10 +149,23 @@ def print_defaults(repo: PrintsRepository = Depends(get_prints_repository)) -> d
 
 @router.get("/prediction-accuracy")
 def get_prediction_accuracy(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
-    """Predicted vs actual report + suggested time_correction_factor."""
+    """Predicted vs actual report + per-material suggested correction factors."""
     from analytics.prediction.accuracy import prediction_accuracy
 
     return prediction_accuracy(repo.db)
+
+
+@router.post("/recalibrate")
+def recalibrate(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
+    """Recompute and apply per-material time-correction factors from history.
+
+    No-op when factors are pinned manually (correction_locked).
+    """
+    from analytics.prediction.accuracy import recalibrate_and_apply
+
+    result = recalibrate_and_apply(repo.db)
+    repo.flush()
+    return result
 
 
 def _combined_prediction(
@@ -160,14 +173,18 @@ def _combined_prediction(
     material: str,
     params: dict,
     powder_cost: float | None,
-    mode: str,
 ) -> dict:
-    """Time + cost estimate over a full print platform (one or more part STLs).
+    """Time + cost estimate over a full print platform (parts + supports STLs).
+
+    This is how a Magics layout is estimated: the operator exports the whole
+    plate (every part, its copies and supports, in the real build orientation)
+    as STLs and we slice them together as one build.
 
     Semantics:
     - scan  = Σ per-part scan times  (parts scanned independently by the laser)
     - recoat = from the tallest part (one recoat pass per layer for the whole platform)
     - volume / powder = Σ parts
+    - correction = uniform per material, so combined raw = combined print / factor
     """
     from analytics.prediction.cost_estimator import estimate_cost
     from analytics.prediction.print_time import EstimationError, PrintTimeEstimate, estimate_print_time
@@ -177,7 +194,7 @@ def _combined_prediction(
         layer_thickness = float(params["layer_thickness_mm"])
         per_part = [
             (slc := slice_stl(blob, layer_thickness),
-             estimate_print_time(slc, params, material, stl_bytes=blob, mode=mode))
+             estimate_print_time(slc, params, material, stl_bytes=blob))
             for blob in blobs
         ]
 
@@ -186,6 +203,9 @@ def _combined_prediction(
         tallest = max(range(len(per_part)), key=lambda i: per_part[i][0].layer_count)
         recoat_hours = per_part[tallest][1].recoat_hours
         print_hours = scan_hours + recoat_hours
+
+        factor = per_part[0][1].correction_factor or 1.0
+        raw_print_hours = print_hours / factor if factor else print_hours
 
         # Deduplicated warnings from all parts
         seen: set[str] = set()
@@ -202,6 +222,8 @@ def _combined_prediction(
             print_hours=print_hours,
             total_days=print_hours / 24.0,
             method=per_part[0][1].method,
+            raw_print_hours=raw_print_hours,
+            correction_factor=factor,
             warnings=warnings,
         )
         combined_slices = SliceResult(
@@ -222,7 +244,12 @@ def _combined_prediction(
         "available": True,
         "n_parts": len(per_part),
         "method": combined_time.method,
+        "build_axis": "Z",
+        "layer_count": combined_slices.layer_count,
+        "height_mm": round(combined_slices.height_mm, 2),
         "print_hours": round(print_hours, 3),
+        "raw_print_hours": round(raw_print_hours, 3),
+        "correction_factor": round(factor, 3),
         "scan_hours": round(scan_hours, 3),
         "recoat_hours": round(recoat_hours, 3),
         "cost_total_rub": cost_est.total_rub,
@@ -231,7 +258,11 @@ def _combined_prediction(
 
 
 def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict:
-    """Run both time/cost estimates on all STL files of a record and store the snapshot.
+    """Run the PySLM time/cost estimate over the whole platform and store the snapshot.
+
+    The platform = every attached part STL **plus its support STLs** (file types
+    "stl" and "stl_supports"), so supports are counted in the burn volume. This
+    is the path used for a full Magics layout exported to STL.
 
     Raises HTTPException with the reason when the estimate cannot run.
     """
@@ -239,9 +270,10 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
 
-    stl_files = [f for f in repo.list_print_files(record_id) if f["file_type"] == "stl"]
-    if not stl_files:
-        raise HTTPException(422, "К карточке не прикреплён STL (без поддержек)")
+    files = repo.list_print_files(record_id)
+    platform_files = [f for f in files if f["file_type"] in ("stl", "stl_supports")]
+    if not platform_files:
+        raise HTTPException(422, "К карточке не прикреплён STL")
 
     from api.routes.machine_settings import params_configured
 
@@ -257,32 +289,44 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
 
     store = ObjectStore()
     blobs: list[bytes] = []
-    for f in stl_files:
+    n_supports = 0
+    for f in platform_files:
         bucket, _, object_name = f["object_uri"].removeprefix("s3://").partition("/")
         data = store.get_bytes(bucket, object_name)
         if data is None:
             raise HTTPException(503, f"STL недоступен в хранилище: {f['file_name']}")
         blobs.append(data)
+        if f["file_type"] == "stl_supports":
+            n_supports += 1
 
     powder_cost = record.get("powder_cost_rub_per_kg") or repo.last_powder_cost()
-    snapshot: dict = {"estimated_at": datetime.now(timezone.utc).isoformat(), "n_parts": len(blobs)}
-    for key, mode in (("fast", "excel"), ("accurate", "pyslm")):
-        result = _combined_prediction(blobs, material, params, powder_cost, mode)
-        if not result.get("available"):
-            raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
-        snapshot[key] = {
-            "method": result["method"],
-            "print_hours": result["print_hours"],
-            "cost_total_rub": result["cost_total_rub"],
-        }
+    result = _combined_prediction(blobs, material, params, powder_cost)
+    if not result.get("available"):
+        raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
+
+    snapshot: dict = {
+        "estimated_at": datetime.now(timezone.utc).isoformat(),
+        "n_parts": len(blobs),
+        "n_supports": n_supports,
+        "material": material,
+        "method": result["method"],
+        "build_axis": result.get("build_axis", "Z"),
+        "layer_count": result.get("layer_count"),
+        "print_hours": result["print_hours"],
+        # raw (uncorrected) hours feed the calibration loop, so the learned
+        # factor stays absolute and never compounds on itself.
+        "raw_print_hours": result.get("raw_print_hours", result["print_hours"]),
+        "correction_factor": result.get("correction_factor", 1.0),
+        "cost_total_rub": result["cost_total_rub"],
+    }
 
     meta = dict(record.get("metadata_json") or {})
     meta["prediction"] = snapshot
     repo.update_print_record(record_id, {"metadata_json": meta})
     repo.flush()
     logger.info(
-        "prints: prediction stored for %s (%d parts, fast=%.1fh, accurate=%.1fh)",
-        record_id, len(blobs), snapshot["fast"]["print_hours"], snapshot["accurate"]["print_hours"],
+        "prints: prediction stored for %s (%d parts incl %d supports, %.1fh, ×%.3f)",
+        record_id, len(blobs), n_supports, snapshot["print_hours"], snapshot["correction_factor"],
     )
     return snapshot
 
@@ -366,6 +410,15 @@ def update_print(
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
     repo.flush()
+    # Manually linking a record to a session creates a new predicted/actual pair
+    # → refresh per-material time-correction factors.
+    if values.get("session_id"):
+        from analytics.prediction.accuracy import recalibrate_and_apply
+        try:
+            recalibrate_and_apply(repo.db)
+            repo.flush()
+        except Exception:
+            logger.exception("auto-calibration after manual link failed")
     return record
 
 

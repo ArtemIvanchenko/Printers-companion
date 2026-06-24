@@ -907,7 +907,7 @@
                     <div><label class="mp-label">Ресурс фильтра (ч)</label><input class="mp-input" id="mp-filter_lifetime_hours" type="number" min="0" step="any"></div>
                     <div><label class="mp-label">Платформа (руб/шт)</label><input class="mp-input" id="mp-platform_cost_rub" type="number" min="0" step="any"></div>
                     <div><label class="mp-label">Площадь стола (см²)</label><input class="mp-input" id="mp-build_area_cm2" type="number" min="0" step="any"></div>
-                    <div><label class="mp-label" title="Множитель к точному (PySLM) расчёту времени.">Поправка времени ⓘ</label><input class="mp-input" id="mp-time_correction_factor" type="number" min="0" step="any" placeholder="1.0"></div>
+                    <div><label class="mp-label" title="Глобальный множитель к расчёту времени — фоллбэк для материалов без своей поправки. Обычно калибруется автоматически по материалу; ручной ввод фиксирует поправки (отключает автокалибровку).">Поправка времени (глоб.) ⓘ</label><input class="mp-input" id="mp-time_correction_factor" type="number" min="0" step="any" placeholder="1.0"></div>
                 </div>
                 <div id="mp-calibration" style="margin-top:14px;font-size:12px;color:#a0aec0;"></div>
                 <h3 style="color:#a0aec0;font-size:13px;margin:18px 0 10px;">По материалам</h3>
@@ -1899,32 +1899,29 @@
             document.getElementById('stl-result').innerHTML = `
                 <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;">
                     <div style="font-size:13px;color:#e2e8f0;margin-bottom:4px;">🧊 ${file.name}</div>
-                    <div style="font-size:12px;color:#6b7280;margin-bottom:16px;">${(file.size / 1024 / 1024).toFixed(1)} МБ · выберите метод расчёта</div>
+                    <div style="font-size:12px;color:#6b7280;margin-bottom:16px;">${(file.size / 1024 / 1024).toFixed(1)} МБ · расчёт по реальным траекториям лазера (PySLM)</div>
                     <div style="margin-bottom:16px;">
                         <label style="font-size:12px;color:#a0aec0;display:block;margin-bottom:5px;">Шаг штриховки (мкм) <span title="Зависит от режима печати. По умолчанию 120 мкм." style="color:#6b7280;cursor:help;">ⓘ</span></label>
                         <input id="stl-hatch-um" type="number" min="1" step="1" value="120"
                             style="width:120px;background:#0f1420;border:1px solid #2d3748;border-radius:8px;padding:8px 10px;color:#e2e8f0;font-size:14px;">
                     </div>
+                    <div style="font-size:11px;color:#6b7280;margin-bottom:12px;">
+                        💡 Для точного времени по детали с поддержками экспортируйте всю компоновку плиты из Magics в STL и считайте её через карточку печати.</div>
                     <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                        <button onclick="runStlEstimate('fast')"
-                            style="flex:1;min-width:200px;background:#3b82f6;color:white;border:none;border-radius:10px;padding:14px;font-size:14px;font-weight:600;cursor:pointer;">
-                            ⚡ Рассчитать быстро
-                            <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">быстрая оценка по площади сечения</div>
-                        </button>
-                        <button onclick="runStlEstimate('accurate')"
+                        <button onclick="runStlEstimate()"
                             style="flex:1;min-width:200px;background:#10b981;color:white;border:none;border-radius:10px;padding:14px;font-size:14px;font-weight:600;cursor:pointer;">
-                            🎯 Рассчитать точно
+                            🎯 Рассчитать время и стоимость
                             <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">PySLM — реальные траектории лазера</div>
                         </button>
                     </div>
                 </div>`;
         }
 
-        async function runStlEstimate(method) {
+        async function runStlEstimate() {
             if (!_pendingStlFile) return;
             const um = parseFloat(document.getElementById('stl-hatch-um')?.value);
             const hatchMm = (um && um > 0) ? um / 1000 : null;
-            await uploadStl(_pendingStlFile, null, method, hatchMm);
+            await uploadStl(_pendingStlFile, null, hatchMm);
         }
         function _renderPrediction(p) {
             if (!p) return '';
@@ -1939,9 +1936,9 @@
                 `<div style="color:#fcd34d;font-size:11px;margin-top:4px;">⚠️ ${w}</div>`).join('');
             const methodLabel = {
                 pyslm: 'PySLM — реальные траектории лазера',
-                physics: 'физическая формула (PySLM недоступен)',
-                excel: 'быстрая формула (по площади сечения)',
             }[p.method] || p.method;
+            const corr = (p.correction_factor && Math.abs(p.correction_factor - 1) > 0.001)
+                ? ` · калибровка ×${p.correction_factor}` : '';
             return `
                 <div style="background:#0f2438;border:1px solid #1a5276;border-radius:12px;padding:16px;margin-top:14px;">
                     <div style="color:#60a5fa;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">
@@ -1965,7 +1962,9 @@
                         </div>` : ''}
                     </div>
                     <div style="color:#6b7280;font-size:12px;">
-                        сканирование ${p.scan_hours} ч · нанесение слоёв ${p.recoat_hours} ч${p.time_breakdown?.hatch_distance_mm ? ` · шаг штриховки ${Math.round(p.time_breakdown.hatch_distance_mm * 1000)} мкм` : ''}</div>
+                        сканирование ${p.scan_hours} ч · нанесение слоёв ${p.recoat_hours} ч${p.time_breakdown?.hatch_distance_mm ? ` · шаг штриховки ${Math.round(p.time_breakdown.hatch_distance_mm * 1000)} мкм` : ''}${corr}</div>
+                    <div style="color:#6b7280;font-size:12px;margin-top:4px;">
+                        🧭 построение вдоль оси Z (${p.build_axis || 'Z'}), плита = низ модели · ${p.layer_count} слоёв · высота ${p.height_mm} мм</div>
                     ${cost ? `<div style="color:#6b7280;font-size:12px;margin-top:6px;">${cost}</div>` : ''}
                     ${warns}
                 </div>`;
@@ -1982,17 +1981,15 @@
             }
         }
 
-        async function uploadStl(file, _buf, method = 'fast', hatchMm = null) {
+        async function uploadStl(file, _buf, hatchMm = null) {
             const res = document.getElementById('stl-result');
             if (!file) return;
-            res.innerHTML = method === 'accurate'
-                ? '<div style="color:#60a5fa;">Генерируем траектории лазера (PySLM)… до ~30 сек для крупных моделей</div>'
-                : '<div style="color:#60a5fa;">Анализируем модель…</div>';
+            res.innerHTML = '<div style="color:#60a5fa;">Генерируем траектории лазера (PySLM)… до ~30 сек для крупных моделей</div>';
             const fd = new FormData();
             fd.append('file', file);
             const material = document.getElementById('stl-material')?.value || 'steel';
             try {
-                let url = `/upload/stl-estimate?material=${encodeURIComponent(material)}&method=${method}`;
+                let url = `/upload/stl-estimate?material=${encodeURIComponent(material)}`;
                 if (hatchMm && hatchMm > 0) url += `&hatch_distance_mm=${hatchMm}`;
                 const r = await fetch(url, { method: 'POST', body: fd });
                 const d = await r.json();
@@ -2010,19 +2007,15 @@
                                 <div style="font-size:28px;font-weight:700;color:#10b981;">${vol} <span style="font-size:14px;">см³</span></div>
                                 <div style="color:#6b7280;font-size:12px;">объём модели</div>
                             </div>
-                            <div>
+                            ${est.avg_session_hours != null ? `<div>
                                 <div style="font-size:28px;font-weight:700;color:#60a5fa;">${est.avg_session_hours} <span style="font-size:14px;">ч</span></div>
-                                <div style="color:#6b7280;font-size:12px;">средн. длительность по истории</div>
-                            </div>
+                                <div style="color:#6b7280;font-size:12px;">средн. по истории (справочно)</div>
+                            </div>` : ''}
                         </div>
                         <div style="color:#a0aec0;font-size:12px;">${est.note} · ${est.sessions_used} сессий</div>
                         ${_renderPrediction(pred)}
                         ${warns}
                         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
-                            <button onclick="runStlEstimate('${method === 'fast' ? 'accurate' : 'fast'}')"
-                                style="background:${method === 'fast' ? '#10b981' : '#3b82f6'};color:white;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
-                                ${method === 'fast' ? '🎯 Пересчитать точно (PySLM)' : '⚡ Пересчитать быстро'}
-                            </button>
                             <button onclick="showPrintsPage('models',null)"
                                 style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
                                 📦 Открыть в истории моделей
@@ -2520,7 +2513,6 @@
             fd.append('file', file);
             try {
                 const url = new URL('/upload/stl-estimate', location.origin);
-                url.searchParams.set('method', 'accurate');
                 const r = await fetch(url, { method: 'POST', body: fd });
                 const d = await r.json();
                 const _estH = (d.prediction?.available && d.prediction?.print_hours != null)
@@ -2638,9 +2630,16 @@
 
             const mat  = new THREE.MeshPhongMaterial({ color: 0x3b82f6, specular: 0x334155, shininess: 40 });
             const mesh = new THREE.Mesh(geometry, mat);
+            // STL is Z-up (build/layer-stacking axis = +Z), three.js is Y-up.
+            // Rotate the part so its +Z points up — the viewer now shows the SAME
+            // orientation the slicer builds in (layers stack vertically on screen).
+            mesh.rotation.x = -Math.PI / 2;
             scene.add(mesh);
 
-            // Grid helper
+            // Build-plate grid: the part's build axis (Z) is now vertical (Y) and
+            // centred at the origin, so its bottom face — the real plate (z_min) —
+            // sits at y = -size.z/2. The grid lies exactly there, not at an
+            // arbitrary cosmetic offset.
             const grid = new THREE.GridHelper(maxDim * 3, 10, 0x2d3748, 0x1e2433);
             grid.position.y = -size.z / 2;
             scene.add(grid);
@@ -2794,8 +2793,9 @@
                     const date = rawDate ? new Date(rawDate).toLocaleDateString('ru') : '—';
                     const dateHint = rec.printed_at ? '' : ' <span style="color:#4a5568;" title="Дата создания карточки — дата печати неизвестна">≈</span>';
                     const pred = (rec.metadata_json || {}).prediction;
-                    const predLine = pred
-                        ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;" title="быстрый / точный прогноз">📐 ${pred.fast.print_hours} ч / ${pred.accurate.print_hours} ч</div>` : '';
+                    const predHours = pred ? (pred.print_hours ?? pred.accurate?.print_hours) : null;
+                    const predLine = (predHours != null)
+                        ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;" title="прогноз времени печати (PySLM)">📐 ${predHours} ч</div>` : '';
                     const session = rec.session_id
                         ? `<span style="color:#10b981;" title="${rec.session_id}">✓ привязана</span>${predLine}`
                         : `<span id="session-cell-${rec.record_id}"><a onclick="showSessionCandidates('${rec.record_id}')"
@@ -3010,32 +3010,59 @@
         async function loadCalibration() {
             const el = document.getElementById('mp-calibration');
             try {
-                const d = await fetch('/prints/prediction-accuracy').then(r => r.json());
+                const [d, mp] = await Promise.all([
+                    fetch('/prints/prediction-accuracy').then(r => r.json()),
+                    fetch('/settings/machine').then(r => r.json()),
+                ]);
+                const locked = !!(mp.params && mp.params.correction_locked);
+                const byMat = (mp.params && mp.params.time_correction_by_mat) || {};
                 if (!d.n_pairs) {
                     el.innerHTML = `📐 Прогноз vs факт: пока нет пар «прогноз + привязанные логи».
-                        Нажмите 📐 у карточки с STL, чтобы сохранить прогноз.`;
+                        Свяжите карточку печати с логами — поправка по каждому материалу
+                        подстроится автоматически (нужно ≥${d.min_pairs_for_calibration} печатей на материал).`;
                     return;
                 }
-                let html = `📐 Прогноз vs факт: <b style="color:#e2e8f0;">${d.n_pairs}</b> пар(ы).`;
-                if (d.suggested_correction_factor) {
-                    html += ` Рекомендуемая поправка точного метода:
-                        <b style="color:#10b981;">×${d.suggested_correction_factor}</b>
-                        <a onclick="applyCalibration(${d.suggested_correction_factor})"
-                           style="color:#60a5fa;cursor:pointer;margin-left:6px;">применить</a>`;
-                } else {
-                    html += ` Для калибровки нужно ≥${d.min_pairs_for_calibration} пар с точным прогнозом.`;
+                let html = `📐 Прогноз vs факт: <b style="color:#e2e8f0;">${d.n_pairs}</b> пар(ы). `;
+                html += locked
+                    ? `🔒 Поправки зафиксированы вручную — автокалибровка отключена.
+                       <a onclick="setCorrectionLock(false)" style="color:#60a5fa;cursor:pointer;">включить авто</a>`
+                    : `Калибруется автоматически по каждому материалу.
+                       <a onclick="recalibrateNow()" style="color:#60a5fa;cursor:pointer;">пересчитать сейчас</a>
+                       · <a onclick="setCorrectionLock(true)" style="color:#9ca3af;cursor:pointer;">зафиксировать вручную</a>`;
+                // Per-material breakdown: applied factor + recommendation + pair count
+                const mats = new Set([...Object.keys(d.by_material || {}), ...Object.keys(byMat)]);
+                if (mats.size) {
+                    html += `<div style="margin-top:8px;display:flex;flex-direction:column;gap:3px;">`;
+                    for (const m of mats) {
+                        const info = (d.by_material || {})[m] || {};
+                        const applied = byMat[m];
+                        const sugg = info.suggested_factor;
+                        const appliedTxt = applied != null
+                            ? `применено <b style="color:#10b981;">×${applied}</b>` : 'применено ×1.00 (нет данных)';
+                        const suggTxt = sugg != null
+                            ? ` · рекоменд. ×${sugg} по ${info.n_pairs} печ.`
+                            : (info.n_pairs ? ` · ${info.n_pairs} печ. (нужно ≥${d.min_pairs_for_calibration})` : '');
+                        html += `<div style="font-size:12px;color:#a0aec0;">• ${_materialRu(m)}: ${appliedTxt}${suggTxt}</div>`;
+                    }
+                    html += `</div>`;
                 }
                 el.innerHTML = html;
             } catch (e) { el.innerHTML = ''; }
         }
 
-        async function applyCalibration(factor) {
+        async function recalibrateNow() {
+            await fetch('/prints/recalibrate', { method: 'POST' });
+            loadCalibration(); loadMachineParams();
+        }
+
+        async function setCorrectionLock(locked) {
             await fetch('/settings/machine', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ time_correction_factor: factor }),
+                body: JSON.stringify({ correction_locked: locked }),
             });
-            loadMachineParams();
+            if (!locked) await fetch('/prints/recalibrate', { method: 'POST' });
+            loadCalibration(); loadMachineParams();
         }
 
         // =========================================================

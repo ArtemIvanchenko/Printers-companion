@@ -103,7 +103,15 @@ def process_due_import_jobs() -> int:
                 repo.save_reports(result.reports)
                 from domain.services.print_linking import auto_link_print_records
 
-                auto_link_print_records(db)
+                links = auto_link_print_records(db)
+                if links:
+                    # New predicted/actual pairs appeared → refresh per-material
+                    # time-correction factors automatically.
+                    from analytics.prediction.accuracy import recalibrate_and_apply
+                    try:
+                        recalibrate_and_apply(db)
+                    except Exception:
+                        logger.exception("auto-calibration after linking failed")
                 db.commit()
                 processed += 1
                 logger.info("Successfully processed import job %s", job.import_job_id)
