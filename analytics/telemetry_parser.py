@@ -88,6 +88,52 @@ def parse_sensors_log(path: Path) -> dict[str, np.ndarray]:
             for sig, buf in buffers.items() if buf}
 
 
+def load_aligned_signals(path: Path, columns: list[str]) -> dict[str, np.ndarray]:
+    """Load Time + the requested signal columns, keeping only rows where ALL
+    requested columns parse cleanly.
+
+    ``parse_sensors_log`` accumulates each signal independently, so a garbage
+    cell in one column doesn't drop that row for the others — arrays can end
+    up different lengths and no longer line up row-for-row. Multi-signal
+    analysis (windowed features, joint anomaly detection) needs them aligned,
+    hence this stricter loader.
+    """
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        header = [p.strip() for p in fh.readline().split("|")]
+        idx = {name: i for i, name in enumerate(header)}
+        wanted = ["Time", *columns]
+        missing = [c for c in wanted if c not in idx]
+        if missing:
+            raise ValueError(f"Columns not found in {path.name}: {missing}")
+
+        out: dict[str, list] = {c: [] for c in wanted}
+        max_idx = max(idx[c] for c in wanted)
+        for raw_line in fh:
+            cells = raw_line.split("|")
+            if len(cells) <= max_idx:
+                continue
+            row: dict[str, float | str] = {}
+            ok = True
+            for c in wanted:
+                cell = cells[idx[c]].strip()
+                if c == "Time":
+                    row[c] = cell
+                    continue
+                try:
+                    row[c] = float(cell.replace(",", "."))
+                except ValueError:
+                    ok = False
+                    break
+            if ok:
+                for c in wanted:
+                    out[c].append(row[c])
+
+    return {
+        c: (np.array(v) if c == "Time" else np.array(v, dtype=np.float64))
+        for c, v in out.items()
+    }
+
+
 def downsample_full_series(
     path: Path,
     columns: list[str],

@@ -250,6 +250,7 @@
         <a onclick="showSettingsPage('params',event)" id="subnav-settings-params">⚙️ Машина</a>
         <a onclick="showSettingsPage('logs',event)" id="subnav-settings-logs">📋 Логи</a>
         <a onclick="showSettingsPage('update',event)" id="subnav-settings-update">⬆️ Обновление</a>
+        <a onclick="showSettingsPage('testmetrics',event)" id="subnav-settings-testmetrics">🧪 Тестовые метрики</a>
     </div>
     <!-- Обслуживание sub-nav -->
     <div class="subnav" id="maintenance-subnav" style="display:none;">
@@ -1179,6 +1180,28 @@
             </div>
         </div>
 
+        <!-- Test Metrics Page -->
+        <div id="page-testmetrics" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+                    <div>
+                        <h2 style="margin-bottom:6px;">🧪 Тестовые метрики</h2>
+                        <p style="color:#6b7280;font-size:13px;">
+                            Пробное внедрение внешних ML-библиотек (ruptures, PyOD, tsfresh, LightGBM+SHAP, River)
+                            на реальных сигналах последней сессии. Экспериментальная вкладка — на основные
+                            алармы и отчёты не влияет.
+                        </p>
+                    </div>
+                    <button onclick="loadTestMetrics(true)"
+                        style="background:#3b82f6;color:white;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;white-space:nowrap;">
+                        🔄 Пересчитать
+                    </button>
+                </div>
+                <div id="tm-meta" style="color:#6b7280;font-size:12px;margin-top:12px;">Загрузка…</div>
+            </div>
+            <div id="tm-sections"></div>
+        </div>
+
         <!-- Chat Page -->
         <div id="page-chat" style="display:none;">
             <div class="section">
@@ -1487,7 +1510,7 @@
         // =========================================================
         const SESSIONS_PAGES = { telemetry: 'telemetry', history: 'sessions', quality: 'quality', patterns: 'patterns', upload: 'upload' };
         const PRINTS_PAGES   = { archive: 'archive', models: 'models' };
-        const SETTINGS_PAGES = { params: 'settings', logs: 'logs', update: 'update' };
+        const SETTINGS_PAGES = { params: 'settings', logs: 'logs', update: 'update', testmetrics: 'testmetrics' };
         const MAINT_PAGES    = { powder: 'powder', maint: 'maintenance', journal: 'logs' };
 
         let _activeSessionsPage = 'telemetry';
@@ -1569,6 +1592,7 @@
             if (page === 'params')  loadMachineParams();
             if (page === 'logs')    loadLogs();
             if (page === 'update')  { loadVersionInfo(); loadImportStatus(); refreshUpdateCheck(); }
+            if (page === 'testmetrics') loadTestMetrics(false);
         }
 
         function showMaintenancePage(page, evt) {
@@ -2069,6 +2093,89 @@
                 viewer.scrollTop = viewer.scrollHeight;
             } catch(e) {
                 viewer.innerHTML = '<div style="color:#ef4444;">Ошибка загрузки логов: ' + e + '</div>';
+            }
+        }
+
+        // =========================================================
+        // TEST METRICS — ruptures / PyOD / tsfresh / LightGBM+SHAP / River
+        // =========================================================
+        const _tmCharts = [];
+
+        async function loadTestMetrics(refresh) {
+            const meta = document.getElementById('tm-meta');
+            const wrap = document.getElementById('tm-sections');
+            meta.textContent = (refresh ? 'Пересчитываем' : 'Загрузка')
+                + ' — на больших сессиях первый расчёт может занимать до минуты (данные не прореживаются, обрабатываются полностью); дальше результат из кэша, мгновенно…';
+            _tmCharts.forEach(c => c.destroy());
+            _tmCharts.length = 0;
+            wrap.innerHTML = '';
+            try {
+                const url = '/test-metrics/latest' + (refresh ? '?refresh=true' : '');
+                const r = await fetch(url);
+                if (!r.ok) {
+                    const d = await r.json().catch(() => ({}));
+                    meta.innerHTML = `<span style="color:#ef4444;">Ошибка: ${d.detail || r.status}</span>`;
+                    return;
+                }
+                const data = await r.json();
+                meta.textContent = `Файл: ${data.session_file} · строк использовано: ${data.rows_used.toLocaleString('ru')} · сессия: ${data.session_id}`;
+                data.sections.forEach((s, i) => renderTestMetricSection(wrap, s, i));
+            } catch(e) {
+                meta.innerHTML = `<span style="color:#ef4444;">Ошибка загрузки: ${e}</span>`;
+            }
+        }
+
+        function renderTestMetricSection(wrap, s, i) {
+            const card = document.createElement('div');
+            card.className = 'section';
+
+            if (s.error) {
+                card.innerHTML = `
+                    <h2>⚠️ ${s.library}</h2>
+                    <p style="color:#ef4444;font-size:13px;">Не удалось посчитать: ${s.error}</p>`;
+                wrap.appendChild(card);
+                return;
+            }
+
+            const canvasId = `tm-chart-${i}`;
+            card.innerHTML = `
+                <h2>${s.title} <span style="color:#60a5fa;font-size:12px;font-weight:400;">(${s.library})</span></h2>
+                <p style="color:#a0aec0;font-size:13px;margin:10px 0 16px;">${s.message}</p>
+                ${s.chart ? `<div style="position:relative;height:280px;margin-bottom:16px;"><canvas id="${canvasId}"></canvas></div>` : ''}
+                <div id="${canvasId}-table"></div>`;
+            wrap.appendChild(card);
+
+            if (s.chart) {
+                const ctx = document.getElementById(canvasId);
+                const markerSet = new Set(s.chart.marker_indices || []);
+                const datasets = s.chart.series.map((series, si) => ({
+                    label: series.label,
+                    data: series.data,
+                    borderColor: [chartColors.blue, chartColors.red, chartColors.green][si % 3],
+                    backgroundColor: 'transparent',
+                    borderWidth: si === 0 ? 1.5 : 2,
+                    pointRadius: series.data.map((_, idx) => si === 0 && markerSet.has(idx) ? 4 : 0),
+                    pointBackgroundColor: chartColors.red,
+                    tension: 0.15,
+                }));
+                _tmCharts.push(new Chart(ctx, {
+                    type: 'line',
+                    data: { labels: s.chart.labels, datasets },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        scales: { x: { ticks: { maxTicksLimit: 12 } } },
+                        plugins: { legend: { display: datasets.length > 1 } },
+                    },
+                }));
+            }
+
+            if (s.table && s.table.rows.length) {
+                const tableEl = document.getElementById(`${canvasId}-table`);
+                const head = s.table.columns.map(c => `<th>${c}</th>`).join('');
+                const rows = s.table.rows.map(row =>
+                    `<tr>${row.map(v => `<td>${v}</td>`).join('')}</tr>`
+                ).join('');
+                tableEl.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
             }
         }
 
