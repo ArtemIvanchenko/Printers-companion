@@ -28,6 +28,7 @@ from api.routes import (
     quality,
     realtime,
     sessions,
+    test_metrics,
     uploads,
     web,
 )
@@ -175,6 +176,7 @@ app.include_router(powder.router)
 app.include_router(analysis.router)
 app.include_router(updater.router)
 app.include_router(uploads.router)
+app.include_router(test_metrics.router)
 
 
 @app.get("/alarm-demo", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)

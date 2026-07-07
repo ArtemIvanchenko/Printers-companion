@@ -3,3 +3,15 @@ duckdb==0.10.3
 scipy==1.13.1
 scikit-learn==1.4.2
 statsmodels==0.14.2
+
+# analytics/test_metrics — вкладка дашборда "Тестовые метрики".
+# Версии НЕ пропинены жёстко (в отличие от пакетов выше) — нужно подобрать
+# минимальные версии, совместимые с numpy, который тянут polars/scikit-learn
+# в этом образе, и проверить реальной сборкой (см. TODO в Dockerfile.base).
+ruptures>=1.1
+pyod>=2.0
+xgboost>=2.0
+shap>=0.45
+river>=0.21
+pandas>=2.2
+tsfresh>=0.20

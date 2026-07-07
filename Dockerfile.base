@@ -34,3 +34,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --progress-bar off --retries 20 --timeout 120 \
         "scikit-learn==1.4.2" "statsmodels==0.14.2"
+
+# analytics/test_metrics — вкладка дашборда "Тестовые метрики".
+# TODO: версии не пропинены (см. requirements.heavy.txt) — при первой реальной
+# сборке образа зафиксировать точные версии, которые pip здесь разрешит, и
+# проверить, что numpy не "уехал" в сторону, ломающую polars/scikit-learn выше.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --progress-bar off --retries 20 --timeout 120 \
+        "ruptures>=1.1" "pyod>=2.0" "xgboost>=2.0" "shap>=0.45" \
+        "river>=0.21" "pandas>=2.2" "tsfresh>=0.20"

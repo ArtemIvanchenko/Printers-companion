@@ -116,6 +116,7 @@
         <a href="#" onclick="showPage('estimate')" id="nav-estimate">⏱️ Оценка</a>
         <a href="#" onclick="showPage('update')" id="nav-update">⬆️ Обновление</a>
         <a href="#" onclick="showPage('logs')" id="nav-logs">📋 Логи системы</a>
+        <a href="#" onclick="showPage('testmetrics')" id="nav-testmetrics">🧪 Тестовые метрики</a>
     </nav>
 
     <div id="import-status-bar" style="background:#1a1f2e;padding:8px 40px;border-bottom:1px solid #2d3748;display:none;">
@@ -564,9 +565,8 @@
             <div class="section" style="max-width:560px;margin:0 auto;">
                 <h2 style="margin-bottom:20px;">⬆️ Обновление системы</h2>
                 <p style="color:#a0aec0;font-size:14px;margin-bottom:24px;line-height:1.6;">
-                    Загружает последние версии образов с Docker Hub и перезапускает сервисы.
-                    После нажатия страница может временно стать недоступной (30–90 сек) — это нормально.
-                    Когда обновление завершится, страница перезагрузится автоматически.
+                    Обновление выполняется на самом ПК: значок «Printer's Companion» на рабочем столе
+                    проверяет GitHub, скачивает новую версию и перезапускает сервисы автоматически.
                 </p>
 
                 <!-- Import status card -->
@@ -593,44 +593,10 @@
                             🕐 Запущена: <span id="vc-started" style="color:#a0aec0;">…</span>
                         </div>
                         <div style="color:#6b7280;font-size:12px;">
-                            🔄 Последнее обновление: <span id="vc-last-update" style="color:#a0aec0;">нет данных</span>
-                        </div>
-                        <div style="color:#6b7280;font-size:12px;">
                             📦 Коммит: <span id="vc-commit" style="color:#a0aec0;font-family:monospace;">…</span>
                         </div>
                     </div>
                 </div>
-
-                <!-- Auto-update banner -->
-                <div style="background:#0f3460;border:1px solid #1a5276;border-radius:12px;padding:14px 16px;margin-bottom:16px;display:flex;align-items:center;gap:12px;">
-                    <span style="font-size:22px;">🔄</span>
-                    <div>
-                        <div style="color:#e2e8f0;font-size:14px;font-weight:600;">Авто-обновление активно</div>
-                        <div style="color:#85929e;font-size:12px;margin-top:2px;">
-                            Watchtower проверяет Docker Hub каждый час и устанавливает обновления автоматически
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Watchtower status -->
-                <div id="update-status-box" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:20px;">
-                    <div style="display:flex;align-items:center;gap:12px;">
-                        <span id="update-wt-dot" style="width:10px;height:10px;border-radius:50%;background:#6b7280;display:inline-block;"></span>
-                        <span id="update-wt-label" style="color:#a0aec0;font-size:14px;">Проверка Watchtower...</span>
-                    </div>
-                </div>
-
-                <button id="btn-update"
-                    onclick="triggerUpdate()"
-                    style="width:100%;padding:16px;font-size:16px;font-weight:600;
-                           background:#3b82f6;color:white;border:none;border-radius:10px;
-                           cursor:pointer;transition:background 0.2s;">
-                    🚀 Обновить сейчас
-                </button>
-
-                <div id="update-log" style="margin-top:20px;font-family:monospace;font-size:13px;
-                     color:#a0aec0;background:#0f1419;border-radius:8px;padding:16px;
-                     min-height:60px;display:none;"></div>
             </div>
         </div>
 
@@ -658,6 +624,28 @@
                     <div style="color:#6b7280;">Загрузка…</div>
                 </div>
             </div>
+        </div>
+
+        <!-- Test Metrics Page -->
+        <div id="page-testmetrics" style="display:none;">
+            <div class="section" style="margin-bottom:20px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+                    <div>
+                        <h2 style="margin-bottom:6px;">🧪 Тестовые метрики</h2>
+                        <p style="color:#6b7280;font-size:13px;">
+                            Пробное внедрение внешних ML-библиотек (ruptures, PyOD, tsfresh, XGBoost+SHAP, River)
+                            на реальных сигналах последней сессии. Экспериментальная вкладка — на основные
+                            алармы и отчёты не влияет.
+                        </p>
+                    </div>
+                    <button onclick="loadTestMetrics(true)"
+                        style="background:#3b82f6;color:white;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;white-space:nowrap;">
+                        🔄 Пересчитать
+                    </button>
+                </div>
+                <div id="tm-meta" style="color:#6b7280;font-size:12px;margin-top:12px;">Загрузка…</div>
+            </div>
+            <div id="tm-sections"></div>
         </div>
 
         <!-- Chat Page -->
@@ -972,8 +960,9 @@
             if (page === 'powder') loadPowder();
             if (page === 'maintenance') loadMaintenance();
             if (page === 'patterns') loadPatterns();
-            if (page === 'update') { checkWatchtower(); loadVersionInfo(); loadImportStatus(); }
+            if (page === 'update') { loadVersionInfo(); loadImportStatus(); }
             if (page === 'logs')   { loadLogs(); }
+            if (page === 'testmetrics') { loadTestMetrics(false); }
         }
 
         // =========================================================
@@ -1331,94 +1320,98 @@
             }
         }
 
+        // =========================================================
+        // TEST METRICS — ruptures / PyOD / tsfresh / XGBoost+SHAP / River
+        // =========================================================
+        const _tmCharts = [];
+
+        async function loadTestMetrics(refresh) {
+            const meta = document.getElementById('tm-meta');
+            const wrap = document.getElementById('tm-sections');
+            meta.textContent = (refresh ? 'Пересчитываем' : 'Загрузка')
+                + ' — на больших сессиях первый расчёт может занимать до минуты (данные не прореживаются, обрабатываются полностью); дальше результат из кэша, мгновенно…';
+            _tmCharts.forEach(c => c.destroy());
+            _tmCharts.length = 0;
+            wrap.innerHTML = '';
+            try {
+                const url = '/test-metrics/latest' + (refresh ? '?refresh=true' : '');
+                const r = await fetch(url);
+                if (!r.ok) {
+                    const d = await r.json().catch(() => ({}));
+                    meta.innerHTML = `<span style="color:#ef4444;">Ошибка: ${d.detail || r.status}</span>`;
+                    return;
+                }
+                const data = await r.json();
+                meta.textContent = `Файл: ${data.session_file} · строк использовано: ${data.rows_used.toLocaleString('ru')} · сессия: ${data.session_id}`;
+                data.sections.forEach((s, i) => renderTestMetricSection(wrap, s, i));
+            } catch(e) {
+                meta.innerHTML = `<span style="color:#ef4444;">Ошибка загрузки: ${e}</span>`;
+            }
+        }
+
+        function renderTestMetricSection(wrap, s, i) {
+            const card = document.createElement('div');
+            card.className = 'section';
+
+            if (s.error) {
+                card.innerHTML = `
+                    <h2>⚠️ ${s.library}</h2>
+                    <p style="color:#ef4444;font-size:13px;">Не удалось посчитать: ${s.error}</p>`;
+                wrap.appendChild(card);
+                return;
+            }
+
+            const canvasId = `tm-chart-${i}`;
+            card.innerHTML = `
+                <h2>${s.title} <span style="color:#60a5fa;font-size:12px;font-weight:400;">(${s.library})</span></h2>
+                <p style="color:#a0aec0;font-size:13px;margin:10px 0 16px;">${s.message}</p>
+                ${s.chart ? `<div style="position:relative;height:280px;margin-bottom:16px;"><canvas id="${canvasId}"></canvas></div>` : ''}
+                <div id="${canvasId}-table"></div>`;
+            wrap.appendChild(card);
+
+            if (s.chart) {
+                const ctx = document.getElementById(canvasId);
+                const markerSet = new Set(s.chart.marker_indices || []);
+                const datasets = s.chart.series.map((series, si) => ({
+                    label: series.label,
+                    data: series.data,
+                    borderColor: [chartColors.blue, chartColors.red, chartColors.green][si % 3],
+                    backgroundColor: 'transparent',
+                    borderWidth: si === 0 ? 1.5 : 2,
+                    pointRadius: series.data.map((_, idx) => si === 0 && markerSet.has(idx) ? 4 : 0),
+                    pointBackgroundColor: chartColors.red,
+                    tension: 0.15,
+                }));
+                _tmCharts.push(new Chart(ctx, {
+                    type: 'line',
+                    data: { labels: s.chart.labels, datasets },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        scales: { x: { ticks: { maxTicksLimit: 12 } } },
+                        plugins: { legend: { display: datasets.length > 1 } },
+                    },
+                }));
+            }
+
+            if (s.table && s.table.rows.length) {
+                const tableEl = document.getElementById(`${canvasId}-table`);
+                const head = s.table.columns.map(c => `<th>${c}</th>`).join('');
+                const rows = s.table.rows.map(row =>
+                    `<tr>${row.map(v => `<td>${v}</td>`).join('')}</tr>`
+                ).join('');
+                tableEl.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+            }
+        }
+
         async function loadVersionInfo() {
             try {
-                const [v, h] = await Promise.all([
-                    fetch('/admin/version').then(r => r.json()),
-                    fetch('/admin/update/history').then(r => r.json()),
-                ]);
+                const v = await fetch('/admin/version').then(r => r.json());
                 const el = id => document.getElementById(id);
                 el('vc-version').textContent  = v.version    || '—';
                 el('vc-commit').textContent   = v.git_commit || '—';
                 el('vc-started').textContent  = v.started_at
                     ? new Date(v.started_at).toLocaleString('ru') : '—';
-                if (h && h.at) {
-                    const ago = _fmtAgo(new Date(h.at));
-                    const src = h.source === 'auto' ? 'авто' : 'вручную';
-                    el('vc-last-update').textContent = `${ago} (${src})`;
-                }
             } catch(e) { /* не блокирует работу */ }
-        }
-
-        async function checkWatchtower() {
-            try {
-                const r = await fetch('/admin/update/status');
-                const d = await r.json();
-                const dot   = document.getElementById('update-wt-dot');
-                const label = document.getElementById('update-wt-label');
-                const btn   = document.getElementById('btn-update');
-                if (d.watchtower === 'online') {
-                    dot.style.background   = '#10b981';
-                    label.textContent      = '✅ Watchtower готов — обновление доступно';
-                    btn.disabled           = false;
-                    btn.style.background   = '#3b82f6';
-                } else {
-                    dot.style.background   = '#ef4444';
-                    label.textContent      = '❌ Watchtower недоступен — запустите: docker compose up watchtower';
-                    btn.disabled           = true;
-                    btn.style.background   = '#4a5568';
-                }
-            } catch(e) {
-                document.getElementById('update-wt-label').textContent = '⚠️ Не удалось проверить статус';
-            }
-        }
-
-        async function triggerUpdate() {
-            const btn = document.getElementById('btn-update');
-            const log = document.getElementById('update-log');
-            btn.disabled = true;
-            btn.textContent = '⏳ Запуск обновления...';
-            log.style.display = 'block';
-            log.textContent = '[' + new Date().toLocaleTimeString() + '] Отправка команды Watchtower...\n';
-
-            try {
-                const r = await fetch('/admin/update', { method: 'POST' });
-                const d = await r.json();
-                if (d.ok) {
-                    log.textContent += '[' + new Date().toLocaleTimeString() + '] ' + d.message + '\n';
-                    log.textContent += 'Ожидание перезапуска сервисов...\n';
-                    btn.textContent = '🔄 Обновление в процессе...';
-                    // Poll /health until API comes back after restart
-                    await pollUntilBack(log);
-                } else {
-                    log.textContent += '❌ Ошибка: ' + JSON.stringify(d);
-                    btn.disabled = false;
-                    btn.textContent = '🚀 Обновить сейчас';
-                }
-            } catch(e) {
-                // API may have restarted — start polling
-                log.textContent += 'API перезапускается, ожидаем...\n';
-                await pollUntilBack(log);
-            }
-        }
-
-        async function pollUntilBack(log) {
-            const start = Date.now();
-            while (Date.now() - start < 180_000) {
-                await new Promise(r => setTimeout(r, 3000));
-                try {
-                    const r = await fetch('/health');
-                    if (r.ok) {
-                        log.textContent += '✅ Система обновлена и готова к работе!\n';
-                        log.textContent += 'Перезагрузка страницы через 3 секунды...';
-                        await new Promise(r => setTimeout(r, 3000));
-                        location.reload();
-                        return;
-                    }
-                } catch(e) { /* still restarting */ }
-                log.textContent += '.';
-            }
-            log.textContent += '\n⚠️ Таймаут. Обновите страницу вручную.';
         }
 
         // =========================================================
