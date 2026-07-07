@@ -47,3 +47,13 @@ docker @composeArgs
 
 Write-Host "`n[3/3] Done." -ForegroundColor Green
 docker compose ps
+
+# Record the update so the dashboard's "Последнее обновление" card is accurate.
+# Best-effort — the API might not be up yet on a cold start; that's fine, the
+# version card still reads GIT_COMMIT from the container itself.
+try {
+    $commit = git rev-parse --short HEAD
+    $body = @{ commit = $commit; message = "Обновлено до $commit" } | ConvertTo-Json -Compress
+    Invoke-RestMethod -Method Post -Uri "http://localhost:8000/admin/update/notify" `
+        -ContentType "application/json" -Body $body -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+} catch { }

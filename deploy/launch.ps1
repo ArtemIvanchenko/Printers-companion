@@ -1,5 +1,12 @@
 ﻿# Printer's Companion — launcher
 # Checks for updates, starts services, opens dashboard.
+#
+# This is the ONLY place an update check/apply happens. Deliberately no
+# background poller (Task Scheduler / launchd), no dashboard "Update" button,
+# no flag file — those were tried and removed because they update the system
+# independently of the operator clicking this icon, which is exactly what we
+# don't want. If you're adding an update mechanism elsewhere, don't — wire it
+# into this script instead.
 
 $ErrorActionPreference = 'Stop'
 $ProjectDir = Split-Path -Parent $PSScriptRoot

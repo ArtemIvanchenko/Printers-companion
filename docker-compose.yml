@@ -96,9 +96,6 @@ services:
       - type: bind
         source: ${RAW_LOGS_HOST_PATH:-./raw_logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
-      - type: bind
-        source: ${CONTROL_HOST_PATH:-./control}
-        target: /mnt/control
       - type: volume
         source: app_logs
         target: /app/logs
