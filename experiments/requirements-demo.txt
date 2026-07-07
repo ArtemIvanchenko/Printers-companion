@@ -1,0 +1,9 @@
+# Только для experiments/ml_library_showcase.py — не часть продакшн-образов.
+ruptures
+scikit-learn
+pyod
+xgboost
+shap
+river
+tsfresh
+pandas
