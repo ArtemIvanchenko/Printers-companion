@@ -47,7 +47,9 @@ done
 docker info >/dev/null 2>&1 || fail "Docker не запустился. Запустите OrbStack, Rancher Desktop или Docker Desktop вручную и повторите."
 
 # 5. Первый запуск: клонировать и собрать
+JUST_BUILT=0
 if [ ! -d "$REPO_DIR" ]; then
+  JUST_BUILT=1
   say "Первый запуск: скачиваю проект…"
   git clone "$REPO_URL" "$REPO_DIR" >>"$LOG" 2>&1 \
     || fail "Не удалось скачать проект. Нужно интернет-соединение."
@@ -70,29 +72,16 @@ if [ ! -d "$REPO_DIR" ]; then
     || fail "Сборка образов не удалась. Подробности в файле launch.log."
 fi
 
-# Папка для связи с дашбордом (туда кнопка «Обновить» кладёт запрос).
-mkdir -p "$REPO_DIR/control"
-
-# Установить launchd-агент автообновления (один раз).
-# После этого кнопка «Обновить» в дашборде запускает пересборку мгновенно —
-# launchd видит появление update.request и вызывает update.sh без задержки.
-PLIST_SRC="$REPO_DIR/deploy/com.printers-companion.updater.plist"
-PLIST_DST="$HOME/Library/LaunchAgents/com.printers-companion.updater.plist"
-if [ -f "$PLIST_SRC" ] && [ ! -f "$PLIST_DST" ]; then
-  REPO_ABS="$(cd "$REPO_DIR" && pwd)"
-  sed "s|REPO_DIR|$REPO_ABS|g" "$PLIST_SRC" > "$PLIST_DST"
-  launchctl load "$PLIST_DST" 2>/dev/null && say "Агент автообновления установлен." || true
-fi
-
-# 5.5 Применить запрошенное обновление (если в прошлой сессии нажали «Обновить»)
-if [ -f "$REPO_DIR/control/update.request" ]; then
-  say "Запрошено обновление — скачиваю новую версию и пересобираю…"
+# Проверка обновлений — ТОЛЬКО здесь, при запуске этого файла (и только если
+# только что не собрали с нуля). Никаких фоновых служб/агентов: раньше тут
+# устанавливался launchd-агент, который обновлял систему сам по себе, в обход
+# иконки — убрано намеренно, не возвращать.
+if [ "$JUST_BUILT" = "0" ]; then
+  say "Проверяю обновления…"
   (cd "$REPO_DIR" && git pull --rebase origin main >>"$LOG" 2>&1) \
-    || say "Предупреждение: не удалось скачать обновление (нет сети?). Запускаю текущую версию."
+    || say "Предупреждение: не удалось проверить обновления (нет сети?). Запускаю текущую версию."
   (cd "$REPO_DIR" && $COMPOSE build >>"$LOG" 2>&1) \
-    || fail "Пересборка после обновления не удалась. Подробности в файле launch.log."
-  rm -f "$REPO_DIR/control/update.request"
-  say "Обновление установлено."
+    || fail "Сборка после обновления не удалась. Подробности в файле launch.log."
 fi
 
 # 6. Запустить систему

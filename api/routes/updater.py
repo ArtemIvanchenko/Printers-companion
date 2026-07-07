@@ -1,4 +1,14 @@
-"""Admin endpoints: version, logs, import status, update management."""
+"""Admin endpoints: version, logs, import status, update status.
+
+Updates happen ONLY when the operator clicks the desktop icon
+(deploy/launch.ps1 -> update.ps1) — there is deliberately no way to trigger
+an update from inside the running container. The container has no Docker
+access anyway, so it could never actually perform an update; earlier
+versions of this file wrote a flag file that a background Task Scheduler
+job / launchd agent picked up independently of the icon, which defeated the
+"single trigger" design. Don't reintroduce that — see deploy/launch.ps1's
+docstring for the intended flow.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +20,7 @@ from datetime import datetime, timezone
 
 import httpx
 import redis as _redis
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 
 from core.config.settings import get_settings
 from core.versioning.constants import (
@@ -29,13 +39,6 @@ _REDIS_TTL   = 60 * 60 * 24 * 90
 
 _GITHUB_REPO   = "ArtemIvanchenko/Printers-companion"
 _GITHUB_BRANCH = "main"
-
-# Host-shared control directory. The container has NO Docker access — it can only
-# drop a flag file here. The launcher (Запустить.command) reads the flag on its
-# next start and performs the fixed update (git pull + docker compose build).
-_CONTROL_DIR = os.environ.get("CONTROL_DIR", "/mnt/control")
-
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 # ── Redis helpers ─────────────────────────────────────────────────────────────
@@ -163,37 +166,6 @@ async def check_for_update() -> dict:
         return {"update_available": False, "error": str(exc), "current_commit": current}
 
 
-# ── Update: request a local update (flag file applied by the launcher) ────────
-
-@router.post("/update")
-async def trigger_update() -> dict:
-    """Request an update of THIS machine.
-
-    Writes a flag file into the host-shared control directory. The container has
-    no Docker access — it can only drop this marker, never run a command. The
-    launcher (Запустить.command) sees the flag on its next start and performs the
-    fixed update (git pull from GitHub + docker compose build), then clears it.
-    """
-    try:
-        os.makedirs(_CONTROL_DIR, exist_ok=True)
-        flag_path = os.path.join(_CONTROL_DIR, "update.request")
-        with open(flag_path, "w", encoding="utf-8") as f:
-            f.write(datetime.now(timezone.utc).isoformat())
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Не удалось записать запрос обновления: {exc}")
-
-    event = {
-        "at": datetime.now(timezone.utc).isoformat(),
-        "source": "dashboard",
-        "trigger": "flag_file",
-    }
-    await asyncio.get_running_loop().run_in_executor(None, _store_update_event, event)
-    return {
-        "ok": True,
-        "message": "Обновление запрошено. На macOS начнётся автоматически (~15 сек). На Windows — в течение 1 минуты (если установлена задача планировщика).",
-    }
-
-
 # ── Update: history ───────────────────────────────────────────────────────────
 
 @router.get("/update/history")
@@ -204,7 +176,8 @@ async def update_history() -> dict:
 
 @router.post("/update/notify")
 async def update_notify(request: Request) -> dict:
-    """Called by update.sh after a successful local update to record the timestamp."""
+    """Called by deploy/update.ps1 (via the desktop icon) after a successful
+    local update, to record the timestamp for the dashboard's version card."""
     try:
         body = await request.json()
     except Exception:

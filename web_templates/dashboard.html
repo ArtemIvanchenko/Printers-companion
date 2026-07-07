@@ -281,7 +281,9 @@
         </div>
     </div>
 
-    <!-- Update available banner — shown globally across all tabs -->
+    <!-- Update available banner — shown globally across all tabs. Purely informational:
+         updates only happen via the desktop icon (deploy/launch.ps1 -> update.ps1), never
+         from inside the running container (it has no Docker access anyway). -->
     <div id="update-banner" style="display:none;background:linear-gradient(90deg,#1e3a5f,#1a4a3a);
          border-bottom:1px solid #2d4a6e;padding:10px 20px;
          display:none;align-items:center;gap:14px;flex-wrap:wrap;">
@@ -289,30 +291,10 @@
         <div style="flex:1;min-width:200px;">
             <div style="color:#60a5fa;font-weight:600;font-size:14px;">Доступно обновление</div>
             <div id="update-banner-msg" style="color:#94a3b8;font-size:12px;margin-top:2px;"></div>
+            <div style="color:#94a3b8;font-size:12px;margin-top:2px;">Закройте систему и запустите иконку на рабочем столе ещё раз — обновление установится автоматически.</div>
         </div>
-        <button id="update-banner-btn" onclick="triggerUpdate()"
-            style="background:#3b82f6;color:white;border:none;border-radius:8px;
-                   padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">
-            ⬆️ Обновить
-        </button>
         <button onclick="dismissUpdateBanner()"
             style="background:transparent;color:#6b7280;border:none;font-size:18px;cursor:pointer;padding:4px;">✕</button>
-    </div>
-
-    <!-- Update progress overlay -->
-    <div id="update-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);
-         z-index:9999;align-items:center;justify-content:center;">
-        <div style="background:#1a2035;border:1px solid #2d3748;border-radius:16px;padding:36px 40px;
-                    max-width:460px;width:90%;text-align:center;">
-            <div style="font-size:40px;margin-bottom:16px;" id="upd-icon">⏳</div>
-            <div style="font-size:18px;font-weight:700;color:#e2e8f0;margin-bottom:8px;" id="upd-title">Обновление</div>
-            <div style="font-size:13px;color:#a0aec0;margin-bottom:24px;line-height:1.6;" id="upd-detail"></div>
-            <button onclick="document.getElementById('update-overlay').style.display='none'"
-                    style="margin-top:4px;background:#3b82f6;color:white;border:none;border-radius:8px;
-                           padding:10px 24px;font-size:14px;font-weight:600;cursor:pointer;">
-                Понятно
-            </button>
-        </div>
     </div>
 
     <div class="content">
@@ -1129,15 +1111,11 @@
                         <span id="upd-status-dot" style="width:10px;height:10px;border-radius:50%;background:#6b7280;display:inline-block;flex-shrink:0;"></span>
                         <span id="upd-status-label" style="font-size:13px;color:#a0aec0;">Проверка…</span>
                     </div>
+                    <div style="margin-top:14px;color:#6b7280;font-size:12px;line-height:1.5;">
+                        Обновление устанавливается автоматически при запуске иконки на рабочем
+                        столе — закройте систему и запустите её ещё раз, чтобы применить.
+                    </div>
                 </div>
-
-                <!-- Trigger button -->
-                <button id="upd-trigger-btn" onclick="triggerUpdate()" disabled
-                    style="width:100%;padding:14px;font-size:15px;font-weight:600;
-                           background:#4a5568;color:#718096;border:none;border-radius:10px;
-                           cursor:not-allowed;transition:all 0.2s;margin-bottom:12px;">
-                    ⬆️ Обновить сейчас
-                </button>
 
                 <!-- Import status card -->
                 <div id="import-status-card" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:16px;">
@@ -2198,15 +2176,21 @@
             } catch(e) { /* не блокирует работу */ }
         }
 
+        // =========================================================
+        // UPDATE — read-only status. Updates are NEVER triggered from here:
+        // the container has no Docker access and can't perform one anyway.
+        // The only place an update actually happens is the desktop icon
+        // (deploy/launch.ps1 -> update.ps1), on every launch. This section
+        // just tells the operator whether a newer version exists on GitHub,
+        // so they know it's worth relaunching.
+        // =========================================================
+
+        let _updateDismissed = false;
+
         async function refreshUpdateCheck() {
             const dot   = document.getElementById('upd-status-dot');
             const label = document.getElementById('upd-status-label');
-            const btn   = document.getElementById('upd-trigger-btn');
-            // Кнопка «Обновить» доступна всегда — обновление можно запросить в любой
-            // момент (git pull без новых коммитов просто ничего не меняет). Проверка
-            // версии лишь подсказывает, есть ли что-то новое, но не блокирует кнопку.
             if (dot) { dot.style.background = '#6b7280'; label.textContent = 'Проверка…'; }
-            if (btn) btn.style.display = 'none';
             try {
                 const d = await fetch('/admin/update/check').then(r => r.json());
                 if (d.latest_commit) {
@@ -2217,8 +2201,7 @@
                 if (d.update_available) {
                     dot.style.background   = '#f59e0b';
                     label.textContent      = `Доступно обновление → ${d.latest_commit}`;
-                    if (btn) { btn.style.display = ''; btn.disabled = false; btn.style.background = '#3b82f6'; btn.style.color = 'white'; btn.style.cursor = 'pointer'; }
-                    if (!_updateDismissed && !_updatePolling) {
+                    if (!_updateDismissed) {
                         const banner = document.getElementById('update-banner');
                         const msg    = document.getElementById('update-banner-msg');
                         const dt     = d.latest_date ? new Date(d.latest_date).toLocaleString('ru') : '';
@@ -2228,33 +2211,16 @@
                 } else if (d.error) {
                     dot.style.background = '#ef4444';
                     label.textContent    = 'Проверка версии недоступна';
-                    if (btn) { btn.style.display = ''; btn.disabled = false; btn.textContent = '🔄 Обновить вручную'; btn.style.background = '#374151'; btn.style.color = '#e2e8f0'; btn.style.cursor = 'pointer'; }
                 } else if (d.version_unknown) {
                     dot.style.background = '#6b7280';
                     label.textContent    = 'Запущенная версия неизвестна';
-                    if (btn) { btn.style.display = ''; btn.disabled = false; btn.style.background = '#374151'; btn.style.color = '#e2e8f0'; btn.style.cursor = 'pointer'; }
                 } else {
                     dot.style.background = '#10b981';
                     label.textContent    = 'Установлена последняя версия';
-                    // Кнопка скрыта — обновлять нечего
                 }
             } catch(e) {
                 if (dot) { dot.style.background = '#ef4444'; label.textContent = 'Проверка версии недоступна'; }
-                if (btn) { btn.style.display = ''; btn.disabled = false; btn.style.background = '#374151'; btn.style.color = '#e2e8f0'; }
             }
-        }
-
-
-        // =========================================================
-        // UPDATE — check + trigger via GitHub Actions workflow_dispatch
-        // =========================================================
-
-        let _updateDismissed = false;
-        let _updatePolling   = false;
-
-        async function checkForUpdate() {
-            if (_updateDismissed || _updatePolling) return;
-            await refreshUpdateCheck();
         }
 
         function dismissUpdateBanner() {
@@ -2262,44 +2228,9 @@
             document.getElementById('update-banner').style.display = 'none';
         }
 
-        function _setOverlay(icon, title, detail) {
-            document.getElementById('upd-icon').textContent   = icon;
-            document.getElementById('upd-title').textContent  = title;
-            document.getElementById('upd-detail').textContent = detail;
-        }
-
-        async function triggerUpdate() {
-            if (_updatePolling) return;
-            _updatePolling = true;
-
-            const overlay = document.getElementById('update-overlay');
-            overlay.style.display = 'flex';
-            document.getElementById('update-banner').style.display = 'none';
-            _setOverlay('⏳', 'Запрашиваю обновление…', '');
-
-            try {
-                const r = await fetch('/admin/update', { method: 'POST' });
-                const d = await r.json();
-                if (!r.ok) {
-                    _setOverlay('❌', 'Ошибка', d.detail || 'Не удалось запросить обновление');
-                } else {
-                    _setOverlay(
-                        '✅',
-                        'Обновление запрошено',
-                        'Закройте систему и запустите «Запустить.command» ещё раз — ' +
-                        'новая версия скачается и установится при следующем старте.'
-                    );
-                }
-            } catch(e) {
-                _setOverlay('❌', 'Ошибка сети', String(e));
-            } finally {
-                _updatePolling = false;
-            }
-        }
-
-        // Check for update on load, then every 5 minutes
-        checkForUpdate();
-        setInterval(checkForUpdate, 5 * 60 * 1000);
+        // Check for update on load, then every 5 minutes (purely informational).
+        if (!_updateDismissed) refreshUpdateCheck();
+        setInterval(() => { if (!_updateDismissed) refreshUpdateCheck(); }, 5 * 60 * 1000);
 
         // =========================================================
         // PATTERNS — cross-session intelligence
