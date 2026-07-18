@@ -13,11 +13,10 @@ pymeshfix==0.18.1
 ruptures==1.1.10
 
 # analytics/test_metrics — "Тестовые метрики" dashboard tab.
-# Versions NOT hard-pinned (unlike the rest of this file) — need a real build
-# to confirm no conflicts with the already-pinned scikit-learn/polars/scipy
-# above, then pin whatever pip resolves.
-pyod>=2.0
-shap>=0.45
-river>=0.21
-pandas>=2.2
-tsfresh>=0.20
+# Versions confirmed to resolve cleanly alongside scikit-learn/polars/scipy
+# above in a real build (2026-07-18).
+pyod==3.6.1
+shap==0.51.0
+river==0.25.0
+pandas==3.0.3
+tsfresh==0.21.2

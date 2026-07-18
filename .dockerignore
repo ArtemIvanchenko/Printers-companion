@@ -5,6 +5,7 @@ sample_logs/
 **/__pycache__
 **/*.py[cod]
 .env
+.env.secrets
 printer_logs.db
 *.db
 *.sqlite
