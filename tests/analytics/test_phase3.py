@@ -157,9 +157,10 @@ class TestEstimateRecordEndpoint:
         snap = r.json()["prediction"]
         assert snap["print_hours"] > 0
         assert snap["raw_print_hours"] > 0
-        assert snap["method"] == "pyslm"
+        # Plate estimator: parts via pyslm, supports via the section model
+        assert snap["method"] == "plate:pyslm+sections"
         stored = client.get(f"/prints/{rec['record_id']}").json()
-        assert stored["metadata_json"]["prediction"]["method"] == "pyslm"
+        assert stored["metadata_json"]["prediction"]["method"] == "plate:pyslm+sections"
 
     def test_estimate_two_stl_aggregates_correctly(self, monkeypatch):
         """Платформа из 2 STL: scan=Σ, recoat=max, объём=Σ."""
