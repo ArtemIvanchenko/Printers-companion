@@ -36,10 +36,16 @@ pool_config = {
 }
 
 if not settings.database_url.startswith("sqlite"):
+    # Budget, not per-process comfort: this pool exists once per PROCESS, and
+    # the api container runs several uvicorn workers alongside the worker,
+    # scheduler and watcher containers. At 15+30 per process the stack asked for
+    # ~180 connections against PostgreSQL's default max_connections of 100, so
+    # under load new checkouts failed rather than queued.
+    #   api 2 workers x (5+10) + worker (5+10) + scheduler (5+10) = 60
     pool_config.update({
         "poolclass": QueuePool,
-        "pool_size": 15,  # Increased from 10
-        "max_overflow": 30,  # Increased from 20
+        "pool_size": 5,
+        "max_overflow": 10,
         "pool_recycle": 3600,  # Recycle connections every hour
         "pool_timeout": 30,  # Wait 30s for a connection from the pool
     })

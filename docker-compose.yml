@@ -56,8 +56,6 @@ x-app-env: &app-env
     HISTORICAL_REANALYSIS_CRON:          ${HISTORICAL_REANALYSIS_CRON:-0 2 * * *}
     HISTORICAL_REANALYSIS_WINDOW_DAYS:   ${HISTORICAL_REANALYSIS_WINDOW_DAYS:-90}
     HISTORICAL_REANALYSIS_MAX_ITERATIONS: ${HISTORICAL_REANALYSIS_MAX_ITERATIONS:-10}
-    TELEGRAM_BOT_TOKEN_HASH:             ${TELEGRAM_BOT_TOKEN_HASH:-}
-    TELEGRAM_DEFAULT_CHAT_ID:            ${TELEGRAM_DEFAULT_CHAT_ID:-}
     VOICE_TRANSCRIPTION_ENABLED:         ${VOICE_TRANSCRIPTION_ENABLED:-false}
     VOICE_TRANSCRIPTION_PROVIDER:        ${VOICE_TRANSCRIPTION_PROVIDER:-null}
 
@@ -76,7 +74,11 @@ services:
       dockerfile: Dockerfile.api
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
-    command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4"
+    # 2 workers, matching the container's 2.0 CPU limit — 4 oversubscribed it.
+    # Each worker holds its own DB pool, rate-limiter state and analysis cache,
+    # so extra workers cost connections and cache hit-rate, not throughput,
+    # at this deployment's scale (a handful of concurrent operators).
+    command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 2"
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

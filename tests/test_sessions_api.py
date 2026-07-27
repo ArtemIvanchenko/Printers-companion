@@ -1,7 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
-from datetime import datetime, timezone
-from uuid import uuid4
+from unittest.mock import MagicMock, patch
 
 
 class TestSessionsAPI:
@@ -108,7 +106,6 @@ class TestSessionsReportGeneration:
     def test_generate_report_with_markdown(self, mock_generate, mock_repo):
         """Test generating report with markdown."""
         from api.routes.sessions import _generate_report
-        from unittest.mock import MagicMock as MockReport
 
         mock_generate.return_value = {
             "report_id": "report_123",

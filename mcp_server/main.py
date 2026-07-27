@@ -6,8 +6,6 @@ so the AI assistant can query real platform data during debugging.
 
 import json as _json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import httpx

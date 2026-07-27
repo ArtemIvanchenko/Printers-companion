@@ -245,6 +245,24 @@ class PrintsRepository:
         ).all()
         return [_file_to_dict(row) for row in rows]
 
+    def list_files_for_records(self, record_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Attached files for many records in one query, keyed by record_id.
+
+        The list endpoint used to call list_print_files() per row, so a page of
+        50 records cost 51 round-trips.
+        """
+        if not record_ids:
+            return {}
+        rows = self.db.scalars(
+            select(PrintRecordFile)
+            .where(PrintRecordFile.record_id.in_(record_ids))
+            .order_by(PrintRecordFile.uploaded_at.asc())
+        ).all()
+        grouped: dict[str, list[dict[str, Any]]] = {rid: [] for rid in record_ids}
+        for row in rows:
+            grouped.setdefault(row.record_id, []).append(_file_to_dict(row))
+        return grouped
+
     def find_file_by_checksum(self, record_id: str, checksum: str) -> dict[str, Any] | None:
         row = self.db.scalars(
             select(PrintRecordFile)

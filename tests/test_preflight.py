@@ -67,3 +67,73 @@ def test_correct_psycopg3_url_passes() -> None:
     report = PreflightReport()
     check_database_url(report, settings)
     assert not report.errors
+
+
+class TestRemoteBackendCredentials:
+    """Default passwords are a local convenience only while the backend IS local.
+
+    The NAS migration (deploy/nas/README.md) changes DATABASE_URL and
+    MINIO_ENDPOINT and nothing else — APP_ENV stays "local" — so a check keyed
+    on APP_ENV never fires at the moment the credentials start guarding a
+    network service.
+    """
+
+    def _settings(self, **overrides):
+        from core.config.settings import Settings
+
+        base = dict(
+            app_env="local",
+            agent_api_token="unique-agent",
+            api_service_token="unique-service",
+            llm_provider="null",
+        )
+        return Settings(**{**base, **overrides})
+
+    def test_local_compose_defaults_are_fine(self):
+        from core.preflight import run_preflight
+
+        report = run_preflight(self._settings(
+            database_url="postgresql+psycopg://printer_logs:change-me@postgres:5432/printer_logs",
+            minio_endpoint="minio:9000",
+            minio_root_password="change-me-minio",
+        ))
+        assert report.passed, report.errors
+
+    def test_remote_database_with_placeholder_password_is_an_error(self):
+        from core.preflight import run_preflight
+
+        report = run_preflight(self._settings(
+            database_url="postgresql+psycopg://printer_logs:change-me@100.64.1.5:5433/printer_logs",
+        ))
+        assert not report.passed
+        assert any("100.64.1.5" in e for e in report.errors)
+
+    def test_remote_database_with_a_real_password_passes(self):
+        from core.preflight import run_preflight
+
+        report = run_preflight(self._settings(
+            database_url="postgresql+psycopg://printer_logs:s3cret-xyz@100.64.1.5:5433/printer_logs",
+            minio_endpoint="100.64.1.5:9000",
+            minio_root_user="nas-user",
+            minio_root_password="nas-password",
+        ))
+        assert report.passed, report.errors
+
+    def test_remote_minio_with_default_credentials_is_an_error(self):
+        from core.preflight import run_preflight
+
+        report = run_preflight(self._settings(minio_endpoint="100.64.1.5:9000"))
+        assert not report.passed
+        assert any("MINIO_ROOT_USER" in e or "MINIO_ROOT_PASSWORD" in e for e in report.errors)
+
+    def test_remote_minio_over_plain_http_warns(self):
+        from core.preflight import run_preflight
+
+        report = run_preflight(self._settings(
+            minio_endpoint="100.64.1.5:9000",
+            minio_root_user="nas-user",
+            minio_root_password="nas-password",
+            minio_secure=False,
+        ))
+        assert report.passed, report.errors
+        assert any("MINIO_SECURE=false" in w for w in report.warnings)

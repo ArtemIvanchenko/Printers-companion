@@ -34,7 +34,7 @@ class OpenAIProvider(BaseLLMProvider):
             if resp.status_code == 200:
                 models = [m["id"] for m in resp.json().get("data", [])]
                 return {"provider": "openai", "available": True, "model": self.model, "models": models}
-        except Exception as exc:
+        except Exception:
             pass
         return {"provider": "openai", "available": False, "model": self.model}
 

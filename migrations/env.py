@@ -43,9 +43,18 @@ def _ensure_version_col(connection) -> None:
             "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
         ))
         connection.commit()
-    else:
-        connection.execute(text(_WIDEN_SQL))
-        connection.commit()
+        return
+
+    # _WIDEN_SQL is a PL/pgSQL DO block. Running it on any other backend raises,
+    # which made every alembic command fail once alembic_version existed —
+    # including the second `upgrade head` on the SQLite setup the README
+    # documents for running tests without Docker. SQLite has no VARCHAR length
+    # enforcement, so there is nothing to widen there anyway.
+    if connection.dialect.name != "postgresql":
+        return
+
+    connection.execute(text(_WIDEN_SQL))
+    connection.commit()
 
 
 def run_migrations_offline() -> None:

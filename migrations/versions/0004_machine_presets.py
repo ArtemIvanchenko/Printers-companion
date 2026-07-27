@@ -88,7 +88,10 @@ def upgrade() -> None:
                 "VALUES (:name, :material, :layer_thickness_mm, :hatch_speed_mm_s, "
                 ":contour_speed_mm_s, :hatch_distance_mm, :jump_speed_mm_s, "
                 ":jump_delay_ms, :laser_power_w, :is_default, :notes, "
-                "NOW(), NOW())"
+                # CURRENT_TIMESTAMP, not NOW(): NOW() is PostgreSQL-only and
+                # aborted this migration on SQLite, which the documented
+                # no-Docker dev setup uses.
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ),
             p,
         )

@@ -1,4 +1,3 @@
-import pytest
 from operator_journal.parser import parse_operator_text, _extract_number, OperatorEventDraft
 from domain.enums.common import SourceChannel
 import re

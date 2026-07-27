@@ -39,16 +39,46 @@ CALIBRATION_WINDOW = 20
 # it silently; surface it instead.
 CORRECTION_MIN, CORRECTION_MAX = 0.5, 2.0
 
+# Sessions the calibration loop refuses to learn from. A session's measured
+# span is only a print duration if the session really is a print: service runs,
+# idle diagnostics and mis-grouped sessions have spans that are not comparable
+# with a geometric estimate, and feeding them in skews the factor that scales
+# every quoted time and price.
+_PRINT_CLASSIFICATIONS = {"REAL_PRINT", "REAL_PRINT_WITH_RESUME"}
+# Hard sanity bounds on a measured print span (hours). Outside these the pair is
+# reported but never used for calibration.
+_MIN_ACTUAL_HOURS, _MAX_ACTUAL_HOURS = 0.25, 24 * 14
+
 
 def _as_utc(ts: datetime) -> datetime:
     return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
 
 
+def _session_classification(session: BuildSession) -> str:
+    group = ((session.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
+    return group.get("classification") or session.classification or ""
+
+
 def _actual_hours(session: BuildSession) -> float | None:
+    """Measured print span in hours, or None when it cannot be trusted.
+
+    ``start_ts``/``end_ts`` are the monitor100-excluded print span computed by
+    ``compute_print_span``; they are only meaningful when the session groups the
+    files of exactly one print (see domain.services.session_grouping).
+    """
     if not session.start_ts or not session.end_ts:
         return None
     hours = (_as_utc(session.end_ts) - _as_utc(session.start_ts)).total_seconds() / 3600.0
     return hours if hours > 0 else None
+
+
+def _usable_for_calibration(session: BuildSession, actual: float) -> str | None:
+    """Reason this pair must not train the correction factor, or None if it may."""
+    if _session_classification(session) not in _PRINT_CLASSIFICATIONS:
+        return "not_a_print"
+    if not (_MIN_ACTUAL_HOURS <= actual <= _MAX_ACTUAL_HOURS):
+        return "implausible_duration"
+    return None
 
 
 def _raw_predicted(snapshot: dict) -> float | None:
@@ -71,54 +101,98 @@ def prediction_accuracy(db: Session) -> dict:
         select(PrintRecord).where(PrintRecord.session_id.is_not(None))
     ).all()
 
+    # Batch-load the linked sessions instead of one db.get() per record.
+    session_ids = [r.session_id for r in records if r.session_id]
+    sessions: dict[str, BuildSession] = {}
+    if session_ids:
+        sessions = {
+            s.session_id: s
+            for s in db.scalars(select(BuildSession).where(BuildSession.session_id.in_(session_ids))).all()
+        }
+
     rows: list[dict] = []
-    ratios_by_mat: dict[str, list[float]] = defaultdict(list)
-    all_ratios: list[float] = []
+    # (sort key, ratio) so the calibration window can be taken by recency.
+    usable_by_mat: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
+    all_usable: list[tuple[datetime, float]] = []
+    excluded: list[dict] = []
+
     for record in records:
         snapshot = (record.metadata_json or {}).get("prediction")
         if not snapshot:
             continue
-        session = db.get(BuildSession, record.session_id)
+        session = sessions.get(record.session_id)
         actual = _actual_hours(session) if session else None
         raw = _raw_predicted(snapshot)
         if actual is None or raw is None:
             continue
 
         material = (snapshot.get("material") or record.material or "—")
+        factor = float(snapshot.get("correction_factor") or 1.0) or 1.0
+        # What the operator was actually shown for this record.
+        shown = raw * factor
         ratio = actual / raw
-        ratios_by_mat[material].append(ratio)
-        all_ratios.append(ratio)
+        skip_reason = _usable_for_calibration(session, actual)
+
+        # Order pairs by when the print happened, so "most recent N" is real.
+        when = _as_utc(session.start_ts) if session.start_ts else _as_utc(record.created_at)
+        if skip_reason is None:
+            usable_by_mat[material].append((when, ratio))
+            all_usable.append((when, ratio))
+        else:
+            excluded.append({
+                "record_id": record.record_id, "session_id": record.session_id,
+                "reason": skip_reason,
+            })
+
         rows.append({
             "record_id": record.record_id,
             "name": record.name,
             "session_id": record.session_id,
             "material": material,
             "actual_hours": round(actual, 2),
-            "predicted_hours": round(raw, 2),
-            "error_pct": round((raw - actual) / actual * 100, 1),
+            # The corrected figure the operator saw — this is what "error" must
+            # be measured against. The raw geometric hours are kept alongside it
+            # because that is what the calibration ratio is computed from.
+            "predicted_hours": round(shown, 2),
+            "raw_predicted_hours": round(raw, 2),
+            "correction_factor": round(factor, 3),
+            "error_pct": round((shown - actual) / actual * 100, 1),
+            "raw_error_pct": round((raw - actual) / actual * 100, 1),
+            "used_for_calibration": skip_reason is None,
+            "excluded_reason": skip_reason,
+            "printed_at": when.isoformat(),
             "estimated_at": snapshot.get("estimated_at"),
         })
 
-    def _median(ratios: list[float]) -> float | None:
-        # Newest pairs first preserved by record order is not guaranteed, so
-        # just window by count — median is order-independent anyway.
-        sample = ratios[-CALIBRATION_WINDOW:]
+    rows.sort(key=lambda r: r["printed_at"], reverse=True)
+
+    def _median(pairs: list[tuple[datetime, float]]) -> float | None:
+        """Median ratio over the most recent CALIBRATION_WINDOW pairs.
+
+        Sorting by print date is what makes the window mean "recent"; the old
+        code sliced the list in DB-scan order, so it kept an arbitrary subset
+        while claiming to track the machine's current state.
+        """
+        sample = [ratio for _, ratio in sorted(pairs, key=lambda p: p[0], reverse=True)[:CALIBRATION_WINDOW]]
         if len(sample) < MIN_PAIRS_FOR_CALIBRATION:
             return None
         return round(statistics.median(sample), 3)
 
     by_material = {
-        mat: {"n_pairs": len(r), "suggested_factor": _median(r)}
-        for mat, r in ratios_by_mat.items()
+        mat: {"n_pairs": len(pairs), "suggested_factor": _median(pairs)}
+        for mat, pairs in usable_by_mat.items()
     }
 
     return {
         "pairs": rows,
         "n_pairs": len(rows),
+        "n_usable_pairs": len(all_usable),
+        "excluded": excluded,
         "by_material": by_material,
         # Overall median across materials — for the headline display only.
-        "suggested_correction_factor": _median(all_ratios),
+        "suggested_correction_factor": _median(all_usable),
         "min_pairs_for_calibration": MIN_PAIRS_FOR_CALIBRATION,
+        "calibration_window": CALIBRATION_WINDOW,
     }
 
 

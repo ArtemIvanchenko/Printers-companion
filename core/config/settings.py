@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -74,10 +72,6 @@ class Settings(BaseSettings):
     historical_reanalysis_window_days: int = 90
     historical_reanalysis_max_iterations: int = 10
 
-    telegram_bot_token: str = Field(default="", repr=False)
-    telegram_bot_token_hash: str = Field(default="", repr=False)
-    telegram_default_chat_id: str = ""
-    telegram_proxy_url: str = Field(default="", repr=False)
     voice_transcription_enabled: bool = True
     voice_transcription_provider: Literal["faster_whisper", "null"] = "faster_whisper"
     voice_transcription_model: str = "small"
@@ -105,19 +99,6 @@ class Settings(BaseSettings):
         for name, (default, actual) in defaults.items():
             if actual == default:
                 warnings.warn(f"{name} is still set to default '{default}'. Set a unique value in .env for production.")
-        return self
-
-    @model_validator(mode="after")
-    def _validate_telegram_token(self):
-        if self.telegram_bot_token and self.telegram_bot_token_hash:
-            actual = hashlib.sha256(self.telegram_bot_token.encode()).hexdigest()
-            # Use constant-time comparison to prevent timing attacks
-            if not hmac.compare_digest(actual, self.telegram_bot_token_hash):
-                raise ValueError(
-                    "TELEGRAM_BOT_TOKEN does not match TELEGRAM_BOT_TOKEN_HASH. "
-                    f"Expected hash: {self.telegram_bot_token_hash}, "
-                    f"got: {actual}"
-                )
         return self
 
     # NOTE: LM Studio auto-discovery is intentionally NOT done here. Probing

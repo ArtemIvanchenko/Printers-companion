@@ -10,8 +10,8 @@ Consumable thresholds come from M350 passport and TSF-400VAD manual:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select

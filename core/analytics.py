@@ -4,17 +4,15 @@ Provides pre-computed statistics so LLM never sees raw logs.
 All queries work on structured data already stored in the database.
 """
 
-from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from domain.models.entities import (
     BuildSession,
     OperatorEvent,
     QualityOutcome,
-    ReportArtifact,
 )
 
 

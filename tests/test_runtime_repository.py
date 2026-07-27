@@ -1,5 +1,4 @@
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -51,7 +50,6 @@ class TestRuntimeRepositorySessions:
 
     def test_save_session_payload_new(self, mock_db_session):
         """Test saving new session payload."""
-        from domain.models.entities import BuildSession
 
         mock_db_session.get.return_value = None
 
@@ -63,7 +61,6 @@ class TestRuntimeRepositorySessions:
 
     def test_save_session_payload_existing(self, mock_db_session):
         """Test updating existing session payload."""
-        from domain.models.entities import BuildSession
 
         existing = MagicMock()
         existing.context = {}
@@ -86,7 +83,6 @@ class TestRuntimeRepositorySessions:
 
     def test_get_session_payload_found(self, mock_db_session):
         """Test getting existing session."""
-        from domain.models.entities import BuildSession
 
         session = MagicMock()
         session.context = {"runtime_payload": {"files": [], "group": {}}}
@@ -104,7 +100,6 @@ class TestRuntimeRepositoryReports:
 
     def test_save_report_new(self, mock_db_session):
         """Test saving new report."""
-        from domain.models.entities import ReportArtifact
 
         mock_db_session.get.return_value = None
         report = {
@@ -135,7 +130,6 @@ class TestRuntimeRepositoryOperatorEvents:
 
     def test_save_operator_event_existing(self, mock_db_session, sample_operator_event):
         """Test updating existing operator event."""
-        from domain.models.entities import OperatorEvent
 
         existing = MagicMock()
         mock_db_session.get.return_value = existing
