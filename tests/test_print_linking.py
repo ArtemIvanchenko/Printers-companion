@@ -51,7 +51,7 @@ class TestAutoLink:
         db.flush()
 
         links = auto_link_print_records(db)
-        assert all(l["record_id"] != "pr_amb" for l in links)
+        assert all(link["record_id"] != "pr_amb" for link in links)
         assert db.get(PrintRecord, "pr_amb").session_id is None
 
     def test_skips_when_session_matches_two_records(self, db):
@@ -62,7 +62,7 @@ class TestAutoLink:
         db.flush()
 
         links = auto_link_print_records(db)
-        linked = {l["session_id"] for l in links}
+        linked = {link["session_id"] for link in links}
         assert "s_two_rec" not in linked
 
     def test_outside_window_not_linked(self, db):
@@ -92,8 +92,8 @@ class TestAutoLink:
 
         first = auto_link_print_records(db)
         second = auto_link_print_records(db)
-        assert len([l for l in first if l["record_id"] == "pr_idem"]) == 1
-        assert not [l for l in second if l["record_id"] == "pr_idem"]
+        assert len([link for link in first if link["record_id"] == "pr_idem"]) == 1
+        assert not [link for link in second if link["record_id"] == "pr_idem"]
 
 
 class TestImportHint:

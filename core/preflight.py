@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import logging
 import sys
-from pathlib import Path
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import httpx
+
+if TYPE_CHECKING:
+    from core.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +21,23 @@ class PreflightReport:
     errors: list[str] = field(default_factory=list)
 
 
-def run_preflight(settings: "Settings", component: str = "api") -> PreflightReport:
+def run_preflight(settings: Settings, component: str = "api") -> PreflightReport:
+    """Validate configuration before a component starts.
+
+    ``component`` names the caller (api / watcher / …) in log lines; every check
+    currently applies to all of them.
+    """
     report = PreflightReport()
 
     check_environ(report, settings)
     check_database_url(report, settings)
-    check_secrets(report, settings)
     check_llm(report, settings)
 
     report.passed = len(report.errors) == 0
     return report
 
 
-def check_environ(report: PreflightReport, settings: "Settings") -> None:
+def check_environ(report: PreflightReport, settings: Settings) -> None:
     defaults = {
         "AGENT_API_TOKEN": "change-me-agent-token",
         "API_SERVICE_TOKEN": "change-me-service-token",
@@ -50,7 +59,7 @@ def check_environ(report: PreflightReport, settings: "Settings") -> None:
                 report.warnings.append(msg)
 
 
-def check_database_url(report: PreflightReport, settings: "Settings") -> None:
+def check_database_url(report: PreflightReport, settings: Settings) -> None:
     """Catch the psycopg2→psycopg3 migration trap.
 
     SQLAlchemy picks the driver from the URL scheme:
@@ -69,22 +78,7 @@ def check_database_url(report: PreflightReport, settings: "Settings") -> None:
         )
 
 
-def check_secrets(report: PreflightReport, settings: "Settings") -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    secrets_path = repo_root / ".env.secrets"
-    if not secrets_path.exists():
-        report.warnings.append(
-            ".env.secrets not found. Create it with TELEGRAM_BOT_TOKEN=<your-token>"
-        )
-
-    if settings.telegram_bot_token and not settings.telegram_bot_token_hash:
-        report.warnings.append(
-            "TELEGRAM_BOT_TOKEN is set but TELEGRAM_BOT_TOKEN_HASH is empty. "
-            "Compute SHA256 of your token and add it to .env"
-        )
-
-
-def check_llm(report: PreflightReport, settings: "Settings") -> None:
+def check_llm(report: PreflightReport, settings: Settings) -> None:
     if settings.llm_provider in ("null", "none", ""):
         return
     try:

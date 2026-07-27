@@ -95,7 +95,7 @@ def auto_link_print_records(db: Session, window_hours: float | None = None) -> l
     links: list[dict] = []
     _resolve_import_hints(records, sessions, links)
     if links:
-        linked_sessions = {l["session_id"] for l in links}
+        linked_sessions = {link["session_id"] for link in links}
         sessions = [s for s in sessions if s.session_id not in linked_sessions]
         records = [r for r in records if r.session_id is None]
 

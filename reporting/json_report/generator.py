@@ -1,6 +1,18 @@
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+from analytics.features.extraction import extract_layer_features, extract_session_features
+from analytics.normalization.deduplication import deduplicate_events
+from analytics.segmentation.phase_segmenter import segment_phases
+from core.versioning.constants import (
+    ANALYSIS_VERSION,
+    CAUSAL_MODEL_VERSION,
+    RULE_PACK_VERSION,
+    SIGNAL_DICTIONARY_VERSION,
+)
+from domain.services.ingestion import IngestedFile
+from domain.services.session_classification import classify_session
+from profiles.m350.profile import get_profile
 
 # The full timeline is offloaded to object storage (no size limit); Postgres and
 # the dashboard keep only a bounded preview to stay well under the 1 GB jsonb cap.
@@ -44,18 +56,6 @@ def _timeline_preview(timeline: list[dict], cap: int = _MAX_TIMELINE_EVENTS) -> 
     })
     return result
 
-from analytics.features.extraction import extract_layer_features, extract_session_features
-from analytics.normalization.deduplication import deduplicate_events
-from analytics.segmentation.phase_segmenter import segment_phases
-from core.versioning.constants import (
-    ANALYSIS_VERSION,
-    CAUSAL_MODEL_VERSION,
-    RULE_PACK_VERSION,
-    SIGNAL_DICTIONARY_VERSION,
-)
-from domain.services.ingestion import IngestedFile
-from domain.services.session_classification import classify_session
-from profiles.m350.profile import get_profile
 
 
 def generate_session_json_report(

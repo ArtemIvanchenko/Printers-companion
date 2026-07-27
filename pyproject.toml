@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "printer-log-analytics"
-version = "0.3.0"
+version = "1.5.0"  # keep in sync with the VERSION file (single source of truth)
 description = "Extensible industrial log analytics platform for metal 3D printers"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -76,3 +76,8 @@ addopts = "-q"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# Standalone demo scripts, run directly and not imported by the app: they set
+# up sys.path before importing project modules, so E402 is intentional there.
+"experiments/*" = ["E402"]

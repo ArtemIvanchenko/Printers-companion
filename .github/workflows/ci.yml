@@ -1,0 +1,99 @@
+name: CI
+
+# The desktop launcher updates operator machines with `git pull origin main`,
+# so whatever lands on main goes straight onto the printer's PC. This is the
+# only gate in front of that.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Must match Dockerfile.base.
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.base.txt
+          pip install -r requirements.analytics.txt
+          pip install -r requirements.heavy.txt
+          pip install pytest pytest-cov ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        env:
+          # SQLite keeps CI free of service containers; conftest creates the
+          # schema. See the migrations job for Alembic coverage.
+          DATABASE_URL: sqlite:////tmp/pla-ci.db
+          APP_ENV: test
+        run: pytest tests/ -q
+
+  migrations:
+    # Guards drift the test suite cannot see: conftest builds its schema with
+    # create_all() from the ORM models, so a migration that fails to reproduce
+    # those models passes every test and breaks on a real upgrade.
+    #
+    # Known limitation: migration 0002 itself calls Base.metadata.create_all(),
+    # so on a FRESH database the chain reproduces today's models by definition
+    # and the drift check cannot fail. It is still meaningful for the real
+    # deployment shape — operator databases already exist and are stamped past
+    # 0002, so later migrations must carry every schema change on their own.
+    # Removing the create_all from 0002 would make this job strict everywhere.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: printer_logs
+          POSTGRES_USER: printer_logs
+          POSTGRES_PASSWORD: ci-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U printer_logs"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.base.txt
+
+      - name: Run migrations against a real PostgreSQL
+        env:
+          DATABASE_URL: postgresql+psycopg://printer_logs:ci-password@localhost:5432/printer_logs
+          APP_ENV: test
+        run: alembic upgrade head
+
+      - name: Fail if the ORM models drift from the migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://printer_logs:ci-password@localhost:5432/printer_logs
+          APP_ENV: test
+        run: python scripts/check_migration_drift.py

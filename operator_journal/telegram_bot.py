@@ -121,7 +121,7 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         result = svc.answer_question(question)
         svc.close()
         answer = result.get("direct_answer")
-        method = result.get("method", "")
+        _method = result.get("method", "")
         if answer:
             await update.effective_message.reply_text(answer)
         else:

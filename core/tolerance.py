@@ -27,7 +27,7 @@ def learn_from_session(
         rule = db.scalars(
             select(ToleranceRule).where(
                 ToleranceRule.feature_name == key,
-                ToleranceRule.is_active == True,
+                ToleranceRule.is_active.is_(True),
             )
         ).first()
 
@@ -66,7 +66,7 @@ def check_session(
     Returns list of violations. Empty list means session is within norms.
     """
     violations = []
-    rules = db.scalars(select(ToleranceRule).where(ToleranceRule.is_active == True)).all()
+    rules = db.scalars(select(ToleranceRule).where(ToleranceRule.is_active.is_(True))).all()
     rule_map = {r.feature_name: r for r in rules}
 
     for key, value in features.items():

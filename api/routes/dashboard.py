@@ -387,8 +387,11 @@ def dashboard():
     alarm_press = _series_in_alarm(tel_pressure, alarm_high=_thresholds.pressure_alarm_high, alarm_low=_thresholds.pressure_alarm_low)
 
     # CSS class injected into chart-container divs
-    _ac = lambda flag: ' alarm-active' if flag else ''
-    _ex = lambda flag: '<span class="alarm-badge">!</span>' if flag else ''
+    def _ac(flag: bool) -> str:
+        return " alarm-active" if flag else ""
+
+    def _ex(flag: bool) -> str:
+        return '<span class="alarm-badge">!</span>' if flag else ""
 
     # --- Process-health panel (readiness score, anomalies, layer burn-time drift) ---
     readiness = (health or {}).get("readiness") or {}
