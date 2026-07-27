@@ -173,37 +173,82 @@ def _load_quality_labels(db) -> dict[str, int]:
     return labels
 
 
+# Fitting is not cheap (K-fold refits), and every dashboard poll used to redo it
+# from scratch. Keyed on the exact label set, so a new operator verdict
+# invalidates it immediately while repeated reads are free.
+_MODEL_CACHE: dict[str, Any] = {}
+_MODEL_LOCK = threading.Lock()
+
+
+def _labels_fingerprint(labelled: list[tuple[str, int]]) -> str:
+    import hashlib
+
+    joined = "|".join(f"{sid}:{lbl}" for sid, lbl in sorted(labelled))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _get_model(sessions: list[dict[str, Any]], labels: dict[str, int]) -> tuple[Any, int]:
+    """Trained model (or None) for the current label set, plus the label count."""
+    from analytics.prediction.defect_risk import train_defect_model
+
+    labelled_ids = [(s["session_id"], labels[s["session_id"]])
+                    for s in sessions if s["session_id"] in labels]
+    key = _labels_fingerprint(labelled_ids)
+
+    with _MODEL_LOCK:
+        if _MODEL_CACHE.get("key") == key:
+            return _MODEL_CACHE.get("model"), len(labelled_ids)
+
+    model = train_defect_model(
+        [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
+    )
+    with _MODEL_LOCK:
+        _MODEL_CACHE["key"] = key
+        _MODEL_CACHE["model"] = model
+    return model, len(labelled_ids)
+
+
+def _risk_row(session: dict[str, Any], labels: dict[str, int], model: Any) -> dict[str, Any]:
+    from analytics.prediction.defect_risk import predict_defect_risk
+
+    session_id = session["session_id"]
+    pred = predict_defect_risk(session["group"], model)
+    label = labels.get(session_id)
+    return {
+        "session_id": session_id,
+        "start_ts": session["start_ts"],
+        "label": label,
+        # This session's outcome was part of the training set, so its score is
+        # a fit to a known answer, not a prediction. Callers must not present
+        # in-sample scores as evidence that the model works.
+        "in_sample": bool(model) and label is not None,
+        **pred,
+    }
+
+
 @router.get("/defect-risk")
 def defect_risk_all() -> dict[str, Any]:
-    """Defect-risk score for every session (learned model if enough labels, else
-    heuristic). Explainable: each result carries top contributing factors."""
-    from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
+    """Defect-risk score for every session (learned model if it passes
+    cross-validation, else heuristic). Explainable: each result carries top
+    contributing factors."""
     with session_scope() as db:
         sessions = _load_session_groups(db)
         labels = _load_quality_labels(db)
 
-    labelled = [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
-    model = train_defect_model(labelled)
-
-    results = []
-    for s in sessions:
-        pred = predict_defect_risk(s["group"], model)
-        results.append({
-            "session_id": s["session_id"], "start_ts": s["start_ts"],
-            "label": labels.get(s["session_id"]), **pred,
-        })
+    model, n_labelled = _get_model(sessions, labels)
     return {
         "model_trained": model is not None,
+        "model_quality": {"cv_auc": (model or {}).get("cv_auc"),
+                          "cv_folds": (model or {}).get("cv_folds")},
         "n_sessions": len(sessions),
-        "n_labeled": len(labelled),
-        "sessions": results,
+        "n_labeled": n_labelled,
+        "sessions": [_risk_row(s, labels, model) for s in sessions],
     }
 
 
 @router.get("/defect-risk/{session_id}")
 def defect_risk_one(session_id: str) -> dict[str, Any]:
     """Defect-risk for a single session with explanation."""
-    from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
     with session_scope() as db:
         sessions = _load_session_groups(db)
         labels = _load_quality_labels(db)
@@ -211,11 +256,8 @@ def defect_risk_one(session_id: str) -> dict[str, Any]:
     target = next((s for s in sessions if s["session_id"] == session_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-    labelled = [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
-    model = train_defect_model(labelled)
-    pred = predict_defect_risk(target["group"], model)
-    return {"session_id": session_id, "start_ts": target["start_ts"],
-            "label": labels.get(session_id), "model_trained": model is not None, **pred}
+    model, _ = _get_model(sessions, labels)
+    return {"model_trained": model is not None, **_risk_row(target, labels, model)}
 
 
 @router.get("/maintenance-forecast")

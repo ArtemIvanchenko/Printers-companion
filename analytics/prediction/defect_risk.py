@@ -24,9 +24,21 @@ import math
 from typing import Any
 
 # Minimum labelled sessions (with BOTH classes present) before we trust a model.
-MIN_LABELS = 8
+#
+# Was 8 — with 8 features that is one observation per parameter, where a
+# logistic regression separates the data perfectly and reports confident
+# 0.0/1.0 risks that carry no information. A model is now additionally
+# required to beat MIN_CV_AUC under cross-validation before it is used at all,
+# so these floors are the entry ticket, not the whole check.
+MIN_LABELS = 20
 # With this many labels LightGBM replaces the logistic regression.
-MIN_LABELS_GBM = 20
+MIN_LABELS_GBM = 40
+# Number of stratified folds used to estimate out-of-sample quality.
+CV_FOLDS = 5
+# Below this cross-validated ROC AUC the model is no better than guessing on
+# this shop's data — fall back to the transparent heuristic instead of showing
+# an operator a number that only looks like a prediction. 0.5 = coin flip.
+MIN_CV_AUC = 0.65
 
 # Raw features pulled from a session group payload. Each entry:
 #   key, extractor(group) -> float|None
@@ -151,14 +163,84 @@ def _train_lightgbm(X: list[list[float]], y: list[int], usable: list[str]) -> di
     }
 
 
+def _cross_val_auc(X: list[list[float]], y: list[int], kind: str, usable: list[str]) -> float | None:
+    """Stratified K-fold ROC AUC — an out-of-sample estimate of model quality.
+
+    Every fold refits from scratch on the other folds, so the score is never
+    computed on data the model has seen. Returns None when it cannot be
+    estimated (too few of either class, sklearn unavailable).
+    """
+    try:
+        import numpy as np
+        from sklearn.metrics import roc_auc_score
+        from sklearn.model_selection import StratifiedKFold
+    except Exception:
+        return None
+
+    Xa, ya = np.asarray(X, dtype=float), np.asarray(y)
+    n_folds = min(CV_FOLDS, int(min(ya.sum(), len(ya) - ya.sum())))
+    if n_folds < 2:
+        return None
+
+    oof = np.zeros(len(ya), dtype=float)
+    try:
+        for train_idx, test_idx in StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=0).split(Xa, ya):
+            fitted = _fit(Xa[train_idx].tolist(), ya[train_idx].tolist(), kind, usable)
+            if fitted is None:
+                return None
+            scores = [_raw_score(fitted, row) for row in Xa[test_idx].tolist()]
+            if any(s is None for s in scores):
+                return None
+            oof[test_idx] = scores
+        return float(roc_auc_score(ya, oof))
+    except Exception:
+        return None
+
+
+def _fit(X: list[list[float]], y: list[int], kind: str, usable: list[str]) -> dict[str, Any] | None:
+    """Fit one model of the requested kind. No validation, no gating."""
+    if kind == "lightgbm":
+        return _train_lightgbm(X, y, usable)
+    try:
+        import numpy as np
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+
+        Xa = np.asarray(X, dtype=float)
+        scaler = StandardScaler().fit(Xa)
+        clf = LogisticRegression(max_iter=1000).fit(scaler.transform(Xa), y)
+    except Exception:
+        return None
+
+    return {
+        "type": "logreg",
+        "features": usable,
+        "mean": scaler.mean_.tolist(),
+        "scale": [s if s else 1.0 for s in scaler.scale_.tolist()],
+        "coef": clf.coef_[0].tolist(),
+        "intercept": float(clf.intercept_[0]),
+    }
+
+
+def _raw_score(model: dict[str, Any], values: list[float]) -> float | None:
+    """Probability of the positive class for one already-ordered feature vector."""
+    row = dict(zip(model["features"], values))
+    result = _lightgbm_risk(row, model) if model.get("type") == "lightgbm" else _model_risk(row, model)
+    return None if result is None else result["risk"]
+
+
 def train_defect_model(
     groups_with_labels: list[tuple[dict[str, Any], int]],
 ) -> dict[str, Any] | None:
-    """Fit a defect model on labelled sessions.
+    """Fit a defect model on labelled sessions, or None to use the heuristic.
 
     ≥ MIN_LABELS_GBM labels → LightGBM (non-linear, tabular SOTA);
-    ≥ MIN_LABELS → standardised logistic regression;
-    otherwise None — callers fall back to the heuristic.
+    ≥ MIN_LABELS → standardised logistic regression.
+
+    A fitted model is only returned when its **cross-validated** ROC AUC clears
+    MIN_CV_AUC. Without that gate a model fitted on a handful of rows separates
+    them perfectly and then reports its own training labels back as confident
+    "predictions" — indistinguishable, on screen, from a model that works.
     """
     labels = [lbl for _, lbl in groups_with_labels]
     if len(labels) < MIN_LABELS or len(set(labels)) < 2:
@@ -172,34 +254,27 @@ def train_defect_model(
 
     X = [[float(r[f]) for f in usable] for r in rows]
     y = labels
+    minority = min(sum(y), len(y) - sum(y))
 
-    if len(y) >= MIN_LABELS_GBM and min(sum(y), len(y) - sum(y)) >= 5:
-        model = _train_lightgbm(X, y, usable)
-        if model is not None:
-            return model
+    kinds = ["logreg"]
+    if len(y) >= MIN_LABELS_GBM and minority >= 10:
+        kinds.insert(0, "lightgbm")
 
-    try:
-        import numpy as np
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.preprocessing import StandardScaler
-
-        Xa = np.asarray(X, dtype=float)
-        scaler = StandardScaler().fit(Xa)
-        Xs = scaler.transform(Xa)
-        clf = LogisticRegression(max_iter=1000).fit(Xs, y)
-    except Exception:
-        return None
-
-    return {
-        "type": "logreg",
-        "features": usable,
-        "mean": scaler.mean_.tolist(),
-        "scale": [s if s else 1.0 for s in scaler.scale_.tolist()],
-        "coef": clf.coef_[0].tolist(),
-        "intercept": float(clf.intercept_[0]),
-        "n_train": len(y),
-        "n_defects": int(sum(y)),
-    }
+    for kind in kinds:
+        auc = _cross_val_auc(X, y, kind, usable)
+        if auc is None or auc < MIN_CV_AUC:
+            continue
+        model = _fit(X, y, kind, usable)
+        if model is None:
+            continue
+        model.update({
+            "n_train": len(y),
+            "n_defects": int(sum(y)),
+            "cv_auc": round(auc, 3),
+            "cv_folds": min(CV_FOLDS, minority),
+        })
+        return model
+    return None
 
 
 def _lightgbm_risk(row: dict[str, float | None], model: dict[str, Any]) -> dict[str, Any] | None:
@@ -227,7 +302,7 @@ def _lightgbm_risk(row: dict[str, float | None], model: dict[str, Any]) -> dict[
         "grade": _grade(risk),
         "method": "lightgbm",
         "top_factors": [t for t in top if t["contribution"] > 0][:4],
-        "model_info": {"n_train": model.get("n_train"), "n_defects": model.get("n_defects")},
+        "model_info": _model_info(model),
     }
 
 
@@ -255,7 +330,22 @@ def _model_risk(row: dict[str, float | None], model: dict[str, Any]) -> dict[str
         "grade": _grade(risk),
         "method": "model",
         "top_factors": top[:4],
-        "model_info": {"n_train": model.get("n_train"), "n_defects": model.get("n_defects")},
+        "model_info": _model_info(model),
+    }
+
+
+def _model_info(model: dict[str, Any]) -> dict[str, Any]:
+    """Provenance shown next to a learned risk score.
+
+    ``cv_auc`` is the out-of-sample quality gate the model had to clear; it is
+    surfaced so an operator can see how much the number is worth rather than
+    only that "a model exists".
+    """
+    return {
+        "n_train": model.get("n_train"),
+        "n_defects": model.get("n_defects"),
+        "cv_auc": model.get("cv_auc"),
+        "cv_folds": model.get("cv_folds"),
     }
 
 

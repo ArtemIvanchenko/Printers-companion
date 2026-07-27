@@ -261,10 +261,17 @@ class RuntimeRepository:
         if existing:
             existing.context = context
             existing.updated_at = datetime.now(timezone.utc)
-            if start_ts and not existing.start_ts:
+            # Overwrite, don't fill-if-empty: a re-import re-derives the print
+            # span from the full file set, and that recomputed value is the more
+            # accurate one. Keeping the first-ever value froze a span computed
+            # from a partial file set (or from a mis-grouped session) forever —
+            # and that span is what predicted-vs-actual calibration divides by.
+            if start_ts:
                 existing.start_ts = start_ts
-            if end_ts and not existing.end_ts:
+            if end_ts:
                 existing.end_ts = end_ts
+            if confidence:
+                existing.grouping_confidence = confidence
         else:
             self.db.add(
                 BuildSession(

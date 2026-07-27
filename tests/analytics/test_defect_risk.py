@@ -1,5 +1,6 @@
 """Tests for analytics.prediction.defect_risk."""
 from analytics.prediction.defect_risk import (
+    MIN_CV_AUC,
     MIN_LABELS,
     build_feature_row,
     outcome_to_label,
@@ -58,18 +59,52 @@ def test_model_not_trained_single_class():
 
 def test_model_trains_and_predicts_with_separable_data():
     # Good sessions: high readiness, no anomalies. Defects: low readiness, anomalies.
-    good = [(_group(readiness=95, anomalies=0, burn_slope=0.0, dq=100), 0) for _ in range(6)]
-    bad = [(_group(readiness=25, anomalies=5, burn_slope=0.7, dq=50), 1) for _ in range(6)]
+    # Slight jitter per row so the folds are not made of identical duplicates.
+    good = [(_group(readiness=92 + i % 6, anomalies=0, burn_slope=0.0, dq=98 + i % 3), 0)
+            for i in range(12)]
+    bad = [(_group(readiness=22 + i % 6, anomalies=5, burn_slope=0.7, dq=48 + i % 3), 1)
+           for i in range(12)]
     model = train_defect_model(good + bad)
     assert model is not None
-    assert model["n_train"] == 12
-    assert model["n_defects"] == 6
+    assert model["n_train"] == 24
+    assert model["n_defects"] == 12
+    # Quality is measured out-of-sample and surfaced, not assumed.
+    assert model["cv_auc"] >= MIN_CV_AUC
 
     risk_bad = predict_defect_risk(_group(readiness=20, anomalies=6, burn_slope=0.9, dq=45), model)
     risk_good = predict_defect_risk(_group(readiness=98, anomalies=0, burn_slope=0.0, dq=100), model)
     assert risk_bad["method"] == "model"
     assert risk_bad["risk"] > risk_good["risk"]
     assert risk_bad["top_factors"]
+    assert risk_bad["model_info"]["cv_auc"] == model["cv_auc"]
+
+
+def test_model_is_rejected_when_labels_carry_no_signal():
+    """Regression: a model used to be accepted on any label set that cleared a
+    count threshold. Fitted on noise it separates its own training rows and
+    reports confident risks that mean nothing — the operator cannot tell the
+    difference on screen. Cross-validation must send this back to the heuristic.
+    """
+    import random
+
+    rng = random.Random(0)
+    data = [
+        (_group(readiness=rng.uniform(20, 100), anomalies=rng.randint(0, 6),
+                burn_slope=rng.uniform(0, 0.9), dq=rng.uniform(40, 100)),
+         rng.randint(0, 1))
+        for _ in range(40)
+    ]
+    assert train_defect_model(data) is None
+
+    # …and scoring without a model degrades to the transparent heuristic.
+    assert predict_defect_risk(_group(), None)["method"] == "heuristic"
+
+
+def test_labels_below_new_minimum_are_not_enough():
+    # 12 labelled sessions across 8 features is roughly one row per parameter.
+    good = [(_group(readiness=95, anomalies=0), 0) for _ in range(6)]
+    bad = [(_group(readiness=25, anomalies=5), 1) for _ in range(6)]
+    assert train_defect_model(good + bad) is None
 
 
 def test_build_feature_row_handles_missing_fields():
