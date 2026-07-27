@@ -13,10 +13,14 @@ multiplied by a calibration factor learned per material from predicted-vs-actual
 history (``time_correction_by_mat`` → falls back to the global
 ``time_correction_factor``). See ``analytics.prediction.accuracy``.
 
+Recoat time is calibrated separately and *before* that multiplier, because it
+is a measured duration, not a scan-time error ratio: ``recoat_time_by_mat`` is
+learned per material from real per-layer ``pour_ms`` readings in the printer's
+own logs (see ``analytics.prediction.recoat_calibration``), falling back to the
+operator-entered ``recoat_time_ms``, then the hardcoded ``_DEFAULT_RECOAT_MS``.
+
 ``hatch_speed_mm_s`` is the real laser speed (mm/s); ``hatch_distance_mm`` is
-required. Machine parameters come from the machine_params table; the only
-in-code fallback is the recoat time when ``recoat_time_ms`` is unset
-(``_DEFAULT_RECOAT_MS``).
+required. Machine parameters come from the machine_params table.
 """
 from __future__ import annotations
 
@@ -81,6 +85,37 @@ def resolve_correction_factor(params: dict, material: str) -> float:
     except (TypeError, ValueError):
         return 1.0
     return factor if factor > 0 else 1.0
+
+
+def resolve_recoat_ms(params: dict, material: str) -> tuple[float, str]:
+    """Recoat time per layer (ms) and its source: "calibrated" | "manual" | "default".
+
+    Precedence: per-material value learned from real ``pour_ms`` readings in the
+    printer's logs (``recoat_time_by_mat`` — see
+    ``analytics.prediction.recoat_calibration``) → operator-entered
+    ``recoat_time_ms`` → the hardcoded fallback. The source is returned
+    alongside the value so callers can be honest with the operator about which
+    one produced the number — a calibrated value needs no caveat, the other two
+    do.
+    """
+    by_mat = params.get("recoat_time_by_mat") or {}
+    learned = by_mat.get(material)
+    try:
+        learned = float(learned)
+    except (TypeError, ValueError):
+        learned = None
+    if learned and learned > 0:
+        return learned, "calibrated"
+
+    manual = params.get("recoat_time_ms")
+    try:
+        manual = float(manual)
+    except (TypeError, ValueError):
+        manual = None
+    if manual and manual > 0:
+        return manual, "manual"
+
+    return float(_DEFAULT_RECOAT_MS), "default"
 
 
 def _pyslm_layer_metrics(
@@ -181,7 +216,7 @@ def estimate_print_time(
     file — we never silently fall back to a less accurate formula.
     """
     hatch_speed, contour_speed, hatch_distance, laser_count = _resolve_params(params, material)
-    recoat_ms = params.get("recoat_time_ms")
+    recoat_ms, recoat_source = resolve_recoat_ms(params, material)
     warnings: list[str] = list(slices.warnings)
 
     if not contour_speed:
@@ -206,13 +241,11 @@ def estimate_print_time(
     if not params.get("jump_speed_mm_s"):
         warnings.append("Скорость перескока не задана — взято значение по умолчанию.")
 
-    if recoat_ms:
-        recoat_seconds = slices.layer_count * float(recoat_ms) / 1000.0
-    else:
-        recoat_seconds = slices.layer_count * _DEFAULT_RECOAT_MS / 1000.0
+    recoat_seconds = slices.layer_count * recoat_ms / 1000.0
+    if recoat_source == "default":
         warnings.append(
-            f"Время нанесения слоя не задано — используется откалиброванное значение "
-            f"{_DEFAULT_RECOAT_MS / 1000:.1f} с/слой."
+            f"Время нанесения слоя не задано и не откалибровано по логам — используется "
+            f"значение по умолчанию {recoat_ms / 1000:.1f} с/слой."
         )
 
     raw_scan_hours = scan_seconds / 3600.0
@@ -246,9 +279,14 @@ def estimate_print_time(
             "laser_count": laser_count,
             "material": material,
             "correction_factor": factor,
+            "recoat_time_ms": round(recoat_ms, 1),
+            "recoat_time_source": recoat_source,
         },
         warnings=warnings,
     )
 
 
-__all__ = ["PrintTimeEstimate", "estimate_print_time", "EstimationError"]
+__all__ = [
+    "PrintTimeEstimate", "estimate_print_time", "EstimationError",
+    "resolve_correction_factor", "resolve_recoat_ms",
+]

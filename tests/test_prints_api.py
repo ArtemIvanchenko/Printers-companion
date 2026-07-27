@@ -394,6 +394,13 @@ class TestMachineSettings:
     def test_put_empty_body_is_422(self):
         assert client.put("/settings/machine", json={"unknown_field": 1}).status_code == 422
 
+    def test_manually_setting_recoat_locks_auto_calibration(self):
+        # Same reasoning as time_correction_by_mat: an operator-entered value
+        # must not be silently overwritten by the next auto-calibration run.
+        response = client.put("/settings/machine", json={"recoat_time_by_mat": {"steel": 9000}})
+        assert response.status_code == 200
+        assert response.json()["params"]["correction_locked"] is True
+
 
 class TestDownloadHeaders:
     def test_filename_with_quotes_cannot_break_the_header(self):
@@ -414,3 +421,23 @@ class TestDownloadHeaders:
         # The quoted fallback drops non-ASCII; filename* carries the real name.
         assert "filename*=UTF-8''" in header
         assert "%D0%BA" in header
+
+
+class TestCalibrationEndpointsIncludeRecoat:
+    """Both endpoints must surface recoat calibration alongside scan-time
+    calibration — one report, one button, not two operators have to know
+    about separately."""
+
+    def test_prediction_accuracy_response_has_a_recoat_section(self):
+        response = client.get("/prints/prediction-accuracy")
+        assert response.status_code == 200
+        body = response.json()
+        assert "recoat" in body
+        assert "by_material" in body["recoat"]
+
+    def test_recalibrate_response_has_a_recoat_section(self):
+        response = client.post("/prints/recalibrate")
+        assert response.status_code == 200
+        body = response.json()
+        assert "recoat" in body
+        assert "applied" in body["recoat"]

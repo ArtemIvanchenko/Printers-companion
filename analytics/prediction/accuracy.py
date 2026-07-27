@@ -44,17 +44,17 @@ CORRECTION_MIN, CORRECTION_MAX = 0.5, 2.0
 # idle diagnostics and mis-grouped sessions have spans that are not comparable
 # with a geometric estimate, and feeding them in skews the factor that scales
 # every quoted time and price.
-_PRINT_CLASSIFICATIONS = {"REAL_PRINT", "REAL_PRINT_WITH_RESUME"}
+PRINT_CLASSIFICATIONS = {"REAL_PRINT", "REAL_PRINT_WITH_RESUME"}
 # Hard sanity bounds on a measured print span (hours). Outside these the pair is
 # reported but never used for calibration.
 _MIN_ACTUAL_HOURS, _MAX_ACTUAL_HOURS = 0.25, 24 * 14
 
 
-def _as_utc(ts: datetime) -> datetime:
+def as_utc(ts: datetime) -> datetime:
     return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
 
 
-def _session_classification(session: BuildSession) -> str:
+def session_classification(session: BuildSession) -> str:
     group = ((session.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
     return group.get("classification") or session.classification or ""
 
@@ -68,13 +68,13 @@ def _actual_hours(session: BuildSession) -> float | None:
     """
     if not session.start_ts or not session.end_ts:
         return None
-    hours = (_as_utc(session.end_ts) - _as_utc(session.start_ts)).total_seconds() / 3600.0
+    hours = (as_utc(session.end_ts) - as_utc(session.start_ts)).total_seconds() / 3600.0
     return hours if hours > 0 else None
 
 
 def _usable_for_calibration(session: BuildSession, actual: float) -> str | None:
     """Reason this pair must not train the correction factor, or None if it may."""
-    if _session_classification(session) not in _PRINT_CLASSIFICATIONS:
+    if session_classification(session) not in PRINT_CLASSIFICATIONS:
         return "not_a_print"
     if not (_MIN_ACTUAL_HOURS <= actual <= _MAX_ACTUAL_HOURS):
         return "implausible_duration"
@@ -134,7 +134,7 @@ def prediction_accuracy(db: Session) -> dict:
         skip_reason = _usable_for_calibration(session, actual)
 
         # Order pairs by when the print happened, so "most recent N" is real.
-        when = _as_utc(session.start_ts) if session.start_ts else _as_utc(record.created_at)
+        when = as_utc(session.start_ts) if session.start_ts else as_utc(record.created_at)
         if skip_reason is None:
             usable_by_mat[material].append((when, ratio))
             all_usable.append((when, ratio))
@@ -244,6 +244,10 @@ __all__ = [
     "prediction_accuracy",
     "recalibrate_and_apply",
     "MIN_PAIRS_FOR_CALIBRATION",
+    "CALIBRATION_WINDOW",
     "CORRECTION_MIN",
     "CORRECTION_MAX",
+    "PRINT_CLASSIFICATIONS",
+    "as_utc",
+    "session_classification",
 ]
