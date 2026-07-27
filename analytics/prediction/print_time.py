@@ -25,7 +25,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 
-from analytics.prediction.stl_slicer import SliceResult
+from analytics.prediction.stl_slicer import EstimationError, SliceResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,6 @@ _PYSLM_SAMPLE_SECTIONS = 10
 # в параметрах машины (их следует задать через UI для точности).
 _DEFAULT_JUMP_SPEED_MM_S = 5000.0
 _DEFAULT_JUMP_DELAY_MS = 0.0
-
-
-class EstimationError(ValueError):
-    """Required machine parameter is missing."""
 
 
 @dataclass

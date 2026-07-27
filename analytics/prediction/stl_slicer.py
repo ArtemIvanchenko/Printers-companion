@@ -12,6 +12,15 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+
+class EstimationError(ValueError):
+    """The estimate cannot be produced honestly (bad geometry, missing param).
+
+    Defined here (not in print_time) so the slicer itself can raise it;
+    analytics.prediction.print_time re-exports it for backward compatibility.
+    """
+
+
 # Cap on the number of cross-sections actually computed; the M-450M at
 # 0.03–0.06 mm layers would otherwise need 5 000–10 000 sections per request.
 _MAX_SECTIONS = 400
@@ -98,8 +107,22 @@ def slice_stl(stl_bytes: bytes, layer_thickness_mm: float) -> SliceResult:
     repaired = False
     if not mesh.is_watertight:
         too_big = len(mesh.faces) > _MAX_REPAIR_FACES
+        original_height = float(mesh.bounds[1][2] - mesh.bounds[0][2])
         mesh, repaired = _repair_mesh(mesh)
         if repaired:
+            # MeshFix "repairs" open shells (support sheets, plates with
+            # sheet-like bodies) by throwing whole regions away. On a real
+            # build this silently discarded more than half the plate height
+            # and the estimate came out ~4-5x low while looking confident.
+            # A repair that shrank the build must abort, not warn.
+            repaired_height = float(mesh.bounds[1][2] - mesh.bounds[0][2])
+            if original_height > 0 and repaired_height < 0.95 * original_height:
+                raise EstimationError(
+                    f"Автопочинка сетки удалила часть геометрии (высота {original_height:.1f} мм → "
+                    f"{repaired_height:.1f} мм) — файл, вероятно, содержит незамкнутые оболочки "
+                    "(поддержки). Оцените деталь и поддержки раздельно (plate_estimator) "
+                    "или загрузите герметичный STL."
+                )
             warnings.append("Сетка не была герметична — автоматически починена (MeshFix).")
         elif too_big:
             warnings.append(
@@ -154,4 +177,4 @@ def slice_stl(stl_bytes: bytes, layer_thickness_mm: float) -> SliceResult:
     )
 
 
-__all__ = ["SliceResult", "slice_stl", "load_mesh"]
+__all__ = ["SliceResult", "slice_stl", "load_mesh", "EstimationError"]

@@ -186,71 +186,43 @@ def recalibrate(repo: PrintsRepository = Depends(get_prints_repository)) -> dict
 
 
 def _combined_prediction(
-    blobs: list[bytes],
+    parts: list[tuple[str, bytes]],
+    supports: list[tuple[str, bytes]],
     material: str,
     params: dict,
     powder_cost: float | None,
 ) -> dict:
     """Time + cost estimate over a full print platform (parts + supports STLs).
 
-    This is how a Magics layout is estimated: the operator exports the whole
-    plate (every part, its copies and supports, in the real build orientation)
-    as STLs and we slice them together as one build.
+    Parts go through the PySLM vector path; supports (open sheet meshes from
+    Magics) through the section model — feeding them into the part path made
+    MeshFix silently discard geometry and the estimate came out several times
+    low. See analytics.prediction.plate_estimator.
 
-    Semantics:
-    - scan  = Σ per-part scan times  (parts scanned independently by the laser)
-    - recoat = from the tallest part (one recoat pass per layer for the whole platform)
-    - volume / powder = Σ parts
-    - correction = uniform per material, so combined raw = combined print / factor
+    Powder mass for the cost estimate uses part volume only: sheet supports
+    have no meaningful mesh volume (flagged in the response warnings).
     """
     from analytics.prediction.cost_estimator import estimate_cost
-    from analytics.prediction.print_time import EstimationError, PrintTimeEstimate, estimate_print_time
-    from analytics.prediction.stl_slicer import SliceResult, slice_stl
+    from analytics.prediction.plate_estimator import estimate_plate
+    from analytics.prediction.stl_slicer import EstimationError, SliceResult
 
     try:
-        layer_thickness = float(params["layer_thickness_mm"])
-        per_part = [
-            (slc := slice_stl(blob, layer_thickness),
-             estimate_print_time(slc, params, material, stl_bytes=blob))
-            for blob in blobs
-        ]
+        est = estimate_plate(parts, supports, params, material)
 
-        scan_hours = sum(te.scan_hours for _, te in per_part)
-        # Recoat is a single pass per layer for the tallest part on the platform
-        tallest = max(range(len(per_part)), key=lambda i: per_part[i][0].layer_count)
-        recoat_hours = per_part[tallest][1].recoat_hours
-        print_hours = scan_hours + recoat_hours
-
-        factor = per_part[0][1].correction_factor or 1.0
-        raw_print_hours = print_hours / factor if factor else print_hours
-
-        # Deduplicated warnings from all parts
-        seen: set[str] = set()
-        warnings: list[str] = []
-        for _, te in per_part:
-            for w in te.warnings:
-                if w not in seen:
-                    seen.add(w)
-                    warnings.append(w)
-
-        combined_time = PrintTimeEstimate(
-            scan_hours=scan_hours,
-            recoat_hours=recoat_hours,
-            print_hours=print_hours,
-            total_days=print_hours / 24.0,
-            method=per_part[0][1].method,
-            raw_print_hours=raw_print_hours,
-            correction_factor=factor,
-            warnings=warnings,
-        )
         combined_slices = SliceResult(
-            volume_mm3=sum(sl.volume_mm3 for sl, _ in per_part),
-            height_mm=max(sl.height_mm for sl, _ in per_part),
-            layer_count=max(sl.layer_count for sl, _ in per_part),
-            layer_thickness_mm=layer_thickness,
+            volume_mm3=sum(sl.volume_mm3 for sl in est.part_slices),
+            height_mm=est.height_mm,
+            layer_count=est.layer_count,
+            layer_thickness_mm=float(params["layer_thickness_mm"]),
         )
-        cost_est = estimate_cost(combined_slices, params, material, combined_time,
+        cost_est = estimate_cost(combined_slices, params, material,
+                                 est.as_print_time_estimate(),
                                  powder_cost_override=powder_cost)
+        cost_warnings = list(cost_est.warnings)
+        if supports:
+            cost_warnings.append(
+                "Масса порошка поддержек не входит в стоимость (объём листовых поддержек не определён)."
+            )
     except EstimationError as exc:
         return {"available": False, "reason": str(exc)}
     except Exception:
@@ -259,18 +231,19 @@ def _combined_prediction(
 
     return {
         "available": True,
-        "n_parts": len(per_part),
-        "method": combined_time.method,
+        "n_parts": sum(1 for b in est.bodies if b.kind == "part"),
+        "n_support_bodies": sum(1 for b in est.bodies if b.kind == "support"),
+        "method": est.method,
         "build_axis": "Z",
-        "layer_count": combined_slices.layer_count,
-        "height_mm": round(combined_slices.height_mm, 2),
-        "print_hours": round(print_hours, 3),
-        "raw_print_hours": round(raw_print_hours, 3),
-        "correction_factor": round(factor, 3),
-        "scan_hours": round(scan_hours, 3),
-        "recoat_hours": round(recoat_hours, 3),
+        "layer_count": est.layer_count,
+        "height_mm": round(est.height_mm, 2),
+        "print_hours": round(est.print_hours, 3),
+        "raw_print_hours": round(est.raw_print_hours, 3),
+        "correction_factor": round(est.correction_factor, 3),
+        "scan_hours": round(est.scan_hours, 3),
+        "recoat_hours": round(est.recoat_hours, 3),
         "cost_total_rub": cost_est.total_rub,
-        "warnings": combined_time.warnings + cost_est.warnings,
+        "warnings": est.warnings + cost_warnings,
     }
 
 
@@ -305,25 +278,27 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         )
 
     store = ObjectStore()
-    blobs: list[bytes] = []
-    n_supports = 0
+    parts: list[tuple[str, bytes]] = []
+    supports: list[tuple[str, bytes]] = []
     for f in platform_files:
         bucket, _, object_name = f["object_uri"].removeprefix("s3://").partition("/")
         data = store.get_bytes(bucket, object_name)
         if data is None:
             raise HTTPException(503, f"STL недоступен в хранилище: {f['file_name']}")
-        blobs.append(data)
         if f["file_type"] == "stl_supports":
-            n_supports += 1
+            supports.append((f["file_name"], data))
+        else:
+            parts.append((f["file_name"], data))
+    n_supports = len(supports)
 
     powder_cost = record.get("powder_cost_rub_per_kg") or repo.last_powder_cost()
-    result = _combined_prediction(blobs, material, params, powder_cost)
+    result = _combined_prediction(parts, supports, material, params, powder_cost)
     if not result.get("available"):
         raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
 
     snapshot: dict = {
         "estimated_at": datetime.now(timezone.utc).isoformat(),
-        "n_parts": len(blobs),
+        "n_parts": len(parts),
         "n_supports": n_supports,
         "material": material,
         "method": result["method"],
@@ -342,8 +317,8 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     repo.update_print_record(record_id, {"metadata_json": meta})
     repo.flush()
     logger.info(
-        "prints: prediction stored for %s (%d parts incl %d supports, %.1fh, ×%.3f)",
-        record_id, len(blobs), n_supports, snapshot["print_hours"], snapshot["correction_factor"],
+        "prints: prediction stored for %s (%d parts + %d supports, %.1fh, ×%.3f)",
+        record_id, len(parts), n_supports, snapshot["print_hours"], snapshot["correction_factor"],
     )
     return snapshot
 
