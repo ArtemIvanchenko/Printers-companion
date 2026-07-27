@@ -88,6 +88,53 @@ def _pour_seconds_from_events(events: list[Any]) -> list[float]:
     return list(seen.values())
 
 
+def _machine_seconds_from_events(events: list) -> dict[int, float]:
+    """{layer: burn+pour seconds} — полное машинное время слоя, без пауз.
+
+    Использует burn_ms + pour_ms (а не make_layer_ms): make_layer_ms на части
+    прошивок включает межслойные ожидания, а политика проекта — только чистое
+    машинное время (см. базу знаний в plate_estimator.py, п.1).
+    """
+    out: dict[int, float] = {}
+    for event in events:
+        event_type = getattr(event, "event_type", None) if not isinstance(event, dict) else event.get("event_type")
+        if event_type != "layer_timing_summary":
+            continue
+        payload = getattr(event, "payload", None) if not isinstance(event, dict) else event.get("payload")
+        payload = payload or {}
+        layer = payload.get("layer")
+        burn_ms, pour_ms = payload.get("burn_ms"), payload.get("pour_ms")
+        if not isinstance(layer, int):
+            continue
+        if not isinstance(burn_ms, (int, float)) or not isinstance(pour_ms, (int, float)):
+            continue
+        if burn_ms <= 0 or not (_MIN_POUR_MS <= pour_ms <= _MAX_POUR_MS):
+            continue
+        out.setdefault(layer, (burn_ms + pour_ms) / 1000.0)
+    return out
+
+
+def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
+    """Полное машинное время (burn+pour) по слоям одной сессии, из time_log.
+
+    Возвращает None, когда time_log отсутствует/не читается. Частичное
+    покрытие слоёв возможно (суточная ротация логов) — вызывающий обязан
+    проверять полноту, если суммирует (accuracy._machine_hours_from_logs).
+    """
+    from storage.repositories.runtime import RuntimeRepository
+
+    files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True)
+    if not files:
+        return None
+    out: dict[int, float] = {}
+    for f in files:
+        if f.classification.family != SourceFileFamily.time_log or not f.parse_result:
+            continue
+        for layer, sec in _machine_seconds_from_events(f.parse_result.events).items():
+            out.setdefault(layer, sec)
+    return out or None
+
+
 def session_recoat_seconds(session_id: str, db: Session) -> list[float] | None:
     """Per-layer recoat seconds for one session, or None if unavailable.
 
@@ -235,6 +282,7 @@ __all__ = [
     "recoat_accuracy",
     "recalibrate_recoat_and_apply",
     "session_recoat_seconds",
+    "session_machine_seconds_by_layer",
     "RECOAT_MIN_MS",
     "RECOAT_MAX_MS",
 ]

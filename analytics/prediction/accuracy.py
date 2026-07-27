@@ -59,12 +59,51 @@ def session_classification(session: BuildSession) -> str:
     return group.get("classification") or session.classification or ""
 
 
+# Machine-time actuals are only trusted when the time_log covers (almost) the
+# whole print: a partial log (multi-day rotation, truncated file) sums LESS
+# machine time than the print really took and would drag the factor down.
+_MACHINE_TIME_MIN_COVERAGE = 0.95
+# Without a known expected layer count we cannot check coverage at all — a
+# missing/legacy snapshot must not let a two-layer partial log pass as "the
+# whole print". Require this many logged layers as a weak floor in that case;
+# it does not replace the coverage check, only covers its absence.
+_MACHINE_TIME_MIN_LAYERS_NO_EXPECTED = 100
+
+
+def _machine_hours_from_logs(
+    session_id: str, expected_layers: int | None, db: Session,
+) -> float | None:
+    """Pause-free machine hours: Σ(burn_ms + pour_ms) over the session's time_log.
+
+    This is the project's calibration principle (см. базу знаний в
+    plate_estimator.py, п.1): predictions model machine time only, so actuals
+    must be machine time too. The wall-clock session span includes operator
+    pauses — on a real build 18 of 47.6 hours — and calibrating against it
+    bakes pauses into every quoted time.
+
+    Returns None when the time_log is absent or does not plausibly cover the
+    whole print (see the two floors above — ``expected_layers`` is normally
+    present, ``_MACHINE_TIME_MIN_LAYERS_NO_EXPECTED`` only guards its absence).
+    """
+    from analytics.prediction.recoat_calibration import session_machine_seconds_by_layer
+
+    per_layer = session_machine_seconds_by_layer(session_id, db)
+    if not per_layer:
+        return None
+    if expected_layers:
+        if len(per_layer) < _MACHINE_TIME_MIN_COVERAGE * expected_layers:
+            return None
+    elif len(per_layer) < _MACHINE_TIME_MIN_LAYERS_NO_EXPECTED:
+        return None
+    return sum(per_layer.values()) / 3600.0
+
+
 def _actual_hours(session: BuildSession) -> float | None:
-    """Measured print span in hours, or None when it cannot be trusted.
+    """Wall-clock print span in hours — the FALLBACK actual, pause-contaminated.
 
     ``start_ts``/``end_ts`` are the monitor100-excluded print span computed by
-    ``compute_print_span``; they are only meaningful when the session groups the
-    files of exactly one print (see domain.services.session_grouping).
+    ``compute_print_span``. Callers must prefer ``_machine_hours_from_logs``;
+    this remains only for sessions whose time_log is missing or incomplete.
     """
     if not session.start_ts or not session.end_ts:
         return None
@@ -121,7 +160,18 @@ def prediction_accuracy(db: Session) -> dict:
         if not snapshot:
             continue
         session = sessions.get(record.session_id)
-        actual = _actual_hours(session) if session else None
+        actual = actual_source = None
+        if session is not None:
+            # Pause-free machine time from the printer's own logs is the ONLY
+            # actual consistent with what the model predicts; the wall-clock
+            # span is a legacy fallback and carries operator pauses.
+            actual = _machine_hours_from_logs(
+                record.session_id, snapshot.get("layer_count"), db,
+            )
+            actual_source = "machine_log" if actual is not None else None
+            if actual is None:
+                actual = _actual_hours(session)
+                actual_source = "wall_span" if actual is not None else None
         raw = _raw_predicted(snapshot)
         if actual is None or raw is None:
             continue
@@ -160,6 +210,7 @@ def prediction_accuracy(db: Session) -> dict:
             "raw_error_pct": round((raw - actual) / actual * 100, 1),
             "used_for_calibration": skip_reason is None,
             "excluded_reason": skip_reason,
+            "actual_source": actual_source,
             "printed_at": when.isoformat(),
             "estimated_at": snapshot.get("estimated_at"),
         })
