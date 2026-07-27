@@ -22,7 +22,14 @@ class TestAccuracyReport:
         start = datetime(2028, 1, 1, 8, 0, tzinfo=timezone.utc) + timedelta(days=idx)
         end = start + timedelta(hours=actual_hours)
         sid = f"s_acc_{idx}"
-        db.add(BuildSession(session_id=sid, status="x", context={}, start_ts=start, end_ts=end))
+        db.add(BuildSession(
+            session_id=sid, status="x", start_ts=start, end_ts=end,
+            # Calibration only learns from sessions classified as prints — a
+            # service run's span is not a print duration. Real pairs always
+            # carry this; synthetic ones must too.
+            classification="REAL_PRINT",
+            context={"runtime_payload": {"group": {"classification": "REAL_PRINT"}}},
+        ))
         db.add(PrintRecord(
             record_id=f"pr_acc_{idx}", name=f"acc{idx}", session_id=sid, material=material,
             metadata_json={"prediction": {
@@ -327,10 +334,13 @@ class TestLightGBMDefectModel:
     def test_gbm_trained_with_enough_labels(self):
         from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
 
-        data = [(self._group(0.1), 0) for _ in range(12)] + [(self._group(0.9), 1) for _ in range(12)]
+        # MIN_LABELS_GBM is 40 with at least 10 of the minority class; below
+        # that the logistic regression is used instead.
+        data = [(self._group(0.1), 0) for _ in range(24)] + [(self._group(0.9), 1) for _ in range(24)]
         model = train_defect_model(data)
         assert model is not None
         assert model["type"] == "lightgbm"
+        assert model["cv_auc"] is not None
 
         risky = predict_defect_risk(self._group(0.9), model)
         safe = predict_defect_risk(self._group(0.1), model)
@@ -340,7 +350,13 @@ class TestLightGBMDefectModel:
     def test_logreg_with_medium_labels(self):
         from analytics.prediction.defect_risk import train_defect_model
 
-        data = [(self._group(0.1), 0) for _ in range(5)] + [(self._group(0.9), 1) for _ in range(5)]
+        data = [(self._group(0.1), 0) for _ in range(12)] + [(self._group(0.9), 1) for _ in range(12)]
         model = train_defect_model(data)
         assert model is not None
         assert model["type"] == "logreg"
+
+    def test_no_model_below_minimum_labels(self):
+        from analytics.prediction.defect_risk import train_defect_model
+
+        data = [(self._group(0.1), 0) for _ in range(5)] + [(self._group(0.9), 1) for _ in range(5)]
+        assert train_defect_model(data) is None
