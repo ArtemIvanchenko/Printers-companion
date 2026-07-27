@@ -44,7 +44,8 @@ class TestParts:
         est = estimate_plate([("box", _box_stl())], [], _params(), "steel")
         assert est.print_hours > 0
         [body] = est.bodies
-        assert body.kind == "part" and body.method == "pyslm"
+        assert body.kind == "part" and body.scan_share == 1.0
+        assert est.scan_source == "physics"
         assert body.layer_count == 100  # 10 mm / 0.1 mm
         # recoat: 100 layers x 10 s
         assert est.recoat_hours == pytest.approx(100 * 10 / 3600, rel=1e-6)
@@ -65,10 +66,11 @@ class TestSupports:
         # per layer at 1000 mm/s = 0.03 s/layer -> 6 s total scan.
         est = estimate_plate([], [("s_wall", _sheet_stl())], _params(), "steel")
         [body] = est.bodies
-        assert body.kind == "support" and body.method == "sections"
+        assert body.kind == "support" and body.scan_share == 1.0
         assert body.layer_count == 200
-        assert body.raw_scan_hours == pytest.approx(6.0 / 3600, rel=0.05)
-        assert any("Перескоки" in w for w in est.warnings)
+        # scan = open-track only: no correction warnings about lower bound
+        assert est.scan_hours == pytest.approx(6.0 / 3600, rel=0.05)
+        assert any("перескоки между ними не моделируются" in w for w in est.warnings)
         assert not any("НИЖНЕЙ границей" in w for w in est.warnings)
 
     def test_part_plus_support_sums_scan_and_shares_recoat(self):
@@ -82,7 +84,9 @@ class TestSupports:
         assert est.recoat_hours == pytest.approx(200 * 10 / 3600, rel=1e-6)
         kinds = {b.kind for b in est.bodies}
         assert kinds == {"part", "support"}
-        assert est.scan_hours > max(b.raw_scan_hours for b in est.bodies)
+        # shares sum to 1 and every body got some share
+        assert sum(b.scan_share for b in est.bodies) == pytest.approx(1.0, rel=1e-6)
+        assert all(b.scan_share > 0 for b in est.bodies)
 
 
 class TestValidation:
@@ -165,3 +169,41 @@ class TestMagicsReader:
         plate = read_plate(self._synthetic_magics(tmp_path, below_platform=True))
         assert len(plate.parts) == 0
         assert len(plate.markers) == 1
+
+
+class TestFittedModelApplication:
+    def test_fitted_model_replaces_physics_and_correction(self):
+        from analytics.prediction.layer_engine import GEOMETRY_FEATURES
+
+        # Physics baseline with an aggressive correction factor
+        base = estimate_plate([("box", _box_stl())], [], _params(time_correction_factor=1.8), "steel")
+        assert base.scan_source == "physics"
+        assert base.correction_factor == 1.8
+
+        # Fitted model for exactly this mode: pure hatch term at 500 mm/s
+        beta = [0.0] * (len(GEOMETRY_FEATURES) + 1)
+        beta[0] = 1.0 / 500.0
+        fitted = estimate_plate(
+            [("box", _box_stl())], [],
+            _params(time_correction_factor=1.8,
+                    scan_model_by_mat={"steel@0.100": {"beta": beta, "r2": 0.9}}),
+            "steel",
+        )
+        assert fitted.scan_source == "fitted"
+        assert fitted.method.endswith("+fitted")
+        # Absolute: the 1.8 blanket factor must NOT stack on the fitted scan
+        assert fitted.correction_factor == 1.0
+        assert any("паспортным скоростям" in w for w in base.warnings)
+        assert not any("паспортным скоростям" in w for w in fitted.warnings)
+
+    def test_fitted_model_ignored_for_other_mode(self):
+        from analytics.prediction.layer_engine import GEOMETRY_FEATURES
+
+        beta = [0.0] * (len(GEOMETRY_FEATURES) + 1)
+        beta[0] = 1.0 / 500.0
+        est = estimate_plate(
+            [("box", _box_stl())], [],
+            _params(scan_model_by_mat={"steel@0.025": {"beta": beta}}),  # другой режим
+            "steel",
+        )
+        assert est.scan_source == "physics"

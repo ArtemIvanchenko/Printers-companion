@@ -24,7 +24,7 @@ _PARAM_FIELDS = (
     "powder_cost_rub_per_kg", "gas_cost_rub_per_atm", "gas_atm_per_print",
     "filter_cost_rub", "filter_lifetime_hours", "platform_cost_rub",
     "material_densities", "hatch_speeds_by_mat", "time_correction_by_mat",
-    "recoat_time_by_mat", "build_area_cm2",
+    "recoat_time_by_mat", "scan_model_by_mat", "build_area_cm2",
 )
 
 

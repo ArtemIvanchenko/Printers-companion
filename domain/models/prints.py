@@ -125,5 +125,9 @@ class MachineParams(Base):
     # Per-material time-correction factors: {"steel": 1.15, "aluminum": 1.08, ...}
     # Auto-calibrated from predicted-vs-actual history per material.
     time_correction_by_mat: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
+    # Fitted scan-time models keyed "material@thickness" ("steel@0.060"),
+    # calibrated from real per-layer burn_ms logs — see
+    # analytics.prediction.scan_calibration. Applied only on an exact mode match.
+    scan_model_by_mat: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
     build_area_cm2: Mapped[float | None] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

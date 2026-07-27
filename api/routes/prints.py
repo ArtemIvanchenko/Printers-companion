@@ -170,9 +170,11 @@ def get_prediction_accuracy(repo: PrintsRepository = Depends(get_prints_reposito
     both learned per material from history."""
     from analytics.prediction.accuracy import prediction_accuracy
     from analytics.prediction.recoat_calibration import recoat_accuracy
+    from analytics.prediction.scan_calibration import scan_calibration_report
 
     report = prediction_accuracy(repo.db)
     report["recoat"] = recoat_accuracy(repo.db)
+    report["scan"] = scan_calibration_report(repo.db)
     return report
 
 
@@ -185,9 +187,11 @@ def recalibrate(repo: PrintsRepository = Depends(get_prints_repository)) -> dict
     """
     from analytics.prediction.accuracy import recalibrate_and_apply
     from analytics.prediction.recoat_calibration import recalibrate_recoat_and_apply
+    from analytics.prediction.scan_calibration import recalibrate_scan_and_apply
 
     result = recalibrate_and_apply(repo.db)
     result["recoat"] = recalibrate_recoat_and_apply(repo.db)
+    result["scan"] = recalibrate_scan_and_apply(repo.db)
     repo.flush()
     return result
 
@@ -201,10 +205,8 @@ def _combined_prediction(
 ) -> dict:
     """Time + cost estimate over a full print platform (parts + supports STLs).
 
-    Parts go through the PySLM vector path; supports (open sheet meshes from
-    Magics) through the section model — feeding them into the part path made
-    MeshFix silently discard geometry and the estimate came out several times
-    low. See analytics.prediction.plate_estimator.
+    All bodies are co-hatched per plate layer by the layer engine (real vectors,
+    shared Z axis) — see analytics.prediction.plate_estimator / layer_engine.
 
     Powder mass for the cost estimate uses part volume only: sheet supports
     have no meaningful mesh volume (flagged in the response warnings).
@@ -217,7 +219,7 @@ def _combined_prediction(
         est = estimate_plate(parts, supports, params, material)
 
         combined_slices = SliceResult(
-            volume_mm3=sum(sl.volume_mm3 for sl in est.part_slices),
+            volume_mm3=est.parts_volume_mm3,
             height_mm=est.height_mm,
             layer_count=est.layer_count,
             layer_thickness_mm=float(params["layer_thickness_mm"]),
@@ -250,7 +252,15 @@ def _combined_prediction(
         "scan_hours": round(est.scan_hours, 3),
         "recoat_hours": round(est.recoat_hours, 3),
         "cost_total_rub": cost_est.total_rub,
+        "scan_source": est.scan_source,
         "warnings": est.warnings + cost_warnings,
+        # Per-layer geometry series — persisted into the snapshot so scan
+        # calibration can later pair it with real burn_ms without re-slicing.
+        "scan_geometry": {
+            **est.geometry_series.to_snapshot(),
+            "layer_thickness_mm": float(params["layer_thickness_mm"]),
+            "laser_count": int(params.get("laser_count") or 1),
+        } if est.geometry_series is not None else None,
     }
 
 
@@ -316,7 +326,9 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         # factor stays absolute and never compounds on itself.
         "raw_print_hours": result.get("raw_print_hours", result["print_hours"]),
         "correction_factor": result.get("correction_factor", 1.0),
+        "scan_source": result.get("scan_source", "physics"),
         "cost_total_rub": result["cost_total_rub"],
+        "scan_geometry": result.get("scan_geometry"),
     }
 
     meta = dict(record.get("metadata_json") or {})
@@ -414,9 +426,11 @@ def update_print(
     if values.get("session_id"):
         from analytics.prediction.accuracy import recalibrate_and_apply
         from analytics.prediction.recoat_calibration import recalibrate_recoat_and_apply
+        from analytics.prediction.scan_calibration import recalibrate_scan_and_apply
         try:
             recalibrate_and_apply(repo.db)
             recalibrate_recoat_and_apply(repo.db)
+            recalibrate_scan_and_apply(repo.db)
             repo.flush()
         except Exception:
             logger.exception("auto-calibration after manual link failed")

@@ -35,7 +35,7 @@ class TestAccuracyReport:
             metadata_json={"prediction": {
                 "estimated_at": start.isoformat(),
                 "material": material,
-                "method": "pyslm",
+                "method": "cohatch",
                 "print_hours": raw_predicted,
                 "raw_print_hours": raw_predicted,
                 "correction_factor": 1.0,
@@ -158,15 +158,22 @@ class TestEstimateRecordEndpoint:
         assert snap["print_hours"] > 0
         assert snap["raw_print_hours"] > 0
         # Plate estimator: parts via pyslm, supports via the section model
-        assert snap["method"] == "plate:pyslm+sections"
+        assert snap["method"] == "plate:cohatch"
         stored = client.get(f"/prints/{rec['record_id']}").json()
-        assert stored["metadata_json"]["prediction"]["method"] == "plate:pyslm+sections"
+        assert stored["metadata_json"]["prediction"]["method"] == "plate:cohatch"
 
     def test_estimate_two_stl_aggregates_correctly(self, monkeypatch):
-        """Платформа из 2 STL: scan=Σ, recoat=max, объём=Σ."""
+        """Платформа из 2 STL: совместный хэтчинг, recoat от высоты объединения.
+
+        Второй куб смещён по X: тела реальной плиты не совпадают в XY, а
+        совпадающие контуры движок объединяет (unary_union) — перекрытие
+        плавится один раз, это физика, а не суммирование по телам.
+        """
         import trimesh
 
-        TALL_STL = trimesh.creation.box(extents=[10, 10, 20]).export(file_type="stl")
+        _tall = trimesh.creation.box(extents=[10, 10, 20])
+        _tall.apply_translation([40.0, 0.0, 0.0])
+        TALL_STL = _tall.export(file_type="stl")
 
         class _Store:
             data = {}

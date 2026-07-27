@@ -26,6 +26,9 @@ _INT_FIELDS = {"laser_count"}
 _DICT_FIELDS = {
     "material_densities", "hatch_speeds_by_mat", "time_correction_by_mat", "recoat_time_by_mat",
 }
+# scan_model_by_mat is deliberately NOT in _DICT_FIELDS: its values are nested
+# model dicts written only by the calibration code — the settings PUT treats it
+# as an unknown key and ignores it.
 _BOOL_FIELDS = {"correction_locked"}
 
 # Fields the time/cost estimators cannot work without
@@ -51,6 +54,7 @@ def get_machine_params(repo: PrintsRepository = Depends(get_prints_repository)) 
         params["hatch_speeds_by_mat"] = {}
         params["time_correction_by_mat"] = {}
         params["recoat_time_by_mat"] = {}
+        params["scan_model_by_mat"] = {}
         params["correction_locked"] = False
         params["updated_at"] = None
     return {"params": params, "configured": params_configured(params)}

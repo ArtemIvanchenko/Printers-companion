@@ -118,12 +118,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ОШИБКА: {exc}", file=sys.stderr)
         return 2
 
-    print(f"{'тело':<44}{'тип':>10}{'метод':>10}{'скан,ч':>9}{'слоёв':>7}{'выс,мм':>8}")
+    print(f"{'тело':<44}{'тип':>10}{'доля скана':>12}{'слоёв':>7}{'выс,мм':>8}")
     print("-" * 88)
     for b in est.bodies:
-        print(f"{b.name[:42]:<44}{b.kind:>10}{b.method:>10}"
-              f"{b.raw_scan_hours * est.correction_factor:>9.2f}{b.layer_count:>7}{b.height_mm:>8.1f}")
+        print(f"{b.name[:42]:<44}{b.kind:>10}{b.scan_share*100:>11.1f}%{b.layer_count:>7}{b.height_mm:>8.1f}")
     print("-" * 88)
+    print(f"Источник скана: {est.scan_source}"
+          + ("" if est.scan_source == "fitted" else " (паспортные скорости — без калибровки по логам)"))
     print(f"Слоёв (плита): {est.layer_count}   высота {est.height_mm:.1f} мм")
     print(f"Сканирование:  {est.scan_hours:.2f} ч")
     print(f"Нанесение:     {est.recoat_hours:.2f} ч")

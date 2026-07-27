@@ -82,7 +82,7 @@ class TestPrintTime:
     def test_pyslm_uses_real_vectors(self):
         s = slice_stl(CUBE_STL, 0.05)
         t = estimate_print_time(s, PARAMS, "steel", stl_bytes=CUBE_STL)
-        assert t.method == "pyslm"
+        assert t.method == "cohatch"
         assert t.breakdown["build_axis"] == "Z"
         assert t.breakdown["layer_count"] == 200
         # Физика: ~(100/0.1)/1000 + 40/500 = 1.08 c/слой → ×200/2 = 108 c
@@ -205,7 +205,7 @@ class TestStlEstimateEndpoint:
         assert pred["layer_count"] == 200
         assert pred["build_axis"] == "Z"
         assert pred["print_hours"] > 0
-        assert pred["method"] == "pyslm"
+        assert pred["method"] == "cohatch"
         assert pred["correction_factor"] == 1.0
         assert pred["cost_breakdown"].get("порошок") is not None
 
