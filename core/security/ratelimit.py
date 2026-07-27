@@ -1,7 +1,6 @@
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from functools import wraps
 
 from fastapi import HTTPException, Request
 from starlette.status import HTTP_429_TOO_MANY_REQUESTS

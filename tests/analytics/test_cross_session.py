@@ -1,5 +1,4 @@
 """Tests for analytics.cross_session — pattern detection across sessions."""
-import pytest
 from analytics.cross_session import (
     detect_signal_trends,
     detect_session_anomalies,

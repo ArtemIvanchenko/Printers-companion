@@ -114,17 +114,18 @@ async def get_logs(n: int = 200, level: str | None = None) -> list[dict]:
 # ── Import status ─────────────────────────────────────────────────────────────
 
 @router.get("/import/status")
-async def import_status() -> dict:
+def import_status() -> dict:  # sync: queries the DB, must not run on the loop
     from storage.db.session import session_scope
     from storage.repositories.runtime import RuntimeRepository
     try:
         with session_scope() as db:
             repo = RuntimeRepository(db)
-            sessions = repo.list_session_payloads()
+            # Only the count is displayed — don't deserialise every payload for it.
+            session_count = len(repo.list_session_ids())
             jobs = repo.list_import_jobs()
         last_job = max(jobs, key=lambda j: j.updated_at, default=None)
         return {
-            "session_count": len(sessions),
+            "session_count": session_count,
             "import_job_count": len(jobs),
             "last_import_at": last_job.updated_at.isoformat() if last_job else None,
             "last_import_status": last_job.status.value if last_job else None,

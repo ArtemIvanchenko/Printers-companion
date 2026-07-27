@@ -76,7 +76,11 @@ services:
       dockerfile: Dockerfile.api
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
-    command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 4"
+    # 2 workers, matching the container's 2.0 CPU limit — 4 oversubscribed it.
+    # Each worker holds its own DB pool, rate-limiter state and analysis cache,
+    # so extra workers cost connections and cache hit-rate, not throughput,
+    # at this deployment's scale (a handful of concurrent operators).
+    command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 2"
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

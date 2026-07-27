@@ -1,6 +1,7 @@
 """Upload endpoints: log files, new-print form, STL volume estimator."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -9,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
 
 from api.upload_limits import read_upload_capped
 from core.config.settings import get_settings
@@ -59,7 +59,9 @@ async def upload_logs(files: list[UploadFile]) -> dict:
                 os.unlink(tmp_path)
                 skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
             else:
-                shutil.move(tmp_path, target)
+                # /tmp is a tmpfs and the destination a bind mount, so this is a
+                # cross-device copy of up to 2 GB — off the event loop.
+                await asyncio.to_thread(shutil.move, tmp_path, target)
                 saved.append({"name": name, "size_bytes": total})
                 logger.info("upload_logs: saved %s (%d bytes) → %s", name, total, target)
         except BaseException:
@@ -95,8 +97,6 @@ def _trigger_rescan(path: str) -> None:
     The heavy work (file I/O + log parsing) runs in a thread-pool worker so the
     async event loop is never blocked — the API stays responsive during a scan.
     """
-    import asyncio
-
     def _do_parse(folder: Path, known_paths: set[str]) -> tuple:
         """Blocking work — runs in a thread via asyncio.to_thread."""
         from domain.services.ingestion import IngestionService
@@ -137,8 +137,9 @@ def _trigger_rescan(path: str) -> None:
             # Fetch already-known file paths and session IDs before parsing.
             with session_scope() as db:
                 repo = RuntimeRepository(db)
-                existing_sessions = {sid for sid, _ in repo.list_session_payloads()}
-                from sqlalchemy import select, text
+                # IDs only — the payloads are not needed for a membership test.
+                existing_sessions = repo.list_session_ids()
+                from sqlalchemy import text
                 try:
                     rows = db.execute(text("SELECT original_path FROM source_files")).fetchall()
                     known_paths = {r[0] for r in rows}
@@ -199,7 +200,6 @@ async def new_print(payload: dict) -> dict:
     """
     from storage.db.session import session_scope
     from storage.repositories.runtime import RuntimeRepository
-    from domain.models.entities import OperatorEvent
 
     operator = (payload.get("operator") or "").strip()
     material = (payload.get("material") or "").strip()

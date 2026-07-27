@@ -295,6 +295,15 @@ class RuntimeRepository:
             return None
         return (row.context or {}).get("runtime_payload")
 
+    def list_session_ids(self) -> set[str]:
+        """Every known session id, without loading the payloads.
+
+        Callers that only need to test membership (the re-import guard) must use
+        this: list_session_payloads() deserialises every session's full JSON
+        context, which is orders of magnitude more work and memory.
+        """
+        return set(self.db.scalars(select(BuildSession.session_id)).all())
+
     def list_session_payloads(self) -> list[tuple[str, dict[str, Any]]]:
         rows = self.db.scalars(select(BuildSession).order_by(BuildSession.created_at.desc())).all()
         payloads: list[tuple[str, dict[str, Any]]] = []

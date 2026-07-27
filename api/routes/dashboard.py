@@ -170,7 +170,6 @@ def _load_template() -> str:
     return _TEMPLATE_PATH.read_text(encoding="utf-8")
 
 def _render_template(context: dict) -> str:
-    import re
     html = _load_template()
     def _replacer(m):
         key = m.group(1)
@@ -235,8 +234,15 @@ def _gas_table_rows(gas_events: list) -> str:
 
 
 @router.get("/", response_class=HTMLResponse)
-async def dashboard():
-    """Dashboard endpoint that loads limited data for rendering."""
+def dashboard():
+    """Dashboard endpoint that loads limited data for rendering.
+
+    Intentionally a plain ``def``: the body is synchronous throughout (four
+    bounded queries, a scan of recent sessions' JSON payloads, and a template
+    read). Declared ``async`` it ran all of that on the event loop, so the
+    worker served nothing else while the main page rendered. As a sync handler
+    FastAPI dispatches it to the threadpool instead.
+    """
     from profiles.m350.profile import get_profile as _get_profile
     from profiles.thresholds import load_thresholds
     _profile = _get_profile()

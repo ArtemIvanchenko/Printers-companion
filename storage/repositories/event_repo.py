@@ -1,6 +1,4 @@
 """Event repository for database operations."""
-from datetime import datetime, timezone
-from typing import Any
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select

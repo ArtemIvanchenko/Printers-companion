@@ -7,7 +7,6 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.routes import (
     agent,
@@ -48,7 +47,7 @@ logger = logging.getLogger(__name__)
 _BG_TASKS: set[asyncio.Task] = set()
 
 
-async def _startup_import(raw_logs_path: str) -> None:
+def _startup_import(raw_logs_path: str) -> None:
     """On startup: scan the raw-logs folder and import any unprocessed sessions.
 
     The watcher only reacts to NEW files arriving while it's running.
@@ -56,9 +55,11 @@ async def _startup_import(raw_logs_path: str) -> None:
     started (or while they were down) are picked up automatically.
 
     Idempotent: already-imported sessions are detected by group_id and skipped.
-    Runs 15 seconds after startup to let the database finish initialising.
+
+    Deliberately synchronous: parsing a folder of logs is heavy CPU + file I/O
+    and must not run on the event loop (it would stall every request for the
+    length of the scan). ``_startup_import_once`` hands it to a worker thread.
     """
-    await asyncio.sleep(15)
     path = Path(raw_logs_path)
     if not path.exists() or not path.is_dir():
         logger.warning("startup_import: raw-logs path not found: %s", path)
@@ -87,7 +88,9 @@ async def _startup_import(raw_logs_path: str) -> None:
 
         with session_scope() as db:
             repo = RuntimeRepository(db)
-            existing = {sid for sid, _ in repo.list_session_payloads()}
+            # IDs only: list_session_payloads() would pull every session's full
+            # JSON payload into memory just to read its key.
+            existing = repo.list_session_ids()
             imported = 0
             for group in groups:
                 session_id = group.group_id
@@ -117,6 +120,26 @@ async def _startup_import(raw_logs_path: str) -> None:
                     imported, len(groups) - imported, len(links))
     except Exception:
         logger.exception("startup_import: failed (non-fatal)")
+
+
+async def _startup_import_once(raw_logs_path: str) -> None:
+    """Run ``_startup_import`` once per container, off the event loop.
+
+    Waits 15 s so the database finishes initialising, then takes a cross-worker
+    claim: uvicorn runs several workers and each executes the lifespan, so
+    without it every worker would parse the whole folder at once and race to
+    insert the same sessions.
+    """
+    from core.locks import once_across_workers
+
+    await asyncio.sleep(15)
+
+    def _guarded() -> None:
+        with once_across_workers("startup_import", ttl_sec=3600) as mine:
+            if mine:
+                _startup_import(raw_logs_path)
+
+    await asyncio.to_thread(_guarded)
 
 
 async def _startup_llm_discovery() -> None:
@@ -167,8 +190,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("startup: ensure_all_buckets failed (non-fatal)")
 
-    # Kick off background import of existing log files.
-    task = asyncio.create_task(_startup_import(settings.raw_logs_container_path))
+    # Kick off background import of existing log files (one worker only).
+    task = asyncio.create_task(_startup_import_once(settings.raw_logs_container_path))
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
 

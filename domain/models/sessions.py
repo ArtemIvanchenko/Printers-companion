@@ -4,7 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from storage.db.base import Base
 from storage.db.session import _json_default_dict, _json_default_list

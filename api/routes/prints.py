@@ -1,6 +1,7 @@
 """Print archive endpoints: print record CRUD, search and file attachments."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import mimetypes
@@ -576,7 +577,8 @@ async def import_logs_for_print(
                 os.unlink(tmp_path)
                 skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
             else:
-                shutil.move(tmp_path, target)
+                # Cross-device copy (tmpfs -> bind mount) of up to 2 GB.
+                await asyncio.to_thread(shutil.move, tmp_path, target)
                 saved.append({"name": name, "size_bytes": total})
                 printed_at_hint = printed_at_hint or _date_from_text(name)
         except BaseException:

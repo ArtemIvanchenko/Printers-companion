@@ -3,7 +3,6 @@
 These tests use static data and do not require a database connection.
 """
 
-import pytest
 
 from core.analytics import AnalyticsService
 
