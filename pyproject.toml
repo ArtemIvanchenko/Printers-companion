@@ -77,6 +77,14 @@ addopts = "-q"
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint]
+# Stated explicitly rather than relying on ruff's defaults: 0.16 widened them
+# and CI (which installed ruff unpinned) went from 0 findings to 620 — mostly
+# BLE001 against best-effort handlers this codebase catches broadly on purpose.
+# With the set pinned here, upgrading ruff cannot silently change what is
+# enforced; adding a rule becomes a deliberate edit.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.ruff.lint.per-file-ignores]
 # Standalone demo scripts, run directly and not imported by the app: they set
 # up sys.path before importing project modules, so E402 is intentional there.

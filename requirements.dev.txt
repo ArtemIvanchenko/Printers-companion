@@ -1,0 +1,9 @@
+# Test and lint toolchain — pinned so CI and a developer's machine agree.
+#
+# Left unpinned, CI installed ruff 0.16 against a repo linted with 0.15: the
+# newer default rule set reported 620 findings on code that was clean locally,
+# and the build failed for a toolchain change rather than a code change.
+# The rule set itself is pinned separately in pyproject.toml ([tool.ruff.lint]).
+ruff==0.15.16
+pytest==9.0.3
+pytest-cov==7.1.0

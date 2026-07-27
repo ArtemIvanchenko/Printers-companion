@@ -32,7 +32,7 @@ jobs:
           pip install -r requirements.base.txt
           pip install -r requirements.analytics.txt
           pip install -r requirements.heavy.txt
-          pip install pytest pytest-cov ruff
+          pip install -r requirements.dev.txt
 
       - name: Lint
         run: ruff check .
