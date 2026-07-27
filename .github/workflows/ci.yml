@@ -50,12 +50,10 @@ jobs:
     # create_all() from the ORM models, so a migration that fails to reproduce
     # those models passes every test and breaks on a real upgrade.
     #
-    # Known limitation: migration 0002 itself calls Base.metadata.create_all(),
-    # so on a FRESH database the chain reproduces today's models by definition
-    # and the drift check cannot fail. It is still meaningful for the real
-    # deployment shape — operator databases already exist and are stamped past
-    # 0002, so later migrations must carry every schema change on their own.
-    # Removing the create_all from 0002 would make this job strict everywhere.
+    # This is strict now that 0001 carries an explicit frozen snapshot instead
+    # of calling create_all() — the chain no longer defines itself in terms of
+    # the models it is checked against. It caught the nullability mismatch that
+    # migration 0006 fixes.
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -96,4 +94,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+psycopg://printer_logs:ci-password@localhost:5432/printer_logs
           APP_ENV: test
+          # Running a file inside scripts/ puts scripts/ on sys.path, not the
+          # repo root, so the project packages would not import.
+          PYTHONPATH: .
         run: python scripts/check_migration_drift.py
