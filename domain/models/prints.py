@@ -102,6 +102,12 @@ class MachineParams(Base):
     layer_thickness_mm: Mapped[float | None] = mapped_column(Float)
     laser_count: Mapped[int | None] = mapped_column(Integer)
     recoat_time_ms: Mapped[float | None] = mapped_column(Float)
+    # Per-material recoat time (ms), auto-calibrated from real per-layer
+    # pour_ms readings in printer logs (see analytics.prediction.recoat_calibration).
+    # Falls back to recoat_time_ms, then the hardcoded default. Same shape and
+    # calibration lock as time_correction_by_mat, but this is the duration
+    # itself, not a multiplier.
+    recoat_time_by_mat: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
     # Galvo jump (laser-off repositioning) speed and per-jump delay — used by
     # the PySLM vector estimate to account for travel between scan vectors.
     jump_speed_mm_s: Mapped[float | None] = mapped_column(Float)

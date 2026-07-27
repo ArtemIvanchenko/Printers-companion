@@ -31,10 +31,10 @@ import math
 from dataclasses import dataclass, field
 
 from analytics.prediction.print_time import (
-    _DEFAULT_RECOAT_MS,
     PrintTimeEstimate,
     estimate_print_time,
     resolve_correction_factor,
+    resolve_recoat_ms,
 )
 from analytics.prediction.stl_slicer import EstimationError, SliceResult, slice_stl
 
@@ -70,6 +70,8 @@ class PlateEstimate:
     layer_count: int            # plate layers (union height)
     height_mm: float
     method: str
+    recoat_time_ms: float = 0.0
+    recoat_time_source: str = "default"  # "calibrated" | "manual" | "default"
     bodies: list[BodyEstimate] = field(default_factory=list)
     part_slices: list[SliceResult] = field(default_factory=list)  # for cost reuse
     warnings: list[str] = field(default_factory=list)
@@ -84,6 +86,8 @@ class PlateEstimate:
             method=self.method,
             raw_print_hours=self.raw_print_hours,
             correction_factor=self.correction_factor,
+            breakdown={"recoat_time_ms": round(self.recoat_time_ms, 1),
+                      "recoat_time_source": self.recoat_time_source},
             warnings=list(self.warnings),
         )
 
@@ -240,15 +244,14 @@ def estimate_plate(
     plate_height = max(z_hi - z_lo, 0.0)
     plate_layers = max(int(math.ceil(plate_height / thickness)), 1)
 
-    recoat_ms = params.get("recoat_time_ms")
-    if recoat_ms:
-        raw_recoat = plate_layers * float(recoat_ms) / 1000.0 / 3600.0
-    else:
-        raw_recoat = plate_layers * _DEFAULT_RECOAT_MS / 1000.0 / 3600.0
+    recoat_ms, recoat_source = resolve_recoat_ms(params, material)
+    raw_recoat = plate_layers * recoat_ms / 1000.0 / 3600.0
+    if recoat_source == "default":
         warnings.append(
-            f"Время нанесения слоя не задано — используется откалиброванное значение "
-            f"{_DEFAULT_RECOAT_MS / 1000:.1f} с/слой. На тонких слоях это доминирующая "
-            "часть времени: задайте реальное значение в параметрах машины."
+            f"Время нанесения слоя не задано и не откалибровано по логам — используется "
+            f"значение по умолчанию {recoat_ms / 1000:.1f} с/слой. На тонких слоях это "
+            "доминирующая часть времени: задайте его в параметрах машины или накопите "
+            "историю печатей для автокалибровки."
         )
 
     raw_scan_total = sum(b.raw_scan_hours for b in bodies)
@@ -265,6 +268,8 @@ def estimate_plate(
         layer_count=plate_layers,
         height_mm=plate_height,
         method="plate:pyslm+sections",
+        recoat_time_ms=recoat_ms,
+        recoat_time_source=recoat_source,
         bodies=bodies,
         part_slices=part_slices,
         warnings=warnings,

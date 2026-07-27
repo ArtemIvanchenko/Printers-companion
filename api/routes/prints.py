@@ -166,21 +166,28 @@ def print_defaults(repo: PrintsRepository = Depends(get_prints_repository)) -> d
 
 @router.get("/prediction-accuracy")
 def get_prediction_accuracy(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
-    """Predicted vs actual report + per-material suggested correction factors."""
+    """Predicted vs actual report: scan-time correction factors + recoat time,
+    both learned per material from history."""
     from analytics.prediction.accuracy import prediction_accuracy
+    from analytics.prediction.recoat_calibration import recoat_accuracy
 
-    return prediction_accuracy(repo.db)
+    report = prediction_accuracy(repo.db)
+    report["recoat"] = recoat_accuracy(repo.db)
+    return report
 
 
 @router.post("/recalibrate")
 def recalibrate(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
-    """Recompute and apply per-material time-correction factors from history.
+    """Recompute and apply per-material time-correction factors and recoat time
+    from history.
 
-    No-op when factors are pinned manually (correction_locked).
+    No-op when pinned manually (correction_locked) — one lock for both.
     """
     from analytics.prediction.accuracy import recalibrate_and_apply
+    from analytics.prediction.recoat_calibration import recalibrate_recoat_and_apply
 
     result = recalibrate_and_apply(repo.db)
+    result["recoat"] = recalibrate_recoat_and_apply(repo.db)
     repo.flush()
     return result
 
@@ -403,11 +410,13 @@ def update_print(
         raise HTTPException(404, "Карточка печати не найдена")
     repo.flush()
     # Manually linking a record to a session creates a new predicted/actual pair
-    # → refresh per-material time-correction factors.
+    # (and, if the session has a time_log, a new recoat measurement) → refresh both.
     if values.get("session_id"):
         from analytics.prediction.accuracy import recalibrate_and_apply
+        from analytics.prediction.recoat_calibration import recalibrate_recoat_and_apply
         try:
             recalibrate_and_apply(repo.db)
+            recalibrate_recoat_and_apply(repo.db)
             repo.flush()
         except Exception:
             logger.exception("auto-calibration after manual link failed")

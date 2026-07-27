@@ -23,7 +23,8 @@ _PARAM_FIELDS = (
     "jump_speed_mm_s", "jump_delay_ms",
     "powder_cost_rub_per_kg", "gas_cost_rub_per_atm", "gas_atm_per_print",
     "filter_cost_rub", "filter_lifetime_hours", "platform_cost_rub",
-    "material_densities", "hatch_speeds_by_mat", "time_correction_by_mat", "build_area_cm2",
+    "material_densities", "hatch_speeds_by_mat", "time_correction_by_mat",
+    "recoat_time_by_mat", "build_area_cm2",
 )
 
 
