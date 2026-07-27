@@ -33,6 +33,12 @@ class _MemoryObjectStore:
     def get_bytes(self, bucket, object_name):
         return self.storage.get((bucket, object_name))
 
+    def open_stream(self, bucket, object_name, chunk_size=1024 * 1024):
+        data = self.storage.get((bucket, object_name))
+        if data is None:
+            return None
+        return iter([data[i:i + chunk_size] for i in range(0, len(data), chunk_size)] or [b""])
+
     def remove_object(self, bucket, object_name):
         return self.storage.pop((bucket, object_name), None) is not None
 
@@ -387,3 +393,24 @@ class TestMachineSettings:
 
     def test_put_empty_body_is_422(self):
         assert client.put("/settings/machine", json={"unknown_field": 1}).status_code == 422
+
+
+class TestDownloadHeaders:
+    def test_filename_with_quotes_cannot_break_the_header(self):
+        """Uploaded names reach the header almost unchanged, so a quote in one
+        used to escape the quoted-string and let the client be told a different
+        filename."""
+        from api.routes.prints import _content_disposition
+
+        header = _content_disposition('evil".exe;x.stl')
+        ascii_part = header.split(";")[1]
+        assert '"' not in ascii_part.split("=", 1)[1].strip('"')
+        assert "\r" not in header and "\n" not in header
+
+    def test_cyrillic_filename_survives_via_rfc5987(self):
+        from api.routes.prints import _content_disposition
+
+        header = _content_disposition("кронштейн.stl")
+        # The quoted fallback drops non-ASCII; filename* carries the real name.
+        assert "filename*=UTF-8''" in header
+        assert "%D0%BA" in header

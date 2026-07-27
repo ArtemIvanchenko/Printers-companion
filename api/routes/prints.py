@@ -35,6 +35,21 @@ _PRESET_SCANNING_KEYS = (
 )
 
 
+def _content_disposition(file_name: str) -> str:
+    """attachment header for ``file_name``, safe to place in an HTTP header.
+
+    Uploaded names reach here unchanged apart from path stripping, so a quote or
+    newline in one would break out of the quoted-string (or the header itself).
+    RFC 5987's filename* carries the real, non-ASCII-capable name; the quoted
+    fallback is sanitised for clients that ignore it.
+    """
+    from urllib.parse import quote
+
+    ascii_fallback = "".join(c for c in file_name if c.isprintable() and c not in '"\\;\r\n')
+    ascii_fallback = ascii_fallback.encode("ascii", "ignore").decode() or "download"
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(file_name)}"
+
+
 def _bucket_for(file_type: str) -> str:
     settings = get_settings()
     return {
@@ -129,8 +144,9 @@ def list_prints(
         "date_to": _parse_iso_datetime(date_to, "date_to"),
     }
     records = repo.list_print_records(skip=skip, limit=limit, **filters)
+    files_by_record = repo.list_files_for_records([r["record_id"] for r in records])
     for record in records:
-        record["files"] = repo.list_print_files(record["record_id"])
+        record["files"] = files_by_record.get(record["record_id"], [])
     total = repo.count_print_records(**filters)
     return PaginatedResponse(items=records, total=total, skip=skip, limit=limit).to_dict()
 
@@ -630,8 +646,13 @@ def download_print_file(
     file_id: str,
     repo: PrintsRepository = Depends(get_prints_repository),
 ):
-    """Stream a stored file back (used by the dashboard STL viewer)."""
-    from fastapi.responses import Response
+    """Stream a stored file back (used by the dashboard STL viewer).
+
+    Streamed in chunks rather than read whole: attachments are capped at 600 MB
+    and the api container at 4 GB across 2 workers, so a couple of concurrent
+    downloads of large STLs could exhaust it.
+    """
+    from fastapi.responses import StreamingResponse
 
     files = repo.list_print_files(record_id)
     match = next((f for f in files if f["file_id"] == file_id), None)
@@ -640,12 +661,12 @@ def download_print_file(
 
     uri = match["object_uri"]  # s3://bucket/object_name
     bucket, _, object_name = uri.removeprefix("s3://").partition("/")
-    data = ObjectStore().get_bytes(bucket, object_name)
-    if data is None:
+    stream = ObjectStore().open_stream(bucket, object_name)
+    if stream is None:
         raise HTTPException(503, "Файл недоступен в хранилище")
+
     content_type = mimetypes.guess_type(match["file_name"])[0] or "application/octet-stream"
-    return Response(
-        content=data,
-        media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{match["file_name"]}"'},
-    )
+    headers = {"Content-Disposition": _content_disposition(match["file_name"])}
+    if match.get("size_bytes"):
+        headers["Content-Length"] = str(match["size_bytes"])
+    return StreamingResponse(stream, media_type=content_type, headers=headers)

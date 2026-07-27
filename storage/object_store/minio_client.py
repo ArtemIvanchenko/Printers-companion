@@ -61,6 +61,28 @@ class ObjectStore:
         except Exception:
             return None
 
+    def open_stream(self, bucket: str, object_name: str, chunk_size: int = 1024 * 1024):
+        """Yield an object's bytes in chunks, or None if missing/unavailable.
+
+        For anything that can be large (STLs are capped at 600 MB), use this
+        instead of get_bytes(): the whole object never sits in memory, and the
+        connection is released even if the client disconnects mid-download.
+        """
+        try:
+            response = self.client.get_object(bucket, object_name)
+        except Exception:
+            return None
+
+        def _iterator():
+            try:
+                while chunk := response.read(chunk_size):
+                    yield chunk
+            finally:
+                response.close()
+                response.release_conn()
+
+        return _iterator()
+
     def remove_object(self, bucket: str, object_name: str) -> bool:
         """Delete an object; True on success, False if missing/unavailable."""
         try:
