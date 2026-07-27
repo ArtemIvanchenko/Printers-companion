@@ -247,7 +247,6 @@ def dashboard():
     from profiles.thresholds import load_thresholds
     _profile = _get_profile()
     _thresholds = load_thresholds(_profile)
-    _thr_js = _js_json(_thresholds.to_dict())
     machine_info = (
         f"{_profile.model_family} &nbsp;·&nbsp; "
         f"s/n {_profile.serial_number}" if _profile.serial_number else _profile.model_family
@@ -262,10 +261,8 @@ def dashboard():
         tel_label, telemetry, health, tel_start_ts = get_latest_print_telemetry(db)
     
     # Stats
-    total = len(sessions)
     prints = len([s for s in sessions if s['type'] == 'REAL_PRINT'])
     hours = sum(s['duration_min'] for s in sessions) // 60
-    lines = sum(s['total_lines'] for s in sessions)
     gas_total = sum(e['value'] for e in gas_events if e['value'])
     powder_total = sum(e['value'] for e in powder_events if e['value'])
     
@@ -281,7 +278,6 @@ def dashboard():
 
     # Pauses
     pauses = [s.get('pause_count', 0) for s in sessions]
-    pause_labels = [s['date'] for s in sessions]
     
     # Pre-compute JS-safe color arrays (avoids undefined-variable ReferenceError in browser)
     duration_colors = _js_json(
@@ -436,69 +432,69 @@ def dashboard():
             </div>"""
 
     # --- Template rendering ---
+    # Keys are named, not numbered. They used to be EXPR0…EXPR75 with gaps,
+    # which meant changing a chart began with working out which number fed it
+    # inside a 3000-line template — and left seven values (EXPR2, EXPR5,
+    # EXPR38…EXPR42) being computed on every page load after their placeholders
+    # had been removed from the markup. test_dashboard_template.py now fails if
+    # the two sides drift apart again.
+    session_dates = _js_json([s['date'] for s in sessions])
+    session_lines = _js_json([s['total_lines'] for s in sessions])
+    real_print_dates = _js_json(dates_labels)
+
     ctx = {
-        "EXPR0": machine_info,
-        "EXPR1": _profile.vendor,
-        "EXPR2": total,
-        "EXPR3": prints,
-        "EXPR4": hours,
-        "EXPR5": f"{lines:,}",
-        "EXPR6": f"{gas_total:.0f}",
-        "EXPR7": f"{powder_total:.1f}",
-        "EXPR8": tel_subtitle,
-        "EXPR9": "" if has_telemetry else '<div class="section" style="text-align:center;color:#6b7280;">Нет данных телеметрии. Импортируйте логи реальной печати (burn/sensors).</div>',
-        "EXPR10": health_panel if has_telemetry else "",
-        "EXPR11": _ac(alarm_o2),
-        "EXPR12": _ex(alarm_o2),
-        "EXPR13": _ac(alarm_temp),
-        "EXPR14": _ex(alarm_temp),
-        "EXPR15": _ac(alarm_hum),
-        "EXPR16": _ex(alarm_hum),
-        "EXPR17": _ac(alarm_press),
-        "EXPR18": _ex(alarm_press),
-        "EXPR25": len(sessions),
-        "EXPR38": _thresholds.oxygen_alarm_high,
-        "EXPR39": f"{_thresholds.temp_alarm_high:.0f}",
-        "EXPR40": _thresholds.pressure_nominal,
-        "EXPR41": f"{_thresholds.humidity_alarm_high:.0f}",
-        "EXPR42": _thr_js,
-        "EXPR43": _js_json(list(types.keys())),
-        "EXPR44": _js_json(list(types.values())),
-        "EXPR45": _js_json(list(materials.keys())),
-        "EXPR46": _js_json(list(materials.values())),
-        "EXPR47": _js_json(dates_labels),
-        "EXPR48": _js_json(durations),
-        "EXPR49": duration_colors,
-        "EXPR50": _js_json([s['date'] for s in sessions]),
-        "EXPR51": _js_json([s['total_lines'] for s in sessions]),
-        "EXPR52": _js_json(dates_labels),
-        "EXPR53": _js_json([d/60 for d in durations]),
-        "EXPR54": _js_json(pause_labels),
-        "EXPR55": _js_json(pauses),
-        "EXPR56": pause_colors,
-        "EXPR57": _js_json([s['date'] for s in sessions]),
-        "EXPR58": _js_json([s.get('burn_events', 0) for s in sessions]),
-        "EXPR59": _js_json([s['date'] for s in sessions]),
-        "EXPR60": _js_json([s['total_lines'] for s in sessions]),
-        "EXPR61": _js_json(list(quality_stats.keys())),
-        "EXPR62": _js_json(list(quality_stats.values())),
-        "EXPR63": _js_json(list(defects.keys())),
-        "EXPR64": _js_json(list(defects.values())),
-        "EXPR65": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in gas_events[:15]]),
-        "EXPR66": _js_json([e.get('value', 0) for e in gas_events[:15]]),
-        "EXPR67": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in powder_events[:15]]),
-        "EXPR68": _js_json([e.get('value', 0) for e in powder_events[:15]]),
-        "EXPR69": tel_time,
-        "EXPR70": oxygen_datasets,
-        "EXPR71": temp_datasets,
-        "EXPR72": humidity_datasets,
-        "EXPR73": pressure_datasets,
-        "EXPR74": tel_burn_labels,
-        "EXPR75": tel_burn_data,
-        "EXPR_QUALITY_ROWS": _quality_table_rows(quality),
-        "EXPR_SESSION_ROWS": _session_table_rows(sessions),
-        "EXPR_GAS_ROWS": _gas_table_rows(gas_events),
-        "EXPR_TEL_SESSION_ID": _js_json(tel_session_id),
+        "machine_info": machine_info,
+        "vendor": _profile.vendor,
+        "real_print_count": prints,
+        "total_print_hours": hours,
+        "gas_total_bar": f"{gas_total:.0f}",
+        "powder_total_kg": f"{powder_total:.1f}",
+        "telemetry_subtitle": tel_subtitle,
+        "telemetry_missing_notice": "" if has_telemetry else '<div class="section" style="text-align:center;color:#6b7280;">Нет данных телеметрии. Импортируйте логи реальной печати (burn/sensors).</div>',
+        "process_health_panel": health_panel if has_telemetry else "",
+        "o2_alarm_class": _ac(alarm_o2),
+        "o2_alarm_badge": _ex(alarm_o2),
+        "temp_alarm_class": _ac(alarm_temp),
+        "temp_alarm_badge": _ex(alarm_temp),
+        "humidity_alarm_class": _ac(alarm_hum),
+        "humidity_alarm_badge": _ex(alarm_hum),
+        "pressure_alarm_class": _ac(alarm_press),
+        "pressure_alarm_badge": _ex(alarm_press),
+        "session_count": len(sessions),
+        "session_type_labels": _js_json(list(types.keys())),
+        "session_type_counts": _js_json(list(types.values())),
+        "material_labels": _js_json(list(materials.keys())),
+        "material_counts": _js_json(list(materials.values())),
+        # Shared by the duration and the hours charts.
+        "real_print_date_labels": real_print_dates,
+        "real_print_duration_min": _js_json(durations),
+        "real_print_duration_hours": _js_json([d / 60 for d in durations]),
+        "real_print_duration_colors": duration_colors,
+        # Shared by the line-count, pause and burn-event charts.
+        "session_date_labels": session_dates,
+        "session_line_counts": session_lines,
+        "session_pause_counts": _js_json(pauses),
+        "session_pause_colors": pause_colors,
+        "session_burn_event_counts": _js_json([s.get('burn_events', 0) for s in sessions]),
+        "quality_result_labels": _js_json(list(quality_stats.keys())),
+        "quality_result_counts": _js_json(list(quality_stats.values())),
+        "defect_type_labels": _js_json(list(defects.keys())),
+        "defect_type_counts": _js_json(list(defects.values())),
+        "gas_event_date_labels": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in gas_events[:15]]),
+        "gas_event_values": _js_json([e.get('value', 0) for e in gas_events[:15]]),
+        "powder_event_date_labels": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in powder_events[:15]]),
+        "powder_event_values": _js_json([e.get('value', 0) for e in powder_events[:15]]),
+        "telemetry_time_labels": tel_time,
+        "oxygen_datasets": oxygen_datasets,
+        "temperature_datasets": temp_datasets,
+        "humidity_datasets": humidity_datasets,
+        "pressure_datasets": pressure_datasets,
+        "burn_time_layer_labels": tel_burn_labels,
+        "burn_time_seconds": tel_burn_data,
+        "quality_table_rows": _quality_table_rows(quality),
+        "session_table_rows": _session_table_rows(sessions),
+        "gas_table_rows": _gas_table_rows(gas_events),
+        "telemetry_session_id": _js_json(tel_session_id),
     }
 
     return HTMLResponse(_render_template(ctx))

@@ -208,7 +208,7 @@
     <div class="header" style="display:flex;align-items:center;justify-content:space-between;gap:20px;">
         <div>
             <h1>🖨️ <span>Printer's Companion</span></h1>
-            <div style="font-size:13px;color:#a0aec0;margin-top:4px;">{!EXPR0!} &nbsp;·&nbsp; {!EXPR1!}</div>
+            <div style="font-size:13px;color:#a0aec0;margin-top:4px;">{!machine_info!} &nbsp;·&nbsp; {!vendor!}</div>
         </div>
         <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
             <span id="hdr-version"
@@ -325,19 +325,19 @@
             <!-- Key metrics -->
             <div class="stats" style="margin-bottom:24px;">
                 <div class="stat-card">
-                    <div class="value" style="color:#10b981;">{!EXPR3!}</div>
+                    <div class="value" style="color:#10b981;">{!real_print_count!}</div>
                     <div class="label">Печатей</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" style="color:#f59e0b;">{!EXPR4!}</div>
+                    <div class="value" style="color:#f59e0b;">{!total_print_hours!}</div>
                     <div class="label">Часов печати</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" style="color:#ec4899;">{!EXPR6!}</div>
+                    <div class="value" style="color:#ec4899;">{!gas_total_bar!}</div>
                     <div class="label">Газ (бар)</div>
                 </div>
                 <div class="stat-card">
-                    <div class="value" style="color:#06b6d4;">{!EXPR7!}</div>
+                    <div class="value" style="color:#06b6d4;">{!powder_total_kg!}</div>
                     <div class="label">Порошок (кг)</div>
                 </div>
                 <div class="stat-card" id="home-powder-card" style="cursor:pointer;" onclick="showMainTab('maintenance',null);showMaintenancePage('powder',null)">
@@ -395,33 +395,33 @@
                             <div class="tel-card-time">сессии</div>
                         </div>
                     </div>
-                    <span id="tel-subtitle" style="color:#60a5fa;font-size:13px;display:block;margin-top:8px;">{!EXPR8!}</span>
+                    <span id="tel-subtitle" style="color:#60a5fa;font-size:13px;display:block;margin-top:8px;">{!telemetry_subtitle!}</span>
                 </div>
                 <p style="color:#6b7280;font-size:13px;margin-top:6px;">
                     Сигналы расшифрованы по словарю M-450-M: O₂ — окисление,
                     температуры стола/камеры, давление и влажность инертной атмосферы, время прожига по слоям.
                 </p>
             </div>
-            {!EXPR9!}
-            {!EXPR10!}
+            {!telemetry_missing_notice!}
+            {!process_health_panel!}
             <div class="charts-grid">
-                <div class="chart-container{!EXPR11!}">
-                    {!EXPR12!}
+                <div class="chart-container{!o2_alarm_class!}">
+                    {!o2_alarm_badge!}
                     <h2>🧪 Кислород O₂ (риск окисления)</h2>
                     <canvas id="o2Chart"></canvas>
                 </div>
-                <div class="chart-container{!EXPR13!}">
-                    {!EXPR14!}
+                <div class="chart-container{!temp_alarm_class!}">
+                    {!temp_alarm_badge!}
                     <h2>🌡️ Температуры стола / камеры (°C)</h2>
                     <canvas id="tempChart"></canvas>
                 </div>
-                <div class="chart-container{!EXPR15!}">
-                    {!EXPR16!}
+                <div class="chart-container{!humidity_alarm_class!}">
+                    {!humidity_alarm_badge!}
                     <h2>💧 Влажность атмосферы (%)</h2>
                     <canvas id="humChart"></canvas>
                 </div>
-                <div class="chart-container{!EXPR17!}">
-                    {!EXPR18!}
+                <div class="chart-container{!pressure_alarm_class!}">
+                    {!pressure_alarm_badge!}
                     <h2>📊 Давление камеры</h2>
                     <canvas id="pressChart"></canvas>
                 </div>
@@ -473,7 +473,7 @@
                         <tr><th>Дата</th><th>Результат</th><th>Дефект</th><th>Сессия</th></tr>
                     </thead>
                     <tbody>
-                        {!EXPR_QUALITY_ROWS!}
+                        {!quality_table_rows!}
                     </tbody>
                 </table>
             </div>
@@ -482,13 +482,13 @@
         <!-- Sessions Page -->
         <div id="page-sessions" style="display:none;">
             <div class="section">
-                <h2>📋 Все сессии ({!EXPR25!})</h2>
+                <h2>📋 Все сессии ({!session_count!})</h2>
                 <table>
                     <thead>
                         <tr><th>ID</th><th>Дата</th><th>Тип</th><th>Время</th><th>Длит.</th><th title="Балл надёжности входных данных 0–100">Данные</th><th>Строк</th><th>Пауз</th></tr>
                     </thead>
                     <tbody>
-                        {!EXPR_SESSION_ROWS!}
+                        {!session_table_rows!}
                     </tbody>
                 </table>
             </div>
@@ -513,7 +513,7 @@
                         <tr><th>Дата</th><th>Газ (бар)</th><th>Порошок (кг)</th></tr>
                     </thead>
                     <tbody>
-                        {!EXPR_GAS_ROWS!}
+                        {!gas_table_rows!}
                     </tbody>
                 </table>
             </div>
@@ -1215,9 +1215,9 @@
         new Chart(document.getElementById('typesChart'), {
             type: 'doughnut',
             data: {
-                labels: {!EXPR43!},
+                labels: {!session_type_labels!},
                 datasets: [{
-                    data: {!EXPR44!},
+                    data: {!session_type_counts!},
                     backgroundColor: ['#10b981', '#f59e0b', '#6b7280'],
                     borderWidth: 0
                 }]
@@ -1233,9 +1233,9 @@
         new Chart(document.getElementById('materialsChart'), {
             type: 'pie',
             data: {
-                labels: {!EXPR45!},
+                labels: {!material_labels!},
                 datasets: [{
-                    data: {!EXPR46!},
+                    data: {!material_counts!},
                     backgroundColor: ['#60a5fa', '#8b5cf6', '#ec4899', '#06b6d4'],
                     borderWidth: 0
                 }]
@@ -1250,11 +1250,11 @@
         new Chart(document.getElementById('durationChart'), {
             type: 'bar',
             data: {
-                labels: {!EXPR47!},
+                labels: {!real_print_date_labels!},
                 datasets: [{
                     label: 'Минуты',
-                    data: {!EXPR48!},
-                    backgroundColor: {!EXPR49!},
+                    data: {!real_print_duration_min!},
+                    backgroundColor: {!real_print_duration_colors!},
                     borderRadius: 8
                 }]
             },
@@ -1269,10 +1269,10 @@
         new Chart(document.getElementById('linesChart'), {
             type: 'bar',
             data: {
-                labels: {!EXPR50!},
+                labels: {!session_date_labels!},
                 datasets: [{
                     label: 'Строк',
-                    data: {!EXPR51!},
+                    data: {!session_line_counts!},
                     backgroundColor: chartColors.purple,
                     borderRadius: 8
                 }]
@@ -1288,10 +1288,10 @@
         new Chart(document.getElementById('timelineChart'), {
             type: 'line',
             data: {
-                labels: {!EXPR52!},
+                labels: {!real_print_date_labels!},
                 datasets: [{
                     label: 'Часы',
-                    data: {!EXPR53!},
+                    data: {!real_print_duration_hours!},
                     borderColor: chartColors.blue,
                     backgroundColor: 'rgba(96, 165, 250, 0.1)',
                     fill: true,
@@ -1310,11 +1310,11 @@
         new Chart(document.getElementById('pausesChart'), {
             type: 'bar',
             data: {
-                labels: {!EXPR54!},
+                labels: {!session_date_labels!},
                 datasets: [{
                     label: 'Паузы',
-                    data: {!EXPR55!},
-                    backgroundColor: {!EXPR56!},
+                    data: {!session_pause_counts!},
+                    backgroundColor: {!session_pause_colors!},
                     borderRadius: 8
                 }]
             },
@@ -1329,10 +1329,10 @@
         new Chart(document.getElementById('burnChart'), {
             type: 'bar',
             data: {
-                labels: {!EXPR57!},
+                labels: {!session_date_labels!},
                 datasets: [{
                     label: 'Burn events',
-                    data: {!EXPR58!},
+                    data: {!session_burn_event_counts!},
                     backgroundColor: chartColors.red,
                     borderRadius: 8
                 }]
@@ -1348,10 +1348,10 @@
         new Chart(document.getElementById('sessionLinesChart'), {
             type: 'line',
             data: {
-                labels: {!EXPR59!},
+                labels: {!session_date_labels!},
                 datasets: [{
                     label: 'Строк',
-                    data: {!EXPR60!},
+                    data: {!session_line_counts!},
                     borderColor: chartColors.cyan,
                     backgroundColor: 'rgba(6, 182, 212, 0.1)',
                     fill: true,
@@ -1365,9 +1365,9 @@
         new Chart(document.getElementById('qualityChart'), {
             type: 'doughnut',
             data: {
-                labels: {!EXPR61!},
+                labels: {!quality_result_labels!},
                 datasets: [{
-                    data: {!EXPR62!},
+                    data: {!quality_result_counts!},
                     backgroundColor: ['#10b981', '#ef4444', '#f59e0b'],
                     borderWidth: 0
                 }]
@@ -1383,10 +1383,10 @@
         new Chart(document.getElementById('defectsChart'), {
             type: 'bar',
             data: {
-                labels: {!EXPR63!},
+                labels: {!defect_type_labels!},
                 datasets: [{
                     label: 'Дефектов',
-                    data: {!EXPR64!},
+                    data: {!defect_type_counts!},
                     backgroundColor: chartColors.red,
                     borderRadius: 8
                 }]
@@ -1403,10 +1403,10 @@
         new Chart(document.getElementById('gasChart'), {
             type: 'bar',
             data: {
-                labels: {!EXPR65!},
+                labels: {!gas_event_date_labels!},
                 datasets: [{
                     label: 'Бар',
-                    data: {!EXPR66!},
+                    data: {!gas_event_values!},
                     backgroundColor: chartColors.pink,
                     borderRadius: 8
                 }]
@@ -1422,10 +1422,10 @@
         new Chart(document.getElementById('powderChart'), {
             type: 'bar',
             data: {
-                labels: {!EXPR67!},
+                labels: {!powder_event_date_labels!},
                 datasets: [{
                     label: 'Кг',
-                    data: {!EXPR68!},
+                    data: {!powder_event_values!},
                     backgroundColor: chartColors.cyan,
                     borderRadius: 8
                 }]
@@ -1439,8 +1439,8 @@
 
         // --- Process telemetry charts (decoded sensor series) ---
         const _telCharts = {};
-        _telCharts.currentSessionId = {!EXPR_TEL_SESSION_ID!};
-        const telTime = {!EXPR69!};
+        _telCharts.currentSessionId = {!telemetry_session_id!};
+        const telTime = {!telemetry_time_labels!};
         function lineChart(canvasId, datasets, opts) {
             const el = document.getElementById(canvasId);
             if (!el) return null;
@@ -1455,10 +1455,10 @@
                 }, opts || {})
             });
         }
-        _telCharts.o2   = lineChart('o2Chart',   {!EXPR70!});
-        _telCharts.temp = lineChart('tempChart', {!EXPR71!});
-        _telCharts.hum  = lineChart('humChart',  {!EXPR72!});
-        _telCharts.press= lineChart('pressChart',{!EXPR73!});
+        _telCharts.o2   = lineChart('o2Chart',   {!oxygen_datasets!});
+        _telCharts.temp = lineChart('tempChart', {!temperature_datasets!});
+        _telCharts.hum  = lineChart('humChart',  {!humidity_datasets!});
+        _telCharts.press= lineChart('pressChart',{!pressure_datasets!});
 
         // Per-layer burn time (bar)
         const burnEl = document.getElementById('burnLayerChart');
@@ -1466,10 +1466,10 @@
             _telCharts.burn = new Chart(burnEl, {
                 type: 'bar',
                 data: {
-                    labels: {!EXPR74!},
+                    labels: {!burn_time_layer_labels!},
                     datasets: [{
                         label: 'Сек/слой',
-                        data: {!EXPR75!},
+                        data: {!burn_time_seconds!},
                         backgroundColor: '#f97316',
                         borderRadius: 4
                     }]
