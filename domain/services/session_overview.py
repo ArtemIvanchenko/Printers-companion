@@ -301,6 +301,27 @@ def compute_print_span(
     return min(print_ts), max(print_ts)
 
 
+def _session_machine_seconds(files: list[IngestedFile]) -> float | None:
+    """Sum of real per-layer burn+pour seconds from this session's time_log(s).
+
+    None when no time_log is present. Deliberately does not apply the coverage
+    floor used by ``accuracy._machine_hours_from_logs`` (that guards against a
+    partial log masquerading as a whole print's calibration input) — here it
+    is only ever compared against the wall-clock span of these same files, so
+    a partial log still yields an honest (smaller) idle-time reading for the
+    time window it actually covers.
+    """
+    from analytics.prediction.recoat_calibration import machine_seconds_from_events
+
+    by_layer: dict[int, float] = {}
+    for f in files:
+        if f.classification.family != SourceFileFamily.time_log or not f.parse_result:
+            continue
+        for layer, sec in machine_seconds_from_events(f.parse_result.events).items():
+            by_layer.setdefault(layer, sec)
+    return sum(by_layer.values()) if by_layer else None
+
+
 def build_group_overview(
     group_id: str,
     files: list[IngestedFile],
@@ -350,12 +371,26 @@ def build_group_overview(
         duration_sec = (end_ts - start_ts).total_seconds()
     duration_sec = duration_sec or 0.0
 
+    # Pause-free machine time (burn+pour per layer, from time_log) vs. the
+    # wall-clock span above — the gap is idle/pause time the geometry-based
+    # prediction never claims to cover (see AGENT_NOTES.md, "многодневные
+    # печати" — a real build showed ~18h idle out of ~47.6h wall time). Shown
+    # here so the operator sees it explicitly instead of it being silently
+    # absorbed into "duration". None when this session has no time_log.
+    machine_sec = _session_machine_seconds(files)
+    idle_sec = max(0.0, duration_sec - machine_sec) if machine_sec is not None and duration_sec > 0 else None
+
     features = {
         **raw_features,
         "first_time": disp_start.strftime("%H:%M") if disp_start else "-",
         "last_time": disp_end.strftime("%H:%M") if disp_end else "-",
         "duration_sec": duration_sec,
         "duration_min": round(duration_sec / 60, 1),
+        "machine_seconds": round(machine_sec, 1) if machine_sec is not None else None,
+        "machine_min": round(machine_sec / 60, 1) if machine_sec is not None else None,
+        "idle_seconds": round(idle_sec, 1) if idle_sec is not None else None,
+        "idle_min": round(idle_sec / 60, 1) if idle_sec is not None else None,
+        "idle_pct": round(idle_sec / duration_sec * 100, 1) if idle_sec is not None and duration_sec > 0 else None,
         "total_lines": total_lines,
         "total_events": total_events,
         "layers": layers,

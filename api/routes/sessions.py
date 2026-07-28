@@ -109,11 +109,15 @@ def list_sessions_with_telemetry(
         tel = group.get("telemetry") or {}
         if not tel.get("time"):
             continue
+        features = group.get("features") or {}
         result.append({
             "session_id": session_id,
             "start_ts": group.get("start_ts"),
             "end_ts": group.get("end_ts"),
-            "duration_min": group.get("duration_min"),
+            # duration_min lives under features, not group top-level.
+            "duration_min": features.get("duration_min"),
+            "idle_min": features.get("idle_min"),
+            "idle_pct": features.get("idle_pct"),
         })
     result.sort(key=lambda x: x.get("start_ts") or "", reverse=True)
     return result
@@ -130,11 +134,14 @@ def get_session_telemetry(
         raise HTTPException(status_code=404, detail="Session not found")
     group = payload.get("group") or {}
     tel = group.get("telemetry") or {}
+    features = group.get("features") or {}
     return {
         "session_id": session_id,
         "start_ts": group.get("start_ts"),
         "end_ts": group.get("end_ts"),
-        "duration_min": group.get("duration_min"),
+        "duration_min": features.get("duration_min"),
+        "idle_min": features.get("idle_min"),
+        "idle_pct": features.get("idle_pct"),
         "telemetry": tel,
         "health": group.get("health") or {},
         "has_telemetry": bool(tel.get("time")),

@@ -88,7 +88,7 @@ def _pour_seconds_from_events(events: list[Any]) -> list[float]:
     return list(seen.values())
 
 
-def _machine_seconds_from_events(events: list) -> dict[int, float]:
+def machine_seconds_from_events(events: list) -> dict[int, float]:
     """{layer: burn+pour seconds} — полное машинное время слоя, без пауз.
 
     Использует burn_ms + pour_ms (а не make_layer_ms): make_layer_ms на части
@@ -130,7 +130,7 @@ def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, 
     for f in files:
         if f.classification.family != SourceFileFamily.time_log or not f.parse_result:
             continue
-        for layer, sec in _machine_seconds_from_events(f.parse_result.events).items():
+        for layer, sec in machine_seconds_from_events(f.parse_result.events).items():
             out.setdefault(layer, sec)
     return out or None
 
@@ -283,6 +283,7 @@ __all__ = [
     "recalibrate_recoat_and_apply",
     "session_recoat_seconds",
     "session_machine_seconds_by_layer",
+    "machine_seconds_from_events",
     "RECOAT_MIN_MS",
     "RECOAT_MAX_MS",
 ]

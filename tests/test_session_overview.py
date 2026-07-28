@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from domain.enums.common import DataQualityStatus
 from domain.schemas.parsing import (
     CanonicalEventDraft,
@@ -98,3 +100,55 @@ def test_overview_handles_files_without_tables():
     ov = build_group_overview("g", [_event_file()])
     assert ov["telemetry"] == {} or ov["telemetry"].get("layer_burn_times") == []
     assert ov["features"]["total_events"] == 3
+
+
+def _time_log_file(layer_seconds: dict[int, tuple[float, float]]) -> IngestedFile:
+    """layer -> (burn_ms, pour_ms), as a parsed time_log with layer_timing_summary events."""
+    events = [
+        CanonicalEventDraft(
+            event_type="layer_timing_summary",
+            payload={"layer": layer, "burn_ms": burn_ms, "pour_ms": pour_ms},
+        )
+        for layer, (burn_ms, pour_ms) in layer_seconds.items()
+    ]
+    return IngestedFile(
+        path="t_time.log",
+        relative_path="t_time.log",
+        classification=FileClassification(path="t_time.log", file_name="t_time.log", family="time_log", role="secondary", confidence=1.0),
+        checksum="z",
+        size_bytes=10,
+        data_quality_status=DataQualityStatus.ok,
+        mtime=datetime(2026, 3, 23, tzinfo=timezone.utc),
+        parse_result=ParseResult(
+            parser_name="time_log",
+            parser_version="0.1.0",
+            file_family="time_log",
+            role="secondary",
+            events=events,
+            metadata={},
+        ),
+    )
+
+
+def test_overview_reports_idle_time_from_time_log():
+    # Wall span (event file): 13:00 -> 14:30 = 90 min = 5400s.
+    # Machine time (time_log): 2 layers x (20s burn + 10s pour) = 60s.
+    # Idle should be the ~5340s gap the geometry-based prediction never covers.
+    files = [_event_file(), _time_log_file({1: (20_000, 10_000), 2: (20_000, 10_000)})]
+    ov = build_group_overview(
+        "g_idle", files,
+        start_ts=datetime(2026, 3, 23, 13, 0, tzinfo=timezone.utc),
+        end_ts=datetime(2026, 3, 23, 14, 30, tzinfo=timezone.utc),
+    )
+    feats = ov["features"]
+    assert feats["machine_seconds"] == 60.0
+    assert feats["idle_seconds"] == pytest.approx(5400.0 - 60.0)
+    assert feats["idle_pct"] == pytest.approx((5340.0 / 5400.0) * 100, abs=0.1)
+
+
+def test_overview_idle_none_without_time_log():
+    ov = build_group_overview("g_noidle", [_event_file()])
+    feats = ov["features"]
+    assert feats["machine_seconds"] is None
+    assert feats["idle_seconds"] is None
+    assert feats["idle_pct"] is None
