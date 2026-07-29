@@ -39,7 +39,18 @@ def _cache_fresh() -> bool:
 
 
 def _load_sessions(db) -> list[dict[str, Any]]:
-    """Return all REAL_PRINT sessions that have telemetry data."""
+    """Return all REAL_PRINT sessions that have telemetry data.
+
+    The classification filter is the point of this function, and it used to be
+    missing: the value was computed, attached to each row and then never tested,
+    so every consumer (cross-session patterns, the maintenance forecast) was
+    averaging preparation runs and non-prints together with real builds. A
+    pre-burn session sits at 21% oxygen because the chamber has not been purged
+    yet, which the forecast then reported as "SO2 past its 2.0 alarm threshold —
+    check the unit now". It was alarming on ordinary air.
+    """
+    from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS
+
     rows = db.execute(
         select(BuildSession).order_by(BuildSession.start_ts)
     ).scalars().all()
@@ -49,6 +60,8 @@ def _load_sessions(db) -> list[dict[str, Any]]:
         ctx = (row.context or {}).get("runtime_payload", {}) or {}
         group = ctx.get("group", {}) or {}
         classification = (group.get("classification") or row.classification or "")
+        if classification not in PRINT_CLASSIFICATIONS:
+            continue
 
         # Prefer full-resolution stats (computed at import from all ~330k rows).
         # Fall back to stats derived from the 150-point downsampled telemetry

@@ -27,7 +27,7 @@ def _needs_backfill(group: dict) -> bool:
     return not features
 
 
-def backfill(dry_run: bool) -> None:
+def backfill(dry_run: bool, force: bool = False) -> None:
     from domain.services.ingestion import IngestedFile
     from domain.services.session_overview import build_group_overview
     from domain.models.entities import BuildSession
@@ -47,7 +47,7 @@ def backfill(dry_run: bool) -> None:
                 continue
 
             group = payload.get("group") or {}
-            if not _needs_backfill(group):
+            if not force and not _needs_backfill(group):
                 print(f"[skip] {sid}: already has features")
                 skipped += 1
                 continue
@@ -111,5 +111,11 @@ def backfill(dry_run: bool) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill session overview data.")
     parser.add_argument("--dry-run", action="store_true", help="preview without writing")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="recompute sessions that already have features — needed after the "
+             "overview logic itself changes (e.g. the signal range filter), "
+             "since stored stats are otherwise kept as-is",
+    )
     args = parser.parse_args()
-    backfill(dry_run=args.dry_run)
+    backfill(dry_run=args.dry_run, force=args.force)

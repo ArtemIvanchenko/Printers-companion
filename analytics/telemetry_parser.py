@@ -19,6 +19,19 @@ from analytics.robust_stats import theil_sen_slope
 
 logger = logging.getLogger(__name__)
 
+# No sensor on this machine can report a magnitude anywhere near this. The
+# largest physically meaningful quantity it logs is the Z position in microns
+# (390 mm travel = 3.9e5), so 1e7 leaves a 25x margin over anything real while
+# still catching the firmware's uninitialised-memory writes, which land at
+# 1e9 and above (observed: 1.87e9, 2.58e18, 9.5e26, 4.6e28). Applied
+# unconditionally — unlike the profile ranges below, it needs no per-signal
+# knowledge and so cannot be wrong about a signal the profile has mis-guessed.
+_ABSURD_MAGNITUDE = 1e7
+
+# A profile range rejecting more than this fraction of a signal is describing a
+# different machine (or different units) than the one that wrote the log.
+_MAX_PROFILE_REJECT_FRACTION = 0.20
+
 # ── Signal → semantic group mapping ─────────────────────────────────────────
 
 _GROUP: dict[str, str] = {
@@ -197,6 +210,7 @@ def downsample_full_series(
 def compute_full_signal_stats(
     path: Path,
     alarm_thresholds: dict[str, dict[str, float]] | None = None,
+    valid_ranges: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Compute per-signal statistics from the complete sensors.log.
 
@@ -204,10 +218,14 @@ def compute_full_signal_stats(
         path: absolute path to the *_sensors.log file.
         alarm_thresholds: optional dict {signal: {"alarm_high": float,
                           "alarm_low": float}} from signals.yaml.
+        valid_ranges: optional dict {signal: {"min_val": float,
+                      "max_val": float}} from signals.yaml — the physically
+                      possible range. Defaults to the profile's; pass ``{}``
+                      to disable range filtering entirely.
 
     Returns:
         {signal: {mean, std, min, max, p05, p95, p99, n,
-                  alarm_count, trend_slope, group}}
+                  alarm_count, out_of_range, trend_slope, group}}
 
     ``trend_slope`` is the Theil-Sen slope in *signal units per row*
     (≈ per second for 1-Hz logs), positive = rising over the session.
@@ -219,6 +237,9 @@ def compute_full_signal_stats(
         return {}
 
     thresholds = alarm_thresholds or {}
+    if valid_ranges is None:
+        from analytics.thresholds import load_valid_ranges
+        valid_ranges = load_valid_ranges()
     result: dict[str, dict[str, Any]] = {}
 
     for col, vals in arrays.items():
@@ -226,6 +247,44 @@ def compute_full_signal_stats(
         # cells, which float() accepts silently — a single one would poison
         # mean/std/quantile (NaN propagates) for the entire signal.
         vals = vals[np.isfinite(vals)]
+
+        # Same reasoning, one step further: the printer also writes *finite*
+        # impossible values (a Flow H of -2.58e18 %, a Z position of 1.87e9 µm
+        # on a 390 mm axis), which no nan/inf guard catches. 33 such rows out
+        # of 81 377 dragged this shop's real Flow H mean to 1.9e23. They are
+        # excluded from the statistics but counted, so a failing sensor stays
+        # visible instead of silently vanishing.
+        keep = np.abs(vals) <= _ABSURD_MAGNITUDE
+
+        # The profile's own min_val/max_val are applied on top — but only when
+        # they agree with reality. Several are guesses (LIR and SF1 carry
+        # confidence 0.5 / active_status "candidate"), and two of them are
+        # simply wrong for this machine: LIR reads negative throughout while the
+        # profile says 0..390000, and SF1 reads ~986 against a stated 0..30.
+        # Trusting them blindly would discard 99.8% and 54% of real samples.
+        # A range that rejects most of the signal is a bad range, not a bad
+        # sensor, so it is ignored (and reported) rather than obeyed.
+        rng = valid_ranges.get(col) or {}
+        if rng:
+            in_profile = np.ones(len(vals), dtype=bool)
+            if (lo := rng.get("min_val")) is not None:
+                in_profile &= vals >= lo
+            if (hi := rng.get("max_val")) is not None:
+                in_profile &= vals <= hi
+            rejected = 1.0 - (in_profile.sum() / len(vals)) if len(vals) else 0.0
+            if rejected <= _MAX_PROFILE_REJECT_FRACTION:
+                keep &= in_profile
+            else:
+                logger.warning(
+                    "%s: profile range %s rejects %.1f%% of samples — treating the "
+                    "range as wrong for this machine, not the data",
+                    col, rng, rejected * 100,
+                )
+
+        out_of_range = int((~keep).sum())
+        if out_of_range:
+            vals = vals[keep]
+
         n = len(vals)
         if n < 10:
             continue
@@ -252,6 +311,7 @@ def compute_full_signal_stats(
             "p99":         round(float(np.quantile(vals, 0.99)), 6),
             "n":           n,
             "alarm_count": alarm_count,
+            "out_of_range": out_of_range,
             "trend_slope": round(slope_val, 8),
             "group":       _GROUP[col],
         }
