@@ -257,6 +257,14 @@ class RuntimeRepository:
         start_ts = _parse_ts(group.get("start_ts"))
         end_ts   = _parse_ts(group.get("end_ts"))
         confidence = float(group.get("confidence") or 0.0)
+        # The classification lives in the payload, but the column is what SQL can
+        # filter and index on. It used to be written only at row creation (i.e.
+        # never — creation passes no classification), so every session in the DB
+        # kept the "INCOMPLETE_OR_UNKNOWN" default forever while the payload said
+        # REAL_PRINT. Readers all worked around it with `payload or column`, which
+        # hid the drift and made "only real prints" impossible to express in SQL.
+        classification = group.get("classification") or None
+        classification_confidence = float(group.get("classification_confidence") or confidence or 0.0)
 
         if existing:
             existing.context = context
@@ -272,6 +280,9 @@ class RuntimeRepository:
                 existing.end_ts = end_ts
             if confidence:
                 existing.grouping_confidence = confidence
+            if classification:
+                existing.classification = classification
+                existing.classification_confidence = classification_confidence
         else:
             self.db.add(
                 BuildSession(
@@ -281,6 +292,9 @@ class RuntimeRepository:
                     grouping_confidence=confidence,
                     start_ts=start_ts,
                     end_ts=end_ts,
+                    **({"classification": classification,
+                        "classification_confidence": classification_confidence}
+                       if classification else {}),
                 )
             )
         self.flush()

@@ -2,7 +2,17 @@ from unittest.mock import MagicMock
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import pytest
+
+from storage.db.session import SessionLocal
 from storage.repositories.runtime import RuntimeRepository
+
+
+@pytest.fixture
+def db():
+    with SessionLocal() as session:
+        yield session
+        session.rollback()
 
 
 class TestRuntimeRepositoryUpsert:
@@ -93,6 +103,67 @@ class TestRuntimeRepositorySessions:
 
         assert result is not None
         assert "files" in result
+
+
+class TestSessionClassificationColumn:
+    """The classification column must track the payload, not keep its default.
+
+    Real DB, not a mock: the bug this covers was that the column was simply
+    never assigned, which a MagicMock happily accepts (every attribute write
+    "succeeds"). Only a real row shows the default surviving.
+    """
+
+    @staticmethod
+    def _payload(classification: str, confidence: float = 0.78) -> dict:
+        return {"files": [], "group": {
+            "classification": classification, "confidence": confidence, "features": {},
+        }}
+
+    def test_classification_written_on_create(self, db):
+        from domain.models.sessions import BuildSession
+
+        RuntimeRepository(db).save_session_payload("s_new", self._payload("REAL_PRINT"))
+
+        row = db.get(BuildSession, "s_new")
+        assert row.classification == "REAL_PRINT"
+        assert row.classification_confidence == pytest.approx(0.78)
+
+    def test_classification_updated_on_reimport(self, db):
+        from domain.models.sessions import BuildSession
+
+        repo = RuntimeRepository(db)
+        repo.save_session_payload("s_up", self._payload("INCOMPLETE_OR_UNKNOWN", 0.2))
+        # A re-import with the full file set reclassifies the same session.
+        repo.save_session_payload("s_up", self._payload("REAL_PRINT", 0.9))
+
+        row = db.get(BuildSession, "s_up")
+        assert row.classification == "REAL_PRINT"
+        assert row.classification_confidence == pytest.approx(0.9)
+
+    def test_classification_is_sql_filterable(self, db):
+        """The point of the column: expressing "only real prints" in SQL."""
+        from sqlalchemy import select
+
+        from domain.models.sessions import BuildSession
+
+        repo = RuntimeRepository(db)
+        repo.save_session_payload("s_real", self._payload("REAL_PRINT"))
+        repo.save_session_payload("s_pre", self._payload("PRE_BURN_SESSION"))
+
+        found = db.scalars(
+            select(BuildSession.session_id).where(BuildSession.classification == "REAL_PRINT")
+        ).all()
+        assert found == ["s_real"]
+
+    def test_payload_without_classification_keeps_previous(self, db):
+        """A partial payload must not wipe a known classification back to default."""
+        from domain.models.sessions import BuildSession
+
+        repo = RuntimeRepository(db)
+        repo.save_session_payload("s_keep", self._payload("REAL_PRINT"))
+        repo.save_session_payload("s_keep", {"files": [], "group": {"features": {}}})
+
+        assert db.get(BuildSession, "s_keep").classification == "REAL_PRINT"
 
 
 class TestRuntimeRepositoryReports:
