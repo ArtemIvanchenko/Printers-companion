@@ -193,6 +193,25 @@
         .nav-more-menu a:hover { background: var(--border-default); }
         .nav-more.open .nav-more-menu { display: block; }
 
+        /* Unlinked log sessions — unfinished work, shown above the print list.
+           Until a session is linked it yields no cost, no predicted-vs-actual
+           pair and no calibration input, so it must not be discoverable only by
+           noticing an absence. */
+        .unlinked { background: linear-gradient(135deg, #2b230b, #3b2f0b); border: 1px solid var(--status-warning);
+                    border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-4); }
+        .unlinked h3 { font-size: var(--text-lg); color: #fde68a; margin-bottom: 6px; }
+        .unlinked .why { color: #fde68a; font-size: var(--text-base); margin-bottom: 12px; opacity: .85; }
+        .unlinked-row { display: flex; align-items: center; gap: var(--space-3); padding: 10px 12px;
+                        background: rgba(0,0,0,.25); border-radius: var(--radius-md); margin-bottom: 6px; font-size: var(--text-base); }
+        .unlinked-row:last-child { margin-bottom: 0; }
+        .unlinked-row .when { color: var(--text-body); font-weight: 600; min-width: 108px; }
+        .unlinked-row .facts { color: var(--text-secondary); flex: 1; }
+        .unlinked-row select { background: var(--bg-panel-alt); border: 1px solid var(--border-default);
+                               border-radius: var(--radius-sm); color: var(--text-body); padding: 5px 8px; font-size: var(--text-sm); }
+        .btn-link { background: var(--status-warning); color: #1a1200; border: none; border-radius: var(--radius-sm);
+                    padding: 6px 14px; font-size: var(--text-sm); font-weight: 700; cursor: pointer; }
+        .btn-link:hover { filter: brightness(1.1); }
+
         /* Model gallery */
         .model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 20px; }
         .model-card { background: var(--bg-panel); border: 1px solid var(--border-default); border-radius: 12px; overflow: hidden; cursor: pointer; box-shadow: var(--shadow-sm); transition: all 0.2s; }
@@ -868,6 +887,12 @@
                         </div>
                     </div>
                     <div>
+                        <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Толщина слоя (мм)</label>
+                        <input id="ar-layer-thickness" type="number" min="0" max="1" step="0.005" class="mp-input"
+                            style="padding:10px 12px;font-size:14px;" placeholder="по умолчанию — из параметров машины"
+                            title="Печатается ли эта работа на другой толщине, чем выставлено на станке. Влияет на прогноз: модели времени обучаются отдельно на каждую пару «материал + толщина»">
+                    </div>
+                    <div>
                         <label style="color:#a0aec0;font-size:12px;display:block;margin-bottom:4px;">Цена порошка (руб/кг) — фиксируется в карточке</label>
                         <input id="ar-powder-cost" type="number" min="0" step="any" class="mp-input" style="padding:10px 12px;font-size:14px;"
                             placeholder="по умолчанию — последняя использованная">
@@ -883,6 +908,15 @@
                     </button>
                     <div id="ar-form-result" style="font-size:13px;text-align:center;"></div>
                 </div>
+            </div>
+
+            <!-- Log sessions with no print card. Rendered before the list (and
+                 before the empty state) because it is actionable work, not a
+                 detail of the archive. -->
+            <div class="unlinked" id="unlinked-banner" style="display:none;">
+                <h3 id="unlinked-title"></h3>
+                <div class="why">Пока лог не привязан к карточке — по этой печати не считается ни точность прогноза, ни себестоимость.</div>
+                <div id="unlinked-rows"></div>
             </div>
 
             <!-- Records list -->
@@ -916,12 +950,12 @@
                 <div style="overflow-x:auto;">
                     <table style="width:100%;border-collapse:collapse;font-size:13px;">
                         <thead><tr style="color:#6b7280;text-align:left;border-bottom:1px solid #2d3748;">
-                            <th style="padding:10px;">Дата печати</th>
-                            <th style="padding:10px;">Название</th>
+                            <th style="padding:10px;">Печать</th>
                             <th style="padding:10px;">Материал</th>
-                            <th style="padding:10px;">Порошок (руб/кг)</th>
-                            <th style="padding:10px;">Статус</th>
-                            <th style="padding:10px;">Сессия логов</th>
+                            <th style="padding:10px;" title="Расчёт по геометрии: время и себестоимость">Прогноз</th>
+                            <th style="padding:10px;" title="Машинное время из логов принтера — без операторских пауз">Факт</th>
+                            <th style="padding:10px;" title="Насколько прогноз разошёлся с фактом">Точность</th>
+                            <th style="padding:10px;">Логи</th>
                             <th style="padding:10px;">Файлы</th>
                             <th style="padding:10px;"></th>
                         </tr></thead>
@@ -2817,6 +2851,7 @@
             if (!name) { result.innerHTML = '<span style="color:#ef4444;">Введите название изделия</span>'; return; }
             const printedAt = document.getElementById('ar-printed-at').value;
             const powderCost = document.getElementById('ar-powder-cost').value;
+            const thickness = document.getElementById('ar-layer-thickness').value;
             try {
                 const r = await fetch('/prints', {
                     method: 'POST',
@@ -2824,6 +2859,7 @@
                     body: JSON.stringify({
                         name,
                         material: document.getElementById('ar-material').value,
+                        layer_thickness_mm: thickness === '' ? null : Number(thickness),
                         notes: document.getElementById('ar-notes').value.trim(),
                         printed_at: printedAt || null,
                         powder_cost_rub_per_kg: powderCost === '' ? null : Number(powderCost),
@@ -2834,6 +2870,7 @@
                 document.getElementById('ar-name').value = '';
                 document.getElementById('ar-notes').value = '';
                 document.getElementById('ar-printed-at').value = '';
+                document.getElementById('ar-layer-thickness').value = '';
                 loadArchive();
             } catch (e) {
                 result.innerHTML = `<span style="color:#ef4444;">Ошибка: ${e.message}</span>`;
@@ -2880,8 +2917,110 @@
             return qs;
         }
 
+        // Russian plurals need the last two digits, not a "< 5" shortcut:
+        // 174 → "слоя", 11 → "слоёв", 21 → "слой".
+        function _plural(n, one, few, many) {
+            const mod10 = n % 10, mod100 = n % 100;
+            if (mod100 >= 11 && mod100 <= 14) return many;
+            if (mod10 === 1) return one;
+            if (mod10 >= 2 && mod10 <= 4) return few;
+            return many;
+        }
+
+        // Log sessions belonging to no print card. Loaded alongside the list
+        // because an unlinked session is work in progress, not a detail of the
+        // archive: it produces no cost, no predicted-vs-actual pair and no
+        // calibration input until it is claimed.
+        async function loadUnlinkedSessions() {
+            const banner = document.getElementById('unlinked-banner');
+            if (!banner) return;
+            try {
+                const [d, prints] = await Promise.all([
+                    fetch('/prints/unlinked-sessions').then(r => r.json()),
+                    fetch('/prints?limit=100').then(r => r.json()),
+                ]);
+                if (!d.total) { banner.style.display = 'none'; return; }
+                banner.style.display = 'block';
+
+                document.getElementById('unlinked-title').textContent =
+                    `⚠ ${d.total} ${_plural(d.total, 'сессия', 'сессии', 'сессий')} логов не привязано к печатям`;
+
+                // Only unlinked cards can receive a session, so the picker is
+                // built once from them rather than per row.
+                const free = (prints.items || []).filter(r => !r.session_id);
+                const options = free.map(r => `<option value="${r.record_id}">${r.name}</option>`).join('');
+
+                document.getElementById('unlinked-rows').innerHTML = d.items.map(s => {
+                    const when = s.start_ts ? new Date(s.start_ts).toLocaleDateString('ru') : '—';
+                    const facts = [];
+                    if (s.machine_min != null)       facts.push(`${(s.machine_min / 60).toFixed(1)} ч машинного`);
+                    else if (s.duration_min != null) facts.push(`${(s.duration_min / 60).toFixed(1)} ч`);
+                    if (s.layers)                    facts.push(`${s.layers} ${_plural(s.layers, 'слой', 'слоя', 'слоёв')}`);
+                    if (s.idle_min > 1)              facts.push(`простой ${(s.idle_min / 60).toFixed(1)} ч`);
+                    if (!s.is_print)                 facts.push('подготовка — привязка к печати обычно не нужна');
+
+                    // Creating a card from the log is always offered, not just as
+                    // a fallback: most logs arrive without one waiting for them,
+                    // and without this the operator dead-ends on "no free cards"
+                    // with nothing to click.
+                    const create = `<button class="btn-link" style="background:transparent;border:1px solid var(--status-warning);color:#fde68a;"
+                        onclick="createRecordFromSession('${s.session_id}', '${when}')"
+                        title="Создать карточку печати с датой из лога и сразу привязать">+ карточку</button>`;
+                    const action = free.length
+                        ? `<select id="link-target-${s.session_id}">${options}</select>
+                           <button class="btn-link" onclick="linkSessionToRecord('${s.session_id}')">Привязать</button>${create}`
+                        : create;
+                    return `<div class="unlinked-row">
+                        <span class="when">${when}</span>
+                        <span class="facts">${facts.join(' · ') || 'нет данных'}</span>
+                        ${action}
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                banner.style.display = 'none';
+            }
+        }
+
+        // Create a card for a log that has none and claim the session in one go.
+        // The name is a placeholder the operator renames — what matters is that
+        // the session stops being orphaned, so its time and cost start counting.
+        async function createRecordFromSession(sessionId, whenLabel) {
+            try {
+                const created = await fetch('/prints', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: `Печать ${whenLabel}` }),
+                }).then(async r => {
+                    if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                    return r.json();
+                });
+                const linked = await fetch(`/prints/${created.record_id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId }),
+                });
+                if (!linked.ok) throw new Error((await linked.json()).detail || linked.status);
+                loadArchive(_archiveSkip);
+            } catch (e) { alert('Не удалось создать карточку: ' + e.message); }
+        }
+
+        async function linkSessionToRecord(sessionId) {
+            const recordId = document.getElementById(`link-target-${sessionId}`).value;
+            if (!recordId) return;
+            try {
+                const r = await fetch(`/prints/${recordId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId }),
+                });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                loadArchive(_archiveSkip);
+            } catch (e) { alert('Ошибка привязки: ' + e.message); }
+        }
+
         async function loadArchive(skip = 0) {
             _archiveSkip = skip;
+            loadUnlinkedSessions();
             const body  = document.getElementById('archive-table-body');
             const empty = document.getElementById('archive-empty');
             const wrap  = document.getElementById('archive-list-wrap');
@@ -2898,16 +3037,41 @@
                     : d.items.map(rec => {
                     const rawDate = rec.printed_at || rec.created_at;
                     const date = rawDate ? new Date(rawDate).toLocaleDateString('ru') : '—';
-                    const dateHint = rec.printed_at ? '' : ' <span style="color:#4a5568;" title="Дата создания карточки — дата печати неизвестна">≈</span>';
-                    const pred = (rec.metadata_json || {}).prediction;
-                    const predHours = pred ? (pred.print_hours ?? pred.accurate?.print_hours) : null;
-                    const predLine = (predHours != null)
-                        ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;" title="прогноз времени печати (PySLM)">📐 ${predHours} ч</div>` : '';
+                    const dateHint = rec.printed_at ? '' : ' <span style="color:var(--border-hover);" title="Дата создания карточки — дата печати неизвестна">≈</span>';
+                    const s = rec.summary || {};
+
+                    // Plan and outcome sit side by side: the whole point of the
+                    // list is answering "did the estimate hold?" without opening
+                    // the record.
+                    const plan = s.predicted_hours != null
+                        ? `${s.predicted_hours} ч${s.predicted_cost_rub != null
+                            ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${Math.round(s.predicted_cost_rub).toLocaleString('ru')} ₽</div>` : ''}`
+                        : '<span style="color:var(--text-muted);">—</span>';
+
+                    let fact = '<span style="color:var(--text-muted);">—</span>';
+                    if (s.actual_hours != null) {
+                        // A wall-span actual includes operator pauses the estimate
+                        // never modelled, so it is labelled rather than passed off
+                        // as machine time.
+                        const src = s.actual_source === 'wall_span'
+                            ? ' <span style="color:var(--status-warning);" title="Нет времени по логам — взят интервал сессии, включая паузы">≈</span>' : '';
+                        const idle = s.idle_hours ? `<div style="font-size:11px;color:var(--status-warning);margin-top:2px;" title="Простой не моделируется прогнозом">⏸ ${s.idle_hours} ч</div>` : '';
+                        fact = `${s.actual_hours} ч${src}${idle}`;
+                    }
+
+                    let accuracy = '<span style="color:var(--text-muted);">—</span>';
+                    if (s.error_pct != null) {
+                        const col = Math.abs(s.error_pct) <= 10 ? 'var(--status-success)'
+                                  : Math.abs(s.error_pct) <= 25 ? 'var(--status-warning)' : 'var(--status-danger)';
+                        accuracy = `<span style="color:${col};font-weight:600;">${s.error_pct > 0 ? '+' : ''}${s.error_pct}%</span>`;
+                    }
+
                     const session = rec.session_id
-                        ? `<span style="color:#10b981;" title="${rec.session_id}">✓ привязана</span>${predLine}`
+                        ? `<span style="color:var(--status-success);" title="${rec.session_id}">✓ привязаны</span>`
                         : `<span id="session-cell-${rec.record_id}"><a onclick="showSessionCandidates('${rec.record_id}')"
-                            style="color:#60a5fa;cursor:pointer;font-size:12px;" title="Найти сессии логов рядом с датой печати">🔗 найти сессию</a></span>${predLine}`;
-                    const powder = rec.powder_cost_rub_per_kg != null ? rec.powder_cost_rub_per_kg : '—';
+                            style="color:var(--color-accent);cursor:pointer;font-size:12px;" title="Найти сессии логов рядом с датой печати">🔗 привязать</a></span>`;
+                    const thickness = rec.layer_thickness_mm
+                        ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${rec.layer_thickness_mm} мм</div>` : '';
                     const chips = rec.files.map(f => {
                         const dl = `/prints/${rec.record_id}/files/${f.file_id}/download`;
                         const safeName = f.file_name.replace(/'/g, '&#39;');
@@ -2921,11 +3085,14 @@
                         <input type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadArchiveLogs('${rec.record_id}', this.files)"></label>`;
                     const safeRecName = rec.name.replace(/'/g, '&#39;');
                     return `<tr class="archive-row">
-                        <td>${date}${dateHint}</td>
-                        <td style="color:#e2e8f0;font-weight:600;">${rec.name}${rec.notes ? ` <span title="${rec.notes}" style="cursor:help;color:#4a5568;">💬</span>` : ''}</td>
-                        <td>${_materialRu(rec.material)}</td>
-                        <td>${powder}</td>
-                        <td>${_statusBadge(rec.status)}</td>
+                        <td>
+                            <div style="color:var(--text-body);font-weight:600;">${rec.name}${rec.notes ? ` <span title="${rec.notes}" style="cursor:help;color:var(--border-hover);">💬</span>` : ''}</div>
+                            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${date}${dateHint}${s.layers ? ` · ${s.layers} ${_plural(s.layers, 'слой', 'слоя', 'слоёв')}` : ''} · ${_statusBadge(rec.status)}</div>
+                        </td>
+                        <td>${_materialRu(rec.material)}${thickness}</td>
+                        <td>${plan}</td>
+                        <td>${fact}</td>
+                        <td>${accuracy}</td>
                         <td>${session}</td>
                         <td>${chips}${upload}${logsUpload}</td>
                         <td style="white-space:nowrap;">${rec.files.some(f => f.file_type === 'stl')
