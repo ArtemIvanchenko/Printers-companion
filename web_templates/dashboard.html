@@ -70,6 +70,14 @@
         .nav a:hover { background: var(--border-hover); }
         .nav a.active { background: var(--color-accent); color: white; }
 
+        /* Keyboard focus — the nav/subnav links, quick-actions and tel-cards
+           are click-driven pseudo-buttons (<a onclick>) with no default focus
+           ring once text-decoration is stripped; this restores one. */
+        a:focus-visible, button:focus-visible, .quick-btn:focus-visible, .tel-card:focus-visible {
+            outline: 2px solid var(--color-accent);
+            outline-offset: 2px;
+        }
+
         .content { padding: 30px 40px; max-width: 1600px; margin: 0 auto; }
 
         .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; margin-bottom: 30px; }
@@ -412,19 +420,19 @@
             <div class="charts-grid">
                 <div class="chart-container">
                     <h2>📊 Типы сессий</h2>
-                    <canvas id="typesChart"></canvas>
+                    <canvas id="typesChart" aria-label="График: Типы сессий"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>🔧 Материалы</h2>
-                    <canvas id="materialsChart"></canvas>
+                    <canvas id="materialsChart" aria-label="График: Материалы"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>⏱️ Длительность печатей (мин)</h2>
-                    <canvas id="durationChart"></canvas>
+                    <canvas id="durationChart" aria-label="График: Длительность печатей в минутах"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>📝 Строк логов по сессиям</h2>
-                    <canvas id="linesChart"></canvas>
+                    <canvas id="linesChart" aria-label="График: Строк логов по сессиям"></canvas>
                 </div>
             </div>
         </div>
@@ -454,26 +462,26 @@
                 <div class="chart-container{!o2_alarm_class!}">
                     {!o2_alarm_badge!}
                     <h2>🧪 Кислород O₂ (риск окисления)</h2>
-                    <canvas id="o2Chart"></canvas>
+                    <canvas id="o2Chart" aria-label="График: Кислород O2, риск окисления"></canvas>
                 </div>
                 <div class="chart-container{!temp_alarm_class!}">
                     {!temp_alarm_badge!}
                     <h2>🌡️ Температуры стола / камеры (°C)</h2>
-                    <canvas id="tempChart"></canvas>
+                    <canvas id="tempChart" aria-label="График: Температуры стола и камеры"></canvas>
                 </div>
                 <div class="chart-container{!humidity_alarm_class!}">
                     {!humidity_alarm_badge!}
                     <h2>💧 Влажность атмосферы (%)</h2>
-                    <canvas id="humChart"></canvas>
+                    <canvas id="humChart" aria-label="График: Влажность атмосферы"></canvas>
                 </div>
                 <div class="chart-container{!pressure_alarm_class!}">
                     {!pressure_alarm_badge!}
                     <h2>📊 Давление камеры</h2>
-                    <canvas id="pressChart"></canvas>
+                    <canvas id="pressChart" aria-label="График: Давление камеры"></canvas>
                 </div>
                 <div class="chart-container" style="grid-column: 1 / -1;">
                     <h2>🔥 Время прожига по слоям (сек)</h2>
-                    <canvas id="burnLayerChart"></canvas>
+                    <canvas id="burnLayerChart" aria-label="График: Время прожига по слоям"></canvas>
                 </div>
             </div>
         </div>
@@ -483,19 +491,19 @@
             <div class="charts-grid">
                 <div class="chart-container">
                     <h2>📈 Длительность по времени</h2>
-                    <canvas id="timelineChart"></canvas>
+                    <canvas id="timelineChart" aria-label="График: Длительность печатей по времени"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>⏸️ Паузы по сессиям</h2>
-                    <canvas id="pausesChart"></canvas>
+                    <canvas id="pausesChart" aria-label="График: Паузы по сессиям"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>🔥 Burn events</h2>
-                    <canvas id="burnChart"></canvas>
+                    <canvas id="burnChart" aria-label="График: события прожига"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>📊 Строк на сессию</h2>
-                    <canvas id="sessionLinesChart"></canvas>
+                    <canvas id="sessionLinesChart" aria-label="График: строк на сессию"></canvas>
                 </div>
             </div>
         </div>
@@ -505,11 +513,11 @@
             <div class="charts-grid">
                 <div class="chart-container">
                     <h2>✅ Результаты контроля</h2>
-                    <canvas id="qualityChart"></canvas>
+                    <canvas id="qualityChart" aria-label="График: результаты контроля качества"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>🚫 Типы дефектов</h2>
-                    <canvas id="defectsChart"></canvas>
+                    <canvas id="defectsChart" aria-label="График: типы дефектов"></canvas>
                 </div>
             </div>
             <div class="section" style="margin-top: 25px;">
@@ -545,11 +553,11 @@
             <div class="charts-grid">
                 <div class="chart-container">
                     <h2>⛽ Расход газа по сессиям</h2>
-                    <canvas id="gasChart"></canvas>
+                    <canvas id="gasChart" aria-label="График: расход газа по сессиям"></canvas>
                 </div>
                 <div class="chart-container">
                     <h2>🧪 Расход порошка по сессиям</h2>
-                    <canvas id="powderChart"></canvas>
+                    <canvas id="powderChart" aria-label="График: расход порошка по сессиям"></canvas>
                 </div>
             </div>
             <div class="section" style="margin-top: 25px;">
