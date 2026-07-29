@@ -326,12 +326,16 @@
         </div>
     </div>
 
+    <!-- Four sections, not sixteen screens. Telemetry / quality / history are
+         views of a print and live inside one; everything the operator does not
+         use while working a job sits behind the gear. See
+         docs/DASHBOARD_ARCHITECTURE.md. -->
     <nav class="nav" id="main-nav">
-        <a href="#" onclick="showMainTab('home',event)" id="nav-home" class="active">🏠 Главная</a>
+        <a href="#" onclick="showMainTab('home',event)" id="nav-home" class="active">🏠 Обзор</a>
         <a href="#" onclick="showMainTab('prints',event)" id="nav-prints">📋 Печати</a>
-        <a href="#" onclick="showMainTab('sessions',event)" id="nav-sessions">📊 Сессии</a>
-        <a href="#" onclick="showMainTab('settings',event)" id="nav-settings">⚙️ Настройки</a>
-        <a href="#" onclick="showMainTab('maintenance',event)" id="nav-maintenance">🔧 Обслуживание</a>
+        <a href="#" onclick="showMainTab('estimate',event)" id="nav-estimate">🧮 Расчёт</a>
+        <a href="#" onclick="showMainTab('machine',event)" id="nav-machine">🖨 Станок</a>
+        <a href="#" onclick="showMainTab('settings',event)" id="nav-settings" title="Параметры, импорт, обновление">⚙️</a>
         <button onclick="openNewPrintRecord()"
             style="margin-left:auto;background:#10b981;color:white;border:none;border-radius:8px;
                    padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">
@@ -341,29 +345,30 @@
 
     <!-- Печати sub-nav -->
     <div class="subnav" id="prints-subnav" style="display:none;">
-        <a onclick="showPrintsPage('archive',event)" id="subnav-prints-archive">📦 Карточки</a>
-        <a onclick="showPrintsPage('models',event)" id="subnav-prints-models">🧊 Модели</a>
+        <a onclick="showPrintsPage('archive',event)" id="subnav-prints-archive">📦 Все печати</a>
     </div>
-    <!-- Сессии sub-nav -->
-    <div class="subnav" id="sessions-subnav" style="display:none;">
-        <a onclick="showSessionsPage('telemetry',event)" id="subnav-telemetry">🌡️ Телеметрия</a>
-        <a onclick="showSessionsPage('history',event)" id="subnav-history">📋 История</a>
-        <a onclick="showSessionsPage('quality',event)" id="subnav-quality">✅ Качество</a>
-        <a onclick="showSessionsPage('patterns',event)" id="subnav-patterns">🔍 Тренды</a>
-        <a onclick="showSessionsPage('upload',event)" id="subnav-upload">📂 Загрузка</a>
+    <!-- Станок: его состояние и всё, что копится между печатями -->
+    <div class="subnav" id="machine-subnav" style="display:none;">
+        <a onclick="showMachinePage('maint',event)" id="subnav-maint">🔧 ТО и ресурс</a>
+        <a onclick="showMachinePage('powder',event)" id="subnav-powder">🧪 Порошок</a>
+        <a onclick="showMachinePage('patterns',event)" id="subnav-patterns">🔍 Тренды</a>
+        <a onclick="showMachinePage('accuracy',event)" id="subnav-accuracy">🎯 Точность прогнозов</a>
+        <a onclick="showMachinePage('journal',event)" id="subnav-journal">📝 Журнал</a>
     </div>
-    <!-- Настройки sub-nav -->
+    <!-- Служебное: нужно редко, не мешает работе -->
     <div class="subnav" id="settings-subnav" style="display:none;">
-        <a onclick="showSettingsPage('params',event)" id="subnav-settings-params">⚙️ Машина</a>
-        <a onclick="showSettingsPage('logs',event)" id="subnav-settings-logs">📋 Логи</a>
+        <a onclick="showSettingsPage('params',event)" id="subnav-settings-params">⚙️ Параметры машины</a>
+        <a onclick="showSettingsPage('upload',event)" id="subnav-settings-upload">📂 Импорт логов</a>
+        <a onclick="showSettingsPage('quality',event)" id="subnav-settings-quality">✅ Качество данных</a>
+        <a onclick="showSettingsPage('logs',event)" id="subnav-settings-logs">📋 Логи системы</a>
         <a onclick="showSettingsPage('update',event)" id="subnav-settings-update">⬆️ Обновление</a>
-        <a onclick="showSettingsPage('testmetrics',event)" id="subnav-settings-testmetrics">🧪 Тестовые метрики</a>
+        <a onclick="showSettingsPage('testmetrics',event)" id="subnav-settings-testmetrics">🧪 Эксперименты</a>
     </div>
-    <!-- Обслуживание sub-nav -->
-    <div class="subnav" id="maintenance-subnav" style="display:none;">
-        <a onclick="showMaintenancePage('powder',event)" id="subnav-powder">🧪 Порошок</a>
-        <a onclick="showMaintenancePage('maint',event)" id="subnav-maint">🔧 ТО</a>
-        <a onclick="showMaintenancePage('journal',event)" id="subnav-journal">📝 Журнал</a>
+    <!-- Телеметрия конкретной печати: экран есть, но в главное меню не вынесен —
+         сюда попадают из карточки печати. -->
+    <div class="subnav" id="sessions-subnav" style="display:none;">
+        <a onclick="showSessionsPage('telemetry',event)" id="subnav-telemetry">🌡️ Телеметрия печати</a>
+        <a onclick="showPrintsPage('archive',event)">← к печатям</a>
     </div>
 
     <div id="import-status-bar" style="background:#1a1f2e;padding:8px 40px;border-bottom:1px solid #2d3748;display:none;">
@@ -424,45 +429,48 @@
                     <input id="file-input-home" type="file" multiple accept=".log,.zip" style="display:none" onchange="uploadFiles(this.files)">
                 </button>
                 <button class="quick-btn" onclick="rescanFolder()">🔄 Сканировать папку</button>
-                <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('telemetry',null)">🌡️ Телеметрия</button>
-                <button class="quick-btn" onclick="showMainTab('sessions',null);showSessionsPage('patterns',null)">🔍 Тренды</button>
+                <button class="quick-btn" onclick="showMainTab('estimate',null)">🧮 Рассчитать печать</button>
+                <button class="quick-btn" onclick="showMainTab('machine',null);showMachinePage('patterns',null)">🔍 Тренды</button>
             </div>
             <div id="home-upload-result" style="margin-top:8px;font-size:13px;min-height:1em;"></div>
 
-            <!-- Key metrics -->
+            <!-- Four headline numbers, not six. Gas and powder totals were
+                 dropped: both read 0 because nothing feeds them, and an empty
+                 number in the most valuable spot on the screen teaches the
+                 operator to ignore that row. They live under "Станок", where
+                 they appear once there is something to show. -->
             <div class="stats" style="margin-bottom:24px;">
-                <div class="stat-card">
-                    <div class="value" style="color:#10b981;">{!real_print_count!}</div>
+                <div class="stat-card" style="cursor:pointer;" onclick="showMainTab('prints',null)">
+                    <div class="value" style="color:var(--status-success);">{!real_print_count!}</div>
                     <div class="label">Печатей</div>
                 </div>
-                <div class="stat-card">
-                    <div class="value" style="color:#f59e0b;">{!total_print_hours!}</div>
+                <div class="stat-card" style="cursor:pointer;" onclick="showMainTab('prints',null)">
+                    <div class="value" style="color:var(--status-warning);">{!total_print_hours!}</div>
                     <div class="label">Часов печати</div>
                 </div>
-                <div class="stat-card">
-                    <div class="value" style="color:#ec4899;">{!gas_total_bar!}</div>
-                    <div class="label">Газ (бар)</div>
-                </div>
-                <div class="stat-card">
-                    <div class="value" style="color:#06b6d4;">{!powder_total_kg!}</div>
-                    <div class="label">Порошок (кг)</div>
-                </div>
-                <div class="stat-card" id="home-powder-card" style="cursor:pointer;" onclick="showMainTab('maintenance',null);showMaintenancePage('powder',null)">
-                    <div class="value" style="color:#10b981;" id="home-pow-remaining">—</div>
+                <div class="stat-card" id="home-powder-card" style="cursor:pointer;" onclick="showMainTab('machine',null);showMachinePage('powder',null)">
+                    <div class="value" style="color:var(--status-success);" id="home-pow-remaining">—</div>
                     <div class="label">Остаток порошка (кг)</div>
                 </div>
-                <div class="stat-card" id="home-maint-card" style="cursor:pointer;" onclick="showMainTab('maintenance',null);showMaintenancePage('maint',null)">
-                    <div class="value" style="color:#f59e0b;" id="home-maint-next">—</div>
+                <div class="stat-card" id="home-maint-card" style="cursor:pointer;" onclick="showMainTab('machine',null);showMachinePage('maint',null)">
+                    <div class="value" style="color:var(--status-warning);" id="home-maint-next">—</div>
                     <div class="label">До ближ. ТО (ч)</div>
                 </div>
+            </div>
+
+            <!-- What the operator has to act on. Empty when nothing needs
+                 attention — an always-present block would be background noise. -->
+            <div class="section" id="home-attention" style="display:none;border-color:var(--status-warning);">
+                <h2 style="margin:0 0 12px;">⚠ Требует внимания</h2>
+                <div id="home-attention-rows"></div>
             </div>
 
             <!-- Recent sessions -->
             <div class="section">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
                     <h2 style="margin:0;">Последние печати</h2>
-                    <a onclick="showMainTab('sessions',null);showSessionsPage('history',null)"
-                       style="color:#60a5fa;font-size:13px;cursor:pointer;text-decoration:none;">Все сессии →</a>
+                    <a onclick="showMainTab('prints',null)"
+                       style="color:var(--color-accent);font-size:13px;cursor:pointer;text-decoration:none;">Все печати →</a>
                 </div>
                 <div class="recent-grid" id="home-recent-sessions">
                     <div style="color:#6b7280;font-size:13px;">Загрузка...</div>
@@ -846,6 +854,20 @@
         </div>
 
         <!-- Models History Page -->
+        <!-- How well the machine's own predictions have been holding. Lives
+             under "Станок" rather than under settings: it is a measured state
+             of this machine, not a knob to turn. -->
+        <div id="page-machine-accuracy" style="display:none;">
+            <div class="section">
+                <h2>🎯 Точность прогнозов</h2>
+                <p style="color:var(--text-muted);font-size:13px;margin-top:6px;margin-bottom:16px;">
+                    Каждая печать с привязанными логами добавляет пару «прогноз — факт». По ним автоматически
+                    подстраиваются поправки: отдельно на скан, отдельно на нанесение слоя.
+                </p>
+                <div id="machine-accuracy-body"><div class="pc-empty">Загрузка…</div></div>
+            </div>
+        </div>
+
         <!-- One print, everything about it. Telemetry / quality / outcome are
              tabs here rather than top-level sections: they are views OF a print,
              and reaching them used to mean picking a tab and then finding the
@@ -1651,17 +1673,25 @@
         }
 
         // =========================================================
-        // NAVIGATION — Главная / Печати / Сессии / Настройки / Обслуживание
+        // NAVIGATION — Обзор / Печати / Расчёт / Станок / ⚙
         // =========================================================
-        const SESSIONS_PAGES = { telemetry: 'telemetry', history: 'sessions', quality: 'quality', patterns: 'patterns', upload: 'upload' };
-        const PRINTS_PAGES   = { archive: 'archive', models: 'models' };
-        const SETTINGS_PAGES = { params: 'settings', logs: 'logs', update: 'update', testmetrics: 'testmetrics' };
-        const MAINT_PAGES    = { powder: 'powder', maint: 'maintenance', journal: 'logs' };
+        // Page ids kept as they are: the screens themselves did not move, only
+        // which section they hang under. Renaming them would touch every
+        // renderer for no gain.
+        const SESSIONS_PAGES = { telemetry: 'telemetry' };
+        const PRINTS_PAGES   = { archive: 'archive' };
+        const SETTINGS_PAGES = { params: 'settings', logs: 'logs', update: 'update',
+                                 testmetrics: 'testmetrics', upload: 'upload', quality: 'quality' };
+        // "Станок" is the state of the machine and everything that accumulates
+        // between prints — service life, powder, cross-session drift, and how
+        // well its own predictions have been holding.
+        const MACHINE_PAGES  = { maint: 'maintenance', powder: 'powder',
+                                 patterns: 'patterns', accuracy: 'machine-accuracy', journal: 'logs' };
 
         let _activeSessionsPage = 'telemetry';
         let _activePrintsPage   = 'archive';
         let _activeSettingsPage = 'params';
-        let _activeMaintPage    = 'powder';
+        let _activeMachinePage  = 'maint';
 
         function _hideAllPages() {
             document.querySelectorAll('[id^="page-"]').forEach(el => el.style.display = 'none');
@@ -1673,8 +1703,9 @@
         }
 
         function _showSubnav(tab) {
-            ['prints','sessions','settings','maintenance'].forEach(t => {
-                document.getElementById(t + '-subnav').style.display = tab === t ? 'flex' : 'none';
+            ['prints','sessions','settings','machine'].forEach(t => {
+                const el = document.getElementById(t + '-subnav');
+                if (el) el.style.display = tab === t ? 'flex' : 'none';
             });
         }
 
@@ -1695,12 +1726,17 @@
                 loadHomeStats();
             } else if (tab === 'prints') {
                 showPrintsPage(_activePrintsPage, null);
+            } else if (tab === 'estimate') {
+                // Standalone estimate: geometry in, hours and price out, no card
+                // created. The model gallery already did exactly this.
+                document.getElementById('page-models').style.display = 'block';
+                loadModelHistory();
             } else if (tab === 'sessions') {
                 showSessionsPage(_activeSessionsPage, null);
             } else if (tab === 'settings') {
                 showSettingsPage(_activeSettingsPage, null);
-            } else if (tab === 'maintenance') {
-                showMaintenancePage(_activeMaintPage, null);
+            } else if (tab === 'machine') {
+                showMachinePage(_activeMachinePage, null);
             }
         }
 
@@ -1709,13 +1745,8 @@
             _activePrintsPage = page;
             _showSubnav('prints');
             _setMainActive('prints');
-            if (page === 'archive') {
-                _showSubPage('prints-subnav', 'archive', 'prints-archive');
-                loadArchive(); loadPrintDefaults();
-            } else if (page === 'models') {
-                _showSubPage('prints-subnav', 'models', 'prints-models');
-                loadModelHistory();
-            }
+            _showSubPage('prints-subnav', 'archive', 'prints-archive');
+            loadArchive(); loadPrintDefaults();
         }
 
         function showSessionsPage(page, evt) {
@@ -1740,15 +1771,22 @@
             if (page === 'testmetrics') loadTestMetrics(false);
         }
 
-        function showMaintenancePage(page, evt) {
+        function showMachinePage(page, evt) {
             if (evt) evt.preventDefault();
-            _activeMaintPage = page;
-            _showSubnav('maintenance');
-            _setMainActive('maintenance');
-            _showSubPage('maintenance-subnav', MAINT_PAGES[page] || page, page);
-            if (page === 'powder')  loadPowder();
-            if (page === 'maint')   loadMaintenance();
-            if (page === 'journal') loadLogs();
+            _activeMachinePage = page;
+            _showSubnav('machine');
+            _setMainActive('machine');
+            _showSubPage('machine-subnav', MACHINE_PAGES[page] || page, page);
+            if (page === 'powder')   loadPowder();
+            if (page === 'maint')    loadMaintenance();
+            if (page === 'journal')  loadLogs();
+            if (page === 'patterns') loadPatterns();
+            if (page === 'accuracy') loadMachineAccuracy();
+        }
+
+        // Kept because older buttons still call it by name.
+        function showMaintenancePage(page, evt) {
+            showMachinePage(page === 'maint' ? 'maint' : page, evt);
         }
 
         // ── New print record shortcut ──
@@ -1781,17 +1819,17 @@
         // Legacy compat — inline onclick calls
         function showGearPage(page, evt) {
             if (evt) { evt.preventDefault(); evt.stopPropagation(); }
-            if (page === 'upload') showSessionsPage('upload', null);
+            if (page === 'upload') showSettingsPage('upload', null);
             else if (page === 'logs') showSettingsPage('logs', null);
             else if (page === 'update') showSettingsPage('update', null);
         }
 
         function showPage(page) {
             if (page in SESSIONS_PAGES)              showSessionsPage(page, null);
-            else if (page in MAINT_PAGES)            showMaintenancePage(page, null);
-            else if (page === 'maintenance')         showMaintenancePage('maint', null);
+            else if (page in MACHINE_PAGES)          showMachinePage(page, null);
+            else if (page === 'maintenance')         showMachinePage('maint', null);
             else if (page === 'archive')             showPrintsPage('archive', null);
-            else if (page === 'models')              showPrintsPage('models', null);
+            else if (page === 'models')              showMainTab('estimate', null);
             else if (page === 'stl' || page === 'estimate') {
                 _hideAllPages(); _showSubnav(null); _setMainActive(null);
                 document.getElementById('page-stl').style.display = 'block'; loadStlMaterials();
@@ -2185,7 +2223,7 @@
                         ${_renderPrediction(pred)}
                         ${warns}
                         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
-                            <button onclick="showPrintsPage('models',null)"
+                            <button onclick="showMainTab('estimate',null)"
                                 style="background:#2d3748;color:#e2e8f0;border:1px solid #4a5568;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">
                                 📦 Открыть в истории моделей
                             </button>
@@ -2992,6 +3030,94 @@
             return qs;
         }
 
+        // Predicted-vs-actual, per material. Three separate calibrations feed
+        // this: the blanket scan factor, recoat time, and the fitted per-mode
+        // scan model — they are shown apart because they fail apart.
+        async function loadMachineAccuracy() {
+            const el = document.getElementById('machine-accuracy-body');
+            try {
+                const [d, mp] = await Promise.all([
+                    fetch('/prints/prediction-accuracy').then(r => r.json()),
+                    fetch('/settings/machine').then(r => r.json()),
+                ]);
+                const locked = !!(mp.params && mp.params.correction_locked);
+                const byMat = (mp.params && mp.params.time_correction_by_mat) || {};
+
+                if (!d.n_pairs) {
+                    el.innerHTML = `<div class="pc-empty">
+                        Пока нет ни одной пары «прогноз + факт».<br>
+                        Нужны печати, у которых есть и рассчитанный прогноз, и привязанные логи —
+                        минимум ${d.min_pairs_for_calibration} на материал, чтобы поправка начала применяться.</div>`;
+                    return;
+                }
+
+                const rows = (d.pairs || []).slice(0, 12).map(p => {
+                    const col = Math.abs(p.error_pct) <= 10 ? 'var(--status-success)'
+                              : Math.abs(p.error_pct) <= 25 ? 'var(--status-warning)' : 'var(--status-danger)';
+                    // A wall-span actual carries operator pauses the estimate
+                    // never modelled — flagged rather than silently averaged in.
+                    const src = p.actual_source === 'wall_span'
+                        ? ' <span style="color:var(--status-warning);" title="Факт по интервалу сессии, включая паузы">≈</span>' : '';
+                    return `<tr>
+                        <td>${p.name || p.record_id}</td>
+                        <td>${_materialRu(p.material)}</td>
+                        <td>${p.predicted_hours} ч</td>
+                        <td>${p.actual_hours} ч${src}</td>
+                        <td style="color:${col};font-weight:600;">${p.error_pct > 0 ? '+' : ''}${p.error_pct}%</td>
+                        <td style="font-size:12px;color:var(--text-muted);">${p.used_for_calibration ? 'учтена' : (p.excluded_reason || '—')}</td>
+                    </tr>`;
+                }).join('');
+
+                const mats = new Set([...Object.keys(d.by_material || {}), ...Object.keys(byMat)]);
+                const matRows = [...mats].map(m => {
+                    const info = (d.by_material || {})[m] || {};
+                    const applied = byMat[m];
+                    return `<div class="pc-kv">
+                        <span>${_materialRu(m)}</span>
+                        <span>${applied != null ? `×${applied}` : '×1.00'}
+                            <span style="font-weight:400;color:var(--text-muted);font-size:12px;">
+                            ${info.n_pairs ? `· ${info.n_pairs} печ.` : ''}${info.suggested_factor != null ? ` · рекоменд. ×${info.suggested_factor}` : ''}</span>
+                        </span></div>`;
+                }).join('');
+
+                const scan = d.scan || {};
+                const scanRows = Object.entries(scan.candidates || {}).map(([mode, m]) => `
+                    <div class="pc-kv"><span>${mode}</span>
+                    <span style="color:${m.status === 'ok' ? 'var(--status-success)' : 'var(--text-muted)'};">
+                        ${m.status === 'ok' ? `R²=${m.r2}, ${m.n_layers} слоёв` : (m.status || '—')}</span></div>`).join('')
+                    || '<div style="color:var(--text-muted);font-size:13px;">Нет подогнанных моделей — нужны печати с логами по каждому режиму.</div>';
+
+                el.innerHTML = `
+                    <div class="pc-grid" style="margin-bottom:20px;">
+                        <div class="pc-box">
+                            <h4>Поправка по материалам</h4>
+                            ${matRows || '<div style="color:var(--text-muted);font-size:13px;">Данных пока нет.</div>'}
+                            <div style="margin-top:12px;font-size:12px;">
+                                ${locked
+                                    ? `🔒 Поправки зафиксированы вручную. <a onclick="setCorrectionLock(false)" style="color:var(--color-accent);cursor:pointer;">включить авто</a>`
+                                    : `<a onclick="recalibrateNow()" style="color:var(--color-accent);cursor:pointer;">пересчитать сейчас</a>
+                                       · <a onclick="setCorrectionLock(true)" style="color:var(--text-muted);cursor:pointer;">зафиксировать</a>`}
+                            </div>
+                        </div>
+                        <div class="pc-box">
+                            <h4>Модели скана по режимам</h4>
+                            ${scanRows}
+                            <div style="margin-top:10px;font-size:12px;color:var(--text-muted);">
+                                Модель обучается на реальном времени прожига слоёв и применяется только к своему режиму
+                                «материал + толщина» — на чужой режим она не переносится.</div>
+                        </div>
+                    </div>
+                    <div style="overflow-x:auto;">
+                        <table>
+                            <thead><tr><th>Печать</th><th>Материал</th><th>Прогноз</th><th>Факт</th><th>Расхождение</th><th>В калибровке</th></tr></thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>`;
+            } catch (e) {
+                el.innerHTML = `<div class="pc-empty" style="color:var(--status-danger);">Не удалось загрузить: ${e.message}</div>`;
+            }
+        }
+
         // =========================================================
         // PRINT CARD — one print, everything about it
         // =========================================================
@@ -3745,7 +3871,60 @@
         // =========================================================
         // HOME STATS
         // =========================================================
+        // Everything the operator has to act on, gathered from the places that
+        // would otherwise each have to be visited to notice a problem.
+        async function loadHomeAttention() {
+            const box = document.getElementById('home-attention');
+            const rows = document.getElementById('home-attention-rows');
+            if (!box || !rows) return;
+            const items = [];
+
+            const [unlinked, maint, powder] = await Promise.all([
+                fetch('/prints/unlinked-sessions').then(r => r.json()).catch(() => null),
+                fetch('/maintenance/status').then(r => r.json()).catch(() => null),
+                fetch('/powder/status').then(r => r.json()).catch(() => null),
+            ]);
+
+            if (unlinked && unlinked.n_prints > 0) {
+                items.push({
+                    color: 'var(--status-warning)',
+                    // Phrased so it agrees for any count: a verb here would need
+                    // to change with the number ("не привязана" / "не привязаны").
+                    text: `${unlinked.n_prints} ${_plural(unlinked.n_prints, 'печать', 'печати', 'печатей')} с логами без карточки — не считается ни точность прогноза, ни себестоимость`,
+                    action: () => showMainTab('prints', null),
+                    label: 'Привязать',
+                });
+            }
+            for (const m of (maint || []).filter(i => i.grade !== 'ok')) {
+                items.push({
+                    color: m.grade === 'critical' ? 'var(--status-danger)' : 'var(--status-warning)',
+                    text: `${m.icon || '🔧'} ${m.label}: ${m.grade === 'critical' ? 'ресурс исчерпан' : `осталось ${m.remaining} ${m.unit}`}`,
+                    action: () => { showMainTab('machine', null); showMachinePage('maint', null); },
+                    label: 'Открыть ТО',
+                });
+            }
+            if (powder && !powder.has_batch) {
+                items.push({
+                    color: 'var(--text-muted)',
+                    text: 'Партия порошка не заведена — расход и себестоимость по порошку не считаются',
+                    action: () => { showMainTab('machine', null); showMachinePage('powder', null); },
+                    label: 'Завести',
+                });
+            }
+
+            if (!items.length) { box.style.display = 'none'; return; }
+            box.style.display = 'block';
+            window._homeAttentionActions = items.map(i => i.action);
+            rows.innerHTML = items.map((i, idx) => `
+                <div class="pc-kv">
+                    <span style="color:${i.color};">${i.text}</span>
+                    <span><a onclick="window._homeAttentionActions[${idx}]()"
+                             style="color:var(--color-accent);cursor:pointer;font-weight:400;">${i.label} →</a></span>
+                </div>`).join('');
+        }
+
         async function loadHomeStats() {
+            loadHomeAttention();
             try {
                 const d = await fetch('/powder/status').then(r => r.json());
                 const el = document.getElementById('home-pow-remaining');
@@ -3786,7 +3965,7 @@
                            </div>`
                         : '';
                     return `<div style="background:var(--bg-panel-alt);border:1px solid var(--border-default);border-radius:10px;padding:14px;cursor:pointer;"
-                        onclick="showMainTab('sessions',null);showSessionsPage('history',null)">
+                        onclick="showMainTab('prints',null)">
                         <div style="font-weight:600;color:var(--text-body);">${date}</div>
                         <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">⏱ ${dur}</div>
                         ${idle}

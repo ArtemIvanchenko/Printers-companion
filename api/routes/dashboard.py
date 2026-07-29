@@ -263,9 +263,6 @@ def dashboard():
     # Stats
     prints = len([s for s in sessions if s['type'] == 'REAL_PRINT'])
     hours = sum(s['duration_min'] for s in sessions) // 60
-    gas_total = sum(e['value'] for e in gas_events if e['value'])
-    powder_total = sum(e['value'] for e in powder_events if e['value'])
-    
     # Counts by category (Counter keeps first-seen order, like the old dicts)
     types = Counter(s['type'] for s in sessions)
     materials = Counter(s.get('material') or 'unknown' for s in sessions)
@@ -447,8 +444,6 @@ def dashboard():
         "vendor": _profile.vendor,
         "real_print_count": prints,
         "total_print_hours": hours,
-        "gas_total_bar": f"{gas_total:.0f}",
-        "powder_total_kg": f"{powder_total:.1f}",
         "telemetry_subtitle": tel_subtitle,
         "telemetry_missing_notice": "" if has_telemetry else '<div class="section" style="text-align:center;color:#6b7280;">Нет данных телеметрии. Импортируйте логи реальной печати (burn/sensors).</div>',
         "process_health_panel": health_panel if has_telemetry else "",
