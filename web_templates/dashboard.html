@@ -193,6 +193,31 @@
         .nav-more-menu a:hover { background: var(--border-default); }
         .nav-more.open .nav-more-menu { display: block; }
 
+        /* Tabs inside one print. Underline rather than filled pills, so they
+           read as a level below the main nav instead of competing with it. */
+        .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border-default); margin-bottom: var(--space-4); flex-wrap: wrap; }
+        .tabs a { padding: 10px 16px; color: var(--text-secondary); font-size: var(--text-md); cursor: pointer;
+                  border-bottom: 2px solid transparent; text-decoration: none; }
+        .tabs a:hover { color: var(--text-body); }
+        .tabs a.active { color: var(--text-body); border-bottom-color: var(--color-accent); font-weight: 600; }
+
+        .pc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+        @media (max-width: 900px) { .pc-grid { grid-template-columns: 1fr; } }
+        .pc-box { background: var(--bg-panel-alt); border: 1px solid var(--border-default);
+                  border-radius: var(--radius-md); padding: var(--space-3); }
+        .pc-box h4 { color: var(--text-secondary); font-size: var(--text-sm); font-weight: 600;
+                     text-transform: uppercase; letter-spacing: .04em; margin-bottom: 10px; }
+        .pc-kv { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0;
+                 border-bottom: 1px solid var(--border-default); font-size: var(--text-md); }
+        .pc-kv:last-child { border-bottom: none; }
+        .pc-kv > span:first-child { color: var(--text-secondary); }
+        .pc-kv > span:last-child { color: var(--text-body); font-weight: 600; text-align: right; }
+        .pc-field { margin-bottom: var(--space-3); }
+        .pc-field label { display: block; color: var(--text-secondary); font-size: var(--text-sm); margin-bottom: 5px; }
+        .pc-field .hint { color: var(--text-muted); font-size: var(--text-xs); margin-top: 4px; }
+        .pc-field .hint.important { color: var(--status-warning); }
+        .pc-empty { color: var(--text-muted); font-size: var(--text-base); padding: var(--space-4); text-align: center; }
+
         /* Unlinked log sessions — unfinished work, shown above the print list.
            Until a session is linked it yields no cost, no predicted-vs-actual
            pair and no calibration input, so it must not be discoverable only by
@@ -821,6 +846,40 @@
         </div>
 
         <!-- Models History Page -->
+        <!-- One print, everything about it. Telemetry / quality / outcome are
+             tabs here rather than top-level sections: they are views OF a print,
+             and reaching them used to mean picking a tab and then finding the
+             session again in a list. -->
+        <div id="page-print-card" style="display:none;">
+            <div style="margin-bottom:16px;">
+                <button class="quick-btn" onclick="showPrintsPage('archive')">← К списку печатей</button>
+            </div>
+
+            <div class="section">
+                <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+                    <div>
+                        <h2 id="pc-title" style="margin:0;">—</h2>
+                        <p id="pc-subtitle" style="color:var(--text-muted);font-size:13px;margin-top:6px;"></p>
+                    </div>
+                    <div id="pc-actions" style="display:flex;gap:10px;"></div>
+                </div>
+
+                <div class="tabs" id="pc-tabs" style="margin-top:20px;">
+                    <a id="pctab-what"    onclick="showPrintCardTab('what')">Что печатали</a>
+                    <a id="pctab-plan"    onclick="showPrintCardTab('plan')">Прогноз</a>
+                    <a id="pctab-outcome" onclick="showPrintCardTab('outcome')">Как прошло</a>
+                    <a id="pctab-process" onclick="showPrintCardTab('process')">Процесс</a>
+                    <a id="pctab-files"   onclick="showPrintCardTab('files')">Файлы</a>
+                </div>
+
+                <div id="pcpane-what"    class="pc-pane"></div>
+                <div id="pcpane-plan"    class="pc-pane" style="display:none;"></div>
+                <div id="pcpane-outcome" class="pc-pane" style="display:none;"></div>
+                <div id="pcpane-process" class="pc-pane" style="display:none;"></div>
+                <div id="pcpane-files"   class="pc-pane" style="display:none;"></div>
+            </div>
+        </div>
+
         <div id="page-models" style="display:none;">
             <div class="section" style="margin-bottom:20px;">
                 <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
@@ -857,7 +916,18 @@
                         <h2 style="margin:0;">📦 Карточки печатей</h2>
                         <p style="color:#6b7280;font-size:13px;margin-top:6px;">STL, Magics, фото, документы и привязанные сессии — всё в одном месте.</p>
                     </div>
-                    <div style="display:flex;gap:10px;">
+                    <div style="display:flex;gap:10px;align-items:center;">
+                        <!-- Any artefact of a print can start a card: STL, a
+                             Magics layout, a photo of the plate, a spec. The
+                             card is a container for whatever arrives first —
+                             requiring the operator to create it by hand before
+                             dropping files is a step with no purpose. -->
+                        <label class="quick-btn" style="cursor:pointer;"
+                               title="STL, Magics, фото, документ — карточка создастся сама, имя возьмётся из файла">
+                            📎 Создать из файлов
+                            <input type="file" multiple style="display:none"
+                                   onchange="createRecordFromFiles(this.files); this.value='';">
+                        </label>
                         <button onclick="toggleArchiveForm()"
                             style="background:#10b981;color:white;border:none;border-radius:8px;padding:10px 20px;font-size:14px;cursor:pointer;">
                             + Новая карточка
@@ -2830,6 +2900,9 @@
         async function loadPrintDefaults() {
             try {
                 const d = await fetch('/prints/defaults').then(r => r.json());
+                // Shared with the print card, which builds its own material
+                // select from the same list rather than refetching.
+                window._printMaterials = d.materials || [];
                 const sel = document.getElementById('ar-material');
                 const current = sel.value;
                 sel.innerHTML = d.materials.map(m => `<option value="${m}">${_materialRu(m)}</option>`).join('');
@@ -2877,12 +2950,14 @@
             }
         }
 
-        async function estimateRecord(recordId) {
+        // stayOnCard: called from the print card, where reloading the list would
+        // navigate the operator away from what they were looking at.
+        async function estimateRecord(recordId, stayOnCard = false) {
             try {
                 const r = await fetch(`/prints/${recordId}/estimate`, { method: 'POST' });
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || r.status);
-                loadArchive(_archiveSkip);
+                if (stayOnCard) openPrintCard(recordId); else loadArchive(_archiveSkip);
             } catch (e) { alert('Ошибка расчёта: ' + e.message); }
         }
 
@@ -2915,6 +2990,299 @@
             if (df) qs += `&date_from=${df}`;
             if (dt) qs += `&date_to=${dt}T23:59:59`;
             return qs;
+        }
+
+        // =========================================================
+        // PRINT CARD — one print, everything about it
+        // =========================================================
+        let _pcRecord = null;   // the record being viewed
+        let _pcSession = null;  // its linked log session, if any
+
+        async function openPrintCard(recordId) {
+            _hideAllPages();
+            _showSubnav('prints');
+            _setMainActive('prints');
+            document.getElementById('page-print-card').style.display = 'block';
+            window.scrollTo(0, 0);
+
+            document.getElementById('pc-title').textContent = 'Загрузка…';
+            document.getElementById('pc-subtitle').textContent = '';
+            try {
+                _pcRecord = await fetch(`/prints/${recordId}`).then(r => r.json());
+                // The outcome lives on the session, so it is fetched alongside —
+                // "Как прошло" and "Процесс" are unanswerable without it.
+                _pcSession = _pcRecord.session_id
+                    ? await fetch(`/sessions/${_pcRecord.session_id}`).then(r => r.ok ? r.json() : null).catch(() => null)
+                    : null;
+            } catch (e) {
+                document.getElementById('pc-title').textContent = 'Не удалось загрузить карточку';
+                return;
+            }
+            _renderPrintCard();
+            showPrintCardTab('what');
+        }
+
+        function _renderPrintCard() {
+            const rec = _pcRecord, s = _pcSession;
+            document.getElementById('pc-title').textContent = rec.name;
+
+            const bits = [];
+            const when = rec.printed_at || rec.created_at;
+            if (when) bits.push(new Date(when).toLocaleDateString('ru'));
+            bits.push(rec.session_id ? 'логи привязаны' : 'логи не привязаны');
+            const f = ((s || {}).features) || {};
+            if (f.layers) bits.push(`${f.layers} ${_plural(f.layers, 'слой', 'слоя', 'слоёв')}`);
+            document.getElementById('pc-subtitle').textContent = bits.join(' · ');
+
+            const hasStl = (rec.files || []).some(x => x.file_type === 'stl');
+            document.getElementById('pc-actions').innerHTML = hasStl
+                ? `<button class="quick-btn primary" onclick="estimateRecord('${rec.record_id}', true)">📐 Пересчитать прогноз</button>` : '';
+
+            _renderPcWhat(); _renderPcPlan(); _renderPcOutcome(); _renderPcProcess(); _renderPcFiles();
+        }
+
+        function showPrintCardTab(tab) {
+            document.querySelectorAll('.pc-pane').forEach(p => p.style.display = 'none');
+            document.querySelectorAll('#pc-tabs a').forEach(a => a.classList.remove('active'));
+            document.getElementById('pcpane-' + tab).style.display = 'block';
+            document.getElementById('pctab-' + tab).classList.add('active');
+        }
+
+        function _renderPcWhat() {
+            const rec = _pcRecord;
+            const materials = (window._printMaterials || []);
+            const opts = materials.length
+                ? materials.map(m => `<option value="${m}" ${m === rec.material ? 'selected' : ''}>${_materialRu(m)}</option>`).join('')
+                : `<option value="${rec.material}" selected>${_materialRu(rec.material)}</option>`;
+
+            document.getElementById('pcpane-what').innerHTML = `
+                <div class="pc-grid">
+                    <div>
+                        <div class="pc-field">
+                            <label>Название печати</label>
+                            <input id="pc-name" class="mp-input" value="${(rec.name || '').replace(/"/g, '&quot;')}">
+                        </div>
+                        <div class="pc-field">
+                            <label>Материал</label>
+                            <select id="pc-material" class="mp-input">${opts}</select>
+                            <div class="hint important">Принтер не пишет материал в логи — это единственное место, где он задаётся. Без него не считается себестоимость.</div>
+                        </div>
+                        <div class="pc-field">
+                            <label>Толщина слоя, мм</label>
+                            <input id="pc-thickness" class="mp-input" type="number" min="0" max="1" step="0.005"
+                                   value="${rec.layer_thickness_mm ?? ''}" placeholder="по умолчанию — из параметров машины">
+                            <div class="hint">Модель времени обучается отдельно на каждую пару «материал + толщина» и между ними не переносится.</div>
+                        </div>
+                        <div class="pc-field">
+                            <label>Цена порошка, руб/кг</label>
+                            <input id="pc-powder" class="mp-input" type="number" min="0" step="any"
+                                   value="${rec.powder_cost_rub_per_kg ?? ''}" placeholder="последняя использованная">
+                        </div>
+                        <div class="pc-field">
+                            <label>Примечание</label>
+                            <textarea id="pc-notes" class="mp-input" rows="2">${rec.notes || ''}</textarea>
+                        </div>
+                        <button class="quick-btn primary" onclick="savePrintCard()">Сохранить</button>
+                        <span id="pc-save-result" style="margin-left:10px;font-size:13px;"></span>
+                    </div>
+                    <div>
+                        <div class="pc-box">
+                            <h4>Что на подложке</h4>
+                            ${_pcPlatformRows()}
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        function _pcPlatformRows() {
+            const files = _pcRecord.files || [];
+            const n = t => files.filter(f => f.file_type === t).length;
+            const pred = (_pcRecord.metadata_json || {}).prediction || {};
+            const rows = [
+                ['Деталей (STL)', n('stl') || '—'],
+                ['Поддержек (STL)', n('stl_supports') || '—'],
+                ['Magics-компоновок', n('magics') || '—'],
+                ['Фото', n('photo') || '—'],
+                ['Слоёв по геометрии', pred.layer_count ?? '—'],
+            ];
+            return rows.map(([k, v]) => `<div class="pc-kv"><span>${k}</span><span>${v}</span></div>`).join('');
+        }
+
+        async function savePrintCard() {
+            const result = document.getElementById('pc-save-result');
+            const thickness = document.getElementById('pc-thickness').value;
+            const powder = document.getElementById('pc-powder').value;
+            try {
+                const r = await fetch(`/prints/${_pcRecord.record_id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: document.getElementById('pc-name').value.trim(),
+                        material: document.getElementById('pc-material').value,
+                        layer_thickness_mm: thickness === '' ? null : Number(thickness),
+                        powder_cost_rub_per_kg: powder === '' ? null : Number(powder),
+                        notes: document.getElementById('pc-notes').value.trim(),
+                    }),
+                });
+                if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                _pcRecord = { ..._pcRecord, ...(await r.json()) };
+                result.innerHTML = '<span style="color:var(--status-success);">Сохранено</span>';
+                document.getElementById('pc-title').textContent = _pcRecord.name;
+                setTimeout(() => { result.textContent = ''; }, 2500);
+            } catch (e) {
+                result.innerHTML = `<span style="color:var(--status-danger);">Ошибка: ${e.message}</span>`;
+            }
+        }
+
+        function _renderPcPlan() {
+            const pred = (_pcRecord.metadata_json || {}).prediction;
+            const pane = document.getElementById('pcpane-plan');
+            if (!pred) {
+                const hasStl = (_pcRecord.files || []).some(f => f.file_type === 'stl');
+                pane.innerHTML = `<div class="pc-empty">${hasStl
+                    ? 'Прогноз ещё не рассчитан — нажмите «Пересчитать прогноз».'
+                    : 'Чтобы получить прогноз, приложите STL деталей на вкладке «Файлы».'}</div>`;
+                return;
+            }
+            // scan_source says whether the time came from a model fitted on this
+            // shop's own logs or from passport physics — the difference is large
+            // (physics ran -54%..-89% on real builds), so it is stated, not hidden.
+            const fitted = pred.scan_source === 'fitted';
+            pane.innerHTML = `
+                <div class="pc-grid">
+                    <div class="pc-box">
+                        <h4>Прогноз</h4>
+                        <div class="pc-kv"><span>Время печати</span><span>${pred.print_hours} ч</span></div>
+                        <div class="pc-kv"><span>Себестоимость</span><span>${pred.cost_total_rub != null ? Math.round(pred.cost_total_rub).toLocaleString('ru') + ' ₽' : '—'}</span></div>
+                        <div class="pc-kv"><span>Слоёв</span><span>${pred.layer_count ?? '—'}</span></div>
+                        <div class="pc-kv"><span>Деталей / поддержек</span><span>${pred.n_parts ?? '—'} / ${pred.n_supports ?? '—'}</span></div>
+                    </div>
+                    <div class="pc-box">
+                        <h4>Откуда цифра</h4>
+                        <div class="pc-kv"><span>Модель скана</span><span style="color:${fitted ? 'var(--status-success)' : 'var(--status-warning)'};">
+                            ${fitted ? 'подогнана по логам' : 'паспортная физика'}</span></div>
+                        <div class="pc-kv"><span>Поправка по материалу</span><span>×${pred.correction_factor ?? 1}</span></div>
+                        <div class="pc-kv"><span>Материал</span><span>${_materialRu(pred.material || _pcRecord.material)}</span></div>
+                        <div class="pc-kv"><span>Рассчитано</span><span>${pred.estimated_at ? new Date(pred.estimated_at).toLocaleString('ru') : '—'}</span></div>
+                        ${fitted ? '' : `<div style="color:var(--text-muted);font-size:12px;margin-top:10px;">
+                            Модель по логам появится, когда наберётся хотя бы одна печать этого режима (материал + толщина) с привязанными логами.</div>`}
+                    </div>
+                </div>`;
+        }
+
+        function _renderPcOutcome() {
+            const pane = document.getElementById('pcpane-outcome');
+            if (!_pcSession) {
+                pane.innerHTML = '<div class="pc-empty">Логи не привязаны — фактическое время неизвестно. Привяжите сессию в списке печатей.</div>';
+                return;
+            }
+            const f = _pcSession.features || {};
+            const pred = (_pcRecord.metadata_json || {}).prediction || {};
+            const machineH = f.machine_min != null ? (f.machine_min / 60) : null;
+            const wallH = f.duration_min != null ? (f.duration_min / 60) : null;
+            const actual = machineH ?? wallH;
+            const err = (pred.print_hours && actual) ? ((pred.print_hours - actual) / actual * 100) : null;
+            const errCol = err == null ? '' : Math.abs(err) <= 10 ? 'var(--status-success)'
+                          : Math.abs(err) <= 25 ? 'var(--status-warning)' : 'var(--status-danger)';
+
+            pane.innerHTML = `
+                <div class="pc-grid">
+                    <div class="pc-box">
+                        <h4>Время</h4>
+                        <div class="pc-kv"><span>Машинное (скан + нанесение)</span><span>${machineH != null ? machineH.toFixed(2) + ' ч' : '—'}</span></div>
+                        <div class="pc-kv"><span>Простой</span><span style="color:var(--status-warning);">${f.idle_min != null ? (f.idle_min / 60).toFixed(2) + ' ч' + (f.idle_pct != null ? ` (${f.idle_pct.toFixed(0)}%)` : '') : '—'}</span></div>
+                        <div class="pc-kv"><span>Всего по часам</span><span>${wallH != null ? wallH.toFixed(2) + ' ч' : '—'}</span></div>
+                        <div class="pc-kv"><span>Слоёв</span><span>${f.layers || '—'}</span></div>
+                        <div style="color:var(--text-muted);font-size:12px;margin-top:10px;">
+                            Прогноз моделирует только машинное время: простой — операторские паузы и перезапуски — по геометрии непредсказуем.</div>
+                    </div>
+                    <div class="pc-box">
+                        <h4>Прогноз против факта</h4>
+                        <div class="pc-kv"><span>Прогноз</span><span>${pred.print_hours ? pred.print_hours + ' ч' : '—'}</span></div>
+                        <div class="pc-kv"><span>Факт (машинное)</span><span>${actual != null ? actual.toFixed(2) + ' ч' : '—'}</span></div>
+                        <div class="pc-kv"><span>Расхождение</span><span style="color:${errCol};">${err != null ? (err > 0 ? '+' : '') + err.toFixed(1) + '%' : '—'}</span></div>
+                        <div class="pc-kv"><span>Сессия</span><span style="font-size:12px;color:var(--text-muted);">${_pcRecord.session_id || '—'}</span></div>
+                    </div>
+                </div>`;
+        }
+
+        function _renderPcProcess() {
+            const pane = document.getElementById('pcpane-process');
+            if (!_pcSession) {
+                pane.innerHTML = '<div class="pc-empty">Логи не привязаны — данных о процессе нет.</div>';
+                return;
+            }
+            const f = _pcSession.features || {};
+            const health = _pcSession.health || {};
+            const anomalies = health.anomalies || [];
+            const readiness = (health.readiness || {}).score;
+            const dq = f.data_quality_score;
+
+            const anomalyRows = anomalies.length
+                ? anomalies.slice(0, 8).map(a => `<div class="pc-kv">
+                        <span style="color:var(--status-warning);">${a.title || a.kind || 'аномалия'}</span>
+                        <span style="font-weight:400;font-size:12px;color:var(--text-muted);">${a.detail || a.description || ''}</span>
+                   </div>`).join('')
+                : '<div style="color:var(--text-muted);font-size:13px;">Аномалий не найдено.</div>';
+
+            pane.innerHTML = `
+                <div class="pc-grid">
+                    <div class="pc-box">
+                        <h4>Атмосфера и качество</h4>
+                        <div class="pc-kv"><span>Готовность атмосферы</span><span style="color:${_scoreColorFor(readiness)}">${readiness ?? '—'}</span></div>
+                        <div class="pc-kv"><span>Качество данных</span><span style="color:${_scoreColorFor(dq)}">${dq ?? '—'} ${f.data_quality_grade ? `(${f.data_quality_grade})` : ''}</span></div>
+                        <div class="pc-kv"><span>Событий в логах</span><span>${(f.total_events || 0).toLocaleString('ru')}</span></div>
+                        <div class="pc-kv"><span>Пауз зафиксировано</span><span>${f.pause_count ?? 0}</span></div>
+                    </div>
+                    <div class="pc-box">
+                        <h4>Аномалии процесса (${anomalies.length})</h4>
+                        ${anomalyRows}
+                    </div>
+                </div>
+                <div style="margin-top:16px;">
+                    <a onclick="showSessionsPage('telemetry'); setTimeout(() => loadTelemetryForSession('${_pcRecord.session_id}'), 300);"
+                       style="color:var(--color-accent);cursor:pointer;font-size:13px;">Открыть графики телеметрии этой печати →</a>
+                </div>`;
+        }
+
+        function _scoreColorFor(v) {
+            if (v == null) return 'var(--text-muted)';
+            return scoreColor(v, 80, 50);
+        }
+
+        function _renderPcFiles() {
+            const rec = _pcRecord;
+            const files = rec.files || [];
+            const rows = files.length ? files.map(f => {
+                const dl = `/prints/${rec.record_id}/files/${f.file_id}/download`;
+                const safeName = f.file_name.replace(/'/g, '&#39;');
+                const preview = (f.file_type === 'stl' || f.file_type === 'stl_supports')
+                    ? ` <a onclick="previewArchiveStl('${dl}','${safeName}')" style="cursor:pointer;" title="3D-просмотр">👁</a>` : '';
+                return `<div class="pc-kv">
+                    <span>${_FILE_ICON[f.file_type] || '📎'} <a href="${dl}" style="color:var(--color-accent);">${f.file_name}</a>${preview}</span>
+                    <span style="font-weight:400;">
+                        <span style="color:var(--text-muted);font-size:12px;">${(f.size_bytes / 1048576).toFixed(1)} МБ</span>
+                        <a onclick="deleteArchiveFile('${rec.record_id}','${f.file_id}','${safeName}')" style="cursor:pointer;color:var(--text-muted);margin-left:10px;" title="Удалить">✕</a>
+                    </span></div>`;
+            }).join('') : '<div style="color:var(--text-muted);font-size:13px;">Файлов пока нет.</div>';
+
+            document.getElementById('pcpane-files').innerHTML = `
+                <div class="pc-box" style="margin-bottom:16px;">
+                    <h4>Файлы печати (${files.length})</h4>
+                    ${rows}
+                </div>
+                <label class="quick-btn" style="cursor:pointer;">＋ Приложить файл
+                    <input type="file" multiple style="display:none"
+                           onchange="uploadFilesToCard('${rec.record_id}', this.files)"></label>
+                ${rec.session_id ? '' : `<label class="quick-btn" style="cursor:pointer;margin-left:10px;">📋 Загрузить логи
+                    <input type="file" multiple accept=".log,.zip" style="display:none"
+                           onchange="uploadArchiveLogs('${rec.record_id}', this.files)"></label>`}`;
+        }
+
+        async function uploadFilesToCard(recordId, fileList) {
+            if (!fileList || !fileList.length) return;
+            for (const file of [...fileList]) await uploadArchiveFile(recordId, file, true);
+            openPrintCard(recordId);
         }
 
         // Russian plurals need the last two digits, not a "< 5" shortcut:
@@ -2979,6 +3347,37 @@
             } catch (e) {
                 banner.style.display = 'none';
             }
+        }
+
+        // Start a card from whatever arrived first — STL, a Magics layout, a
+        // photo, a spec. Printer logs go through the ingest path instead, since
+        // they create a session that then needs claiming.
+        async function createRecordFromFiles(fileList) {
+            const files = [...(fileList || [])];
+            if (!files.length) return;
+
+            const logs = files.filter(f => /\.(log|zip)$/i.test(f.name));
+            const rest = files.filter(f => !/\.(log|zip)$/i.test(f.name));
+
+            // The name comes from the first non-log file; a date inside it is
+            // picked up server-side and becomes the print date.
+            const source = (rest[0] || logs[0]).name;
+            const name = source.replace(/\.[^.]+$/, '').replace(/^s_/, '').trim() || 'Без названия';
+            try {
+                const created = await fetch('/prints', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name }),
+                }).then(async r => {
+                    if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                    return r.json();
+                });
+
+                for (const file of rest) await uploadArchiveFile(created.record_id, file, true);
+                if (logs.length) await uploadArchiveLogs(created.record_id, logs);
+
+                openPrintCard(created.record_id);
+            } catch (e) { alert('Не удалось создать карточку: ' + e.message); }
         }
 
         // Create a card for a log that has none and claim the session in one go.
@@ -3086,7 +3485,9 @@
                     const safeRecName = rec.name.replace(/'/g, '&#39;');
                     return `<tr class="archive-row">
                         <td>
-                            <div style="color:var(--text-body);font-weight:600;">${rec.name}${rec.notes ? ` <span title="${rec.notes}" style="cursor:help;color:var(--border-hover);">💬</span>` : ''}</div>
+                            <div style="color:var(--text-body);font-weight:600;">
+                                <a onclick="openPrintCard('${rec.record_id}')" style="color:inherit;cursor:pointer;text-decoration:none;border-bottom:1px dotted var(--border-hover);"
+                                   title="Открыть карточку печати">${rec.name}</a>${rec.notes ? ` <span title="${rec.notes}" style="cursor:help;color:var(--border-hover);">💬</span>` : ''}</div>
                             <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${date}${dateHint}${s.layers ? ` · ${s.layers} ${_plural(s.layers, 'слой', 'слоя', 'слоёв')}` : ''} · ${_statusBadge(rec.status)}</div>
                         </td>
                         <td>${_materialRu(rec.material)}${thickness}</td>
@@ -3193,7 +3594,7 @@
             } catch (e) { alert('Ошибка привязки: ' + e.message); }
         }
 
-        async function uploadArchiveFile(recordId, file) {
+        async function uploadArchiveFile(recordId, file, skipReload = false) {
             if (!file) return;
             const fd = new FormData();
             fd.append('file', file);
@@ -3201,7 +3602,9 @@
             try {
                 const r = await fetch(`/prints/${recordId}/files`, { method: 'POST', body: fd });
                 if (!r.ok) throw new Error((await r.json()).detail || r.status);
-                loadArchive(_archiveSkip);
+                // The card uploads several files in a row and refreshes once at
+                // the end — reloading per file would fight the loop.
+                if (!skipReload) loadArchive(_archiveSkip);
             } catch (e) {
                 alert('Ошибка загрузки файла: ' + e.message);
             }
