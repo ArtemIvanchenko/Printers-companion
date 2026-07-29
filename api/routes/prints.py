@@ -11,6 +11,7 @@ from datetime import datetime, time, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
+from sqlalchemy import select
 
 from api.deps.repositories import get_prints_repository
 from api.upload_limits import read_upload_capped
@@ -165,8 +166,67 @@ def list_prints(
     files_by_record = repo.list_files_for_records([r["record_id"] for r in records])
     for record in records:
         record["files"] = files_by_record.get(record["record_id"], [])
+    _attach_plan_vs_fact(repo, records)
     total = repo.count_print_records(**filters)
     return PaginatedResponse(items=records, total=total, skip=skip, limit=limit).to_dict()
+
+
+def _attach_plan_vs_fact(repo: PrintsRepository, records: list[dict]) -> None:
+    """Add a ``summary`` to each record: what was predicted, what happened, the gap.
+
+    The list is where the operator compares the two, so both have to arrive in
+    one response — the prediction lives in the record's own snapshot while the
+    outcome lives on the linked session, and fetching them separately per row
+    would be a query per print.
+
+    The actual is machine time (scan + recoat) whenever the printer's own
+    time_log covers the session, never the wall-clock span: the estimate models
+    machine time only, so comparing it against a span that includes operator
+    pauses reports an error the geometry never made. On one real build that gap
+    was 18 of 47.6 hours.
+    """
+    from domain.models.sessions import BuildSession
+
+    session_ids = [r["session_id"] for r in records if r.get("session_id")]
+    sessions: dict[str, BuildSession] = {}
+    if session_ids:
+        sessions = {
+            s.session_id: s for s in repo.db.scalars(
+                select(BuildSession).where(BuildSession.session_id.in_(session_ids))
+            ).all()
+        }
+
+    for record in records:
+        snapshot = (record.get("metadata_json") or {}).get("prediction") or {}
+        predicted_hours = snapshot.get("print_hours")
+
+        actual_hours = actual_source = idle_hours = layers = None
+        session = sessions.get(record.get("session_id") or "")
+        if session is not None:
+            features = (
+                ((session.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
+            ).get("features") or {}
+            layers = features.get("layers")
+            if features.get("idle_min") is not None:
+                idle_hours = round(features["idle_min"] / 60, 2)
+            if features.get("machine_min"):
+                actual_hours, actual_source = round(features["machine_min"] / 60, 2), "machine_log"
+            elif features.get("duration_min"):
+                actual_hours, actual_source = round(features["duration_min"] / 60, 2), "wall_span"
+
+        error_pct = None
+        if predicted_hours and actual_hours:
+            error_pct = round((predicted_hours - actual_hours) / actual_hours * 100, 1)
+
+        record["summary"] = {
+            "predicted_hours": round(predicted_hours, 2) if predicted_hours else None,
+            "predicted_cost_rub": snapshot.get("cost_total_rub"),
+            "actual_hours": actual_hours,
+            "actual_source": actual_source,
+            "idle_hours": idle_hours,
+            "layers": layers,
+            "error_pct": error_pct,
+        }
 
 
 @router.get("/defaults")
@@ -179,6 +239,23 @@ def print_defaults(repo: PrintsRepository = Depends(get_prints_repository)) -> d
     return {
         "powder_cost_rub_per_kg": repo.last_powder_cost(),
         "materials": materials,
+    }
+
+
+@router.get("/unlinked-sessions")
+def get_unlinked_sessions(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
+    """Log sessions belonging to no print card — surfaced as unfinished work.
+
+    Until a session is linked it contributes nothing: no cost, no
+    predicted-vs-actual pair, no calibration input.
+    """
+    from domain.services.print_linking import unlinked_sessions
+
+    sessions = unlinked_sessions(repo.db)
+    return {
+        "items": sessions,
+        "total": len(sessions),
+        "n_prints": sum(1 for s in sessions if s["is_print"]),
     }
 
 

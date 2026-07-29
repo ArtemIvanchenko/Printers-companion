@@ -172,4 +172,49 @@ def session_candidates(db: Session, record_id: str, window_hours: float | None =
     return out
 
 
-__all__ = ["auto_link_print_records", "session_candidates"]
+def unlinked_sessions(db: Session) -> list[dict]:
+    """Every session with no print card, newest first — unfinished work.
+
+    The inverse of ``session_candidates``: that answers "which logs could
+    belong to this card", this answers "which logs belong to no card at all".
+    A session in this list contributes nothing — no cost, no predicted-vs-actual
+    pair, no calibration — until an operator links it, so the dashboard surfaces
+    the list rather than leaving it to be discovered.
+
+    Preparation runs are included but marked: linking one to a print card is
+    rarely right, and the operator needs to see the difference to decide.
+    """
+    from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS
+
+    taken = {
+        sid for sid in db.scalars(
+            select(PrintRecord.session_id).where(PrintRecord.session_id.is_not(None))
+        )
+    }
+
+    out: list[dict] = []
+    for s in db.scalars(select(BuildSession)).all():
+        if s.session_id in taken:
+            continue
+        group = ((s.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
+        features = group.get("features") or {}
+        classification = group.get("classification") or s.classification or ""
+        out.append({
+            "session_id": s.session_id,
+            "start_ts": _as_utc(s.start_ts).isoformat() if s.start_ts else None,
+            "classification": classification,
+            "is_print": classification in PRINT_CLASSIFICATIONS,
+            "duration_min": features.get("duration_min"),
+            "machine_min": features.get("machine_min"),
+            "idle_min": features.get("idle_min"),
+            "layers": features.get("layers"),
+            "material": features.get("material"),
+        })
+
+    # Real prints first, newest first within each group — the operator is
+    # looking for a print to link, not for strict chronological order.
+    out.sort(key=lambda c: (c["is_print"], c["start_ts"] or ""), reverse=True)
+    return out
+
+
+__all__ = ["auto_link_print_records", "session_candidates", "unlinked_sessions"]
