@@ -2298,6 +2298,12 @@
         function sigLabel(s)  { return _signalLabel[s] || s; }
         function grpColor(g)  { return _groupColor[g] || '#60a5fa'; }
 
+        // Traffic-light score coloring — thresholds are per-metric and meaningful,
+        // callers pass their own warnAt/dangerAt rather than sharing one scale.
+        function scoreColor(score, warnAt, dangerAt) {
+            return score >= warnAt ? 'var(--status-success)' : score >= dangerAt ? 'var(--status-warning)' : 'var(--status-danger)';
+        }
+
         function _confBadge(c) {
             const pct = Math.round(c * 100);
             const col = c >= 0.7 ? '#10b981' : c >= 0.5 ? '#f59e0b' : '#6b7280';
@@ -2422,13 +2428,13 @@
                 const stats = s.signal_stats || {};
                 const date = s.start_ts ? s.start_ts.slice(0,10) : '—';
                 const readiness = s.health?.readiness_score;
-                const readCol = readiness >= 80 ? '#10b981' : readiness >= 50 ? '#f59e0b' : '#ef4444';
+                const readCol = readiness != null ? scoreColor(readiness, 80, 50) : '';
                 const readStr = readiness != null ? `<span style="color:${readCol};font-weight:600;">${readiness}</span>` : '—';
                 const sigCells = sigs.map(sig => {
                     const st = stats[sig];
-                    if (!st) return '<td style="color:#4a5568;">—</td>';
+                    if (!st) return '<td style="color:var(--border-hover);">—</td>';
                     const col = grpColor(st.group);
-                    return `<td style="color:${col};">${st.mean.toFixed(3)}<span style="color:#4a5568;font-size:11px;"> ±${st.std.toFixed(3)}</span></td>`;
+                    return `<td style="color:${col};">${st.mean.toFixed(3)}<span style="color:var(--border-hover);font-size:11px;"> ±${st.std.toFixed(3)}</span></td>`;
                 }).join('');
                 return `<tr><td style="font-size:12px;color:#a0aec0;">${s.session_id}</td><td>${date}</td><td>${readStr}</td>${sigCells}</tr>`;
             }).join('');
@@ -3188,14 +3194,14 @@
                     // Простой — время без сканирования/нанесения внутри сессии (не входит
                     // в геометрический прогноз, см. AGENT_NOTES.md, "принцип «без пауз»").
                     const idle = f.idle_min != null && f.idle_min > 1
-                        ? `<div style="font-size:11px;color:#f59e0b;margin-top:2px;" title="Простой не моделируется прогнозом — операторские паузы/перезапуски">
+                        ? `<div style="font-size:11px;color:var(--status-warning);margin-top:2px;" title="Простой не моделируется прогнозом — операторские паузы/перезапуски">
                                ⏸ простой ${(f.idle_min/60).toFixed(1)} ч${f.idle_pct != null ? ` (${f.idle_pct.toFixed(0)}%)` : ''}
                            </div>`
                         : '';
-                    return `<div style="background:#1e2433;border:1px solid #2d3748;border-radius:10px;padding:14px;cursor:pointer;"
+                    return `<div style="background:var(--bg-panel-alt);border:1px solid var(--border-default);border-radius:10px;padding:14px;cursor:pointer;"
                         onclick="showMainTab('sessions',null);showSessionsPage('history',null)">
-                        <div style="font-weight:600;color:#e2e8f0;">${date}</div>
-                        <div style="font-size:12px;color:#a0aec0;margin-top:4px;">⏱ ${dur}</div>
+                        <div style="font-weight:600;color:var(--text-body);">${date}</div>
+                        <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">⏱ ${dur}</div>
                         ${idle}
                     </div>`;
                 }).join('');
