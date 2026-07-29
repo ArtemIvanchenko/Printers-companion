@@ -176,6 +176,31 @@ def _deterministic_group_id(
     return f"session_{date_part}_{digest}"
 
 
+def _drop_logless_files(files: list[IngestedFile]) -> list[IngestedFile]:
+    """Drop files that share no run prefix with any recognised printer log.
+
+    A session is a print, and a print is evidenced by the printer's own logs.
+    Without this, any stray file in a scanned folder became its own "session":
+    the live DB held sessions built from a screenshot (``Безымянный.png``) and
+    from a Finder ``.DS_Store``, which then showed up on the dashboard as
+    prints and were counted by every consumer that groups by session.
+
+    The filter works per run prefix rather than per file, so an unrecognised
+    file is kept when its bucket holds at least one real log — a print whose
+    main log has a non-standard name lands in the prefixless bucket together
+    with such files, and must not lose them.
+    """
+    by_prefix: dict[str | None, list[IngestedFile]] = {}
+    for file in files:
+        by_prefix.setdefault(run_prefix(_file_name(file)), []).append(file)
+
+    kept: list[IngestedFile] = []
+    for bucket in by_prefix.values():
+        if any(f.classification.family != SourceFileFamily.unsupported for f in bucket):
+            kept.extend(bucket)
+    return kept
+
+
 def _split_by_span(
     files: list[IngestedFile], max_span: timedelta, split_reason: str,
 ) -> list[SessionGroup]:
@@ -212,6 +237,10 @@ def group_files_into_sessions(
 
     Returns groups ordered by start time.
     """
+    if not files:
+        return []
+
+    files = _drop_logless_files(files)
     if not files:
         return []
 

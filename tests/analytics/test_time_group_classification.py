@@ -183,3 +183,50 @@ def _file(name: str, family: str, role: str, mtime: datetime | None = None) -> I
         ),
     )
 
+
+class TestLoglessFilesMakeNoSession:
+    """A session is a print; a print is evidenced by the printer's own logs.
+
+    The live DB had grown sessions built from a stray screenshot and from a
+    Finder .DS_Store — both surfaced on the dashboard as prints.
+    """
+
+    def test_stray_non_log_file_makes_no_session(self):
+        assert group_files_into_sessions([_file("Безымянный.png", "unsupported", "unknown")]) == []
+
+    def test_ds_store_makes_no_session(self):
+        assert group_files_into_sessions([_file(".DS_Store", "unsupported", "unknown")]) == []
+
+    def test_real_logs_still_group(self):
+        files = [
+            _file("23.03.2026.log", "main_event_log", "primary"),
+            _file("23.03.2026_sensors.log", "sensors_log", "secondary"),
+        ]
+        groups = group_files_into_sessions(files)
+        assert len(groups) == 1
+        assert len(groups[0].files) == 2
+
+    def test_stray_file_dropped_without_touching_a_real_session(self):
+        files = [
+            _file("23.03.2026.log", "main_event_log", "primary"),
+            _file("Безымянный.png", "unsupported", "unknown"),
+        ]
+        groups = group_files_into_sessions(files)
+        assert len(groups) == 1
+        assert [f.classification.file_name for f in groups[0].files] == ["23.03.2026.log"]
+
+    def test_unsupported_file_kept_when_its_bucket_holds_a_real_log(self):
+        """run_prefix() only recognises .log names, so every other file lands in
+        the prefixless bucket. A print whose main log has a non-standard name
+        lands there too — dropping per file rather than per bucket would strip
+        its companions. (Whether they then stay in one group is up to the
+        temporal split, not to this filter.)"""
+        stamp = datetime(2026, 3, 23, 12, tzinfo=timezone.utc)
+        files = [
+            _file("printer_run.txt", "main_event_log", "primary", mtime=stamp),
+            _file("Безымянный.png", "unsupported", "unknown", mtime=stamp),
+        ]
+        kept = {f.classification.file_name
+                for group in group_files_into_sessions(files) for f in group.files}
+        assert kept == {"printer_run.txt", "Безымянный.png"}
+

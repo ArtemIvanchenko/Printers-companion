@@ -52,6 +52,9 @@ class IngestionService:
         "*_stateFlowData.log",
         "table_temp.log",
         "._*",            # macOS AppleDouble metadata files
+        ".DS_Store",      # Finder folder metadata — ingested as a "session" otherwise
+        "Thumbs.db",      # Windows Explorer thumbnail cache
+        "desktop.ini",
     )
     # stateFlow logs at 500+ Hz but 99.98% rows are identical; classification
     # only uses it as "supportive" evidence — Monitor100 is sufficient.
