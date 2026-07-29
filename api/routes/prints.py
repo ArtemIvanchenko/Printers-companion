@@ -94,6 +94,22 @@ def _parse_powder_cost(raw) -> float | None:
     return value
 
 
+def _parse_layer_thickness(raw) -> float | None:
+    """Layer thickness in mm, or None for "use the machine default"."""
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Поле 'layer_thickness_mm' должно быть числом")
+    # Loose bounds: SLM layers run roughly 0.02–0.1 mm, but the guard only has
+    # to reject nonsense (a value in microns, a negative) — the exact process
+    # window is the operator's call, not this endpoint's.
+    if not (0.0 < value <= 1.0):
+        raise HTTPException(422, "Толщина слоя должна быть в мм, в диапазоне 0–1")
+    return value
+
+
 def _date_from_text(text: str) -> datetime | None:
     """Print date hint from a record/file name like '23.03.2026_кронштейн'."""
     hint = date_hint_from_filename(Path(text))
@@ -104,9 +120,10 @@ def _date_from_text(text: str) -> datetime | None:
 def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
     """Create a print record.
 
-    Body: {name, material?, notes?, printed_at?, powder_cost_rub_per_kg?}.
-    When printed_at is omitted, a date embedded in the name is used if found;
-    the linked log session overwrites it later with the real start time.
+    Body: {name, material?, layer_thickness_mm?, notes?, printed_at?,
+    powder_cost_rub_per_kg?}. When printed_at is omitted, a date embedded in the
+    name is used if found; the linked log session overwrites it later with the
+    real start time.
     """
     name = (payload.get("name") or "").strip()
     if not name:
@@ -117,6 +134,7 @@ def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repo
     record = repo.create_print_record({
         "name": name,
         "material": material,
+        "layer_thickness_mm": _parse_layer_thickness(payload.get("layer_thickness_mm")),
         "notes": (payload.get("notes") or "").strip() or None,
         "printed_at": printed_at,
         "powder_cost_rub_per_kg": _parse_powder_cost(payload.get("powder_cost_rub_per_kg")),
@@ -289,6 +307,11 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     preset = repo.get_active_preset_for_material(material)
     if preset:
         params = {**(params or {}), **{k: v for k, v in preset.items() if k in _PRESET_SCANNING_KEYS and v is not None}}
+    # The print's own thickness wins over both the preset and the machine
+    # default: it is what this job actually ran at, and it selects which fitted
+    # scan model applies (models are keyed "material@thickness").
+    if record.get("layer_thickness_mm"):
+        params = {**(params or {}), "layer_thickness_mm": record["layer_thickness_mm"]}
     if not params_configured(params):
         raise HTTPException(
             422, "Заполните параметры машины (вкладка Настройки → Машина) перед расчётом"
@@ -383,7 +406,8 @@ def update_print(
     payload: dict,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
-    """Partial update: name, material, notes, status, session_id, printed_at, powder cost."""
+    """Partial update: name, material, layer thickness, notes, status,
+    session_id, printed_at, powder cost."""
     values: dict = {}
     if "name" in payload:
         name = (payload["name"] or "").strip()
@@ -392,6 +416,8 @@ def update_print(
         values["name"] = name
     if "material" in payload:
         values["material"] = _clean_material(payload["material"])
+    if "layer_thickness_mm" in payload:
+        values["layer_thickness_mm"] = _parse_layer_thickness(payload["layer_thickness_mm"])
     if "status" in payload:
         status = (payload["status"] or "").strip().lower()
         if status not in _STATUSES:

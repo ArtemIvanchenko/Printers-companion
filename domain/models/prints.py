@@ -19,6 +19,11 @@ class PrintRecord(Base):
     record_id: Mapped[str] = mapped_column(String(80), primary_key=True, default=lambda: _new_id("pr"))
     name: Mapped[str] = mapped_column(String(240), nullable=False)
     material: Mapped[str] = mapped_column(String(120), default="steel")
+    # Thickness this print was run at. NULL = not specified, fall back to the
+    # machine default. Per-print rather than global because the shop runs
+    # different thicknesses per job, and the fitted scan models are keyed
+    # "material@thickness" — they do not transfer across thicknesses.
+    layer_thickness_mm: Mapped[float | None] = mapped_column(Float)
     session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     status: Mapped[str] = mapped_column(String(40), default="draft")
     notes: Mapped[str | None] = mapped_column(Text)

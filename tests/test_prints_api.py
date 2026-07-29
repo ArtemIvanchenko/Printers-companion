@@ -79,6 +79,56 @@ class TestPrintRecordCrud:
         response = client.post("/prints", json={"name": "x", "material": "   "})
         assert response.status_code == 422
 
+
+class TestLayerThicknessOnThePrint:
+    """Thickness belongs to the print, not to the machine.
+
+    It used to exist only globally in machine_params, so every print was costed
+    at whatever the machine was last set to. It also selects which fitted scan
+    model applies — those are keyed "material@thickness" and do not transfer
+    across thicknesses.
+    """
+
+    def test_thickness_is_stored_and_returned(self):
+        record = client.post(
+            "/prints", json={"name": "Кронштейн", "layer_thickness_mm": 0.06},
+        ).json()
+        assert record["layer_thickness_mm"] == 0.06
+        assert client.get(f"/prints/{record['record_id']}").json()["layer_thickness_mm"] == 0.06
+
+    def test_thickness_is_optional(self):
+        """Omitted means "use the machine default", not an error."""
+        assert client.post("/prints", json={"name": "x"}).json()["layer_thickness_mm"] is None
+
+    def test_microns_are_rejected(self):
+        """0.06 mm typed as 60 must not silently become a 60 mm layer."""
+        assert client.post("/prints", json={"name": "x", "layer_thickness_mm": 60}).status_code == 422
+
+    def test_non_positive_is_rejected(self):
+        assert client.post("/prints", json={"name": "x", "layer_thickness_mm": 0}).status_code == 422
+        assert client.post("/prints", json={"name": "x", "layer_thickness_mm": -0.06}).status_code == 422
+
+    def test_non_numeric_is_rejected(self):
+        assert client.post("/prints", json={"name": "x", "layer_thickness_mm": "толстый"}).status_code == 422
+
+    def test_thickness_can_be_patched(self):
+        record = _create_record()
+        response = client.patch(
+            f"/prints/{record['record_id']}", json={"layer_thickness_mm": 0.025},
+        )
+        assert response.status_code == 200
+        assert response.json()["layer_thickness_mm"] == 0.025
+
+    def test_thickness_can_be_cleared_back_to_machine_default(self):
+        record = client.post(
+            "/prints", json={"name": "x", "layer_thickness_mm": 0.06},
+        ).json()
+        response = client.patch(
+            f"/prints/{record['record_id']}", json={"layer_thickness_mm": None},
+        )
+        assert response.status_code == 200
+        assert response.json()["layer_thickness_mm"] is None
+
     def test_get_returns_record_with_files(self):
         record = _create_record()
         response = client.get(f"/prints/{record['record_id']}")
