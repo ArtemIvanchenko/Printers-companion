@@ -88,7 +88,18 @@ def _burn_seconds_by_layer(events: list[Any]) -> dict[int, float]:
 
 
 def session_burn_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
-    """Real per-layer burn seconds for one session (time_log rehydrated from disk)."""
+    """Real per-layer burn seconds for one session.
+
+    Prefers the stored per-layer conclusions (see layer_timings — they survive
+    the file not being on this machine, which is the shared-database case);
+    falls back to re-parsing the log for sessions imported before storage.
+    """
+    from analytics.prediction.layer_timings import stored_timings
+
+    stored = stored_timings(session_id, db)
+    if stored:
+        return {layer: burn / 1000.0 for layer, (burn, _) in stored.items()}
+
     from storage.repositories.runtime import RuntimeRepository
 
     files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True)

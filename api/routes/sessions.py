@@ -12,6 +12,7 @@ from domain.services.session_overview import build_group_overview
 from profiles.m350.profile import build_registry, get_profile
 from reporting.json_report.generator import _timeline_preview, generate_session_json_report
 from reporting.markdown_report.generator import generate_markdown_report
+from analytics.prediction.layer_timings import store_layer_timings
 from storage.repositories.runtime import RuntimeRepository, mirror_logs_to_object_store
 
 
@@ -71,9 +72,11 @@ def ingest_session(payload: dict, repo: RuntimeRepository = Depends(get_runtime_
             # on demand (avoids ~96 MB/session of monitor events in the DB).
             {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
         )
-        # Mirror the calibration-critical logs while they are certainly on this
-        # disk. Against a shared database another operator has the session row
-        # but not the files, and every calibration would otherwise read nothing.
+        # Store the per-layer conclusions the calibrations actually need, while
+        # the parsed log is in hand. Rows in the database are visible to every
+        # operator; the file on this disk is not. The raw log is mirrored as
+        # well so a future change to the extraction can be re-run without it.
+        store_layer_timings(session_id, group.files, repo.db)
         mirror_logs_to_object_store(session_id, group.files)
         response_groups.append({"session_id": session_id, **overview})
 

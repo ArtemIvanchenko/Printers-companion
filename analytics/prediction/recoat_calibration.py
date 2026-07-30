@@ -114,21 +114,28 @@ def machine_seconds_from_events(events: list) -> dict[int, float]:
 
 
 def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
-    """Полное машинное время (burn+pour) по слоям одной сессии, из time_log.
+    """Полное машинное время (burn+pour) по слоям одной сессии.
 
-    Возвращает None, когда time_log отсутствует/не читается. Частичное
-    покрытие слоёв возможно (суточная ротация логов) — вызывающий обязан
-    проверять полноту, если суммирует (accuracy._machine_hours_from_logs).
+    Читает сохранённые послойные выводы из БД; к сырому логу обращается только
+    как к запасному пути, для сессий, импортированных до появления хранения
+    (см. analytics.prediction.layer_timings — там же, почему выводы лучше
+    сырья при общей базе).
+
+    Возвращает None, когда данных нет вообще. Частичное покрытие слоёв
+    возможно (суточная ротация логов) — вызывающий обязан проверять полноту,
+    если суммирует (accuracy._machine_hours_from_logs).
     """
-    from storage.repositories.runtime import RuntimeRepository
+    from analytics.prediction.layer_timings import stored_timings
 
-    files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True)
+    stored = stored_timings(session_id, db)
+    if stored:
+        return {layer: (burn + pour) / 1000.0 for layer, (burn, pour) in stored.items()}
+
+    files = _time_log_files(session_id, db)
     if not files:
         return None
     out: dict[int, float] = {}
     for f in files:
-        if f.classification.family != SourceFileFamily.time_log or not f.parse_result:
-            continue
         for layer, sec in machine_seconds_from_events(f.parse_result.events).items():
             out.setdefault(layer, sec)
     return out or None
@@ -137,21 +144,32 @@ def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, 
 def session_recoat_seconds(session_id: str, db: Session) -> list[float] | None:
     """Per-layer recoat seconds for one session, or None if unavailable.
 
-    Re-parses the session's time_log file(s) from disk (see module docstring)
-    rather than trusting a possibly-absent canonical_events row.
+    Prefers the stored per-layer conclusions; falls back to re-parsing the log.
     """
-    from storage.repositories.runtime import RuntimeRepository
+    from analytics.prediction.layer_timings import stored_timings
 
-    files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True)
+    stored = stored_timings(session_id, db)
+    if stored:
+        return [pour / 1000.0 for _, pour in stored.values()]
+
+    files = _time_log_files(session_id, db)
     if not files:
         return None
-
     seconds: list[float] = []
     for f in files:
-        if f.classification.family != SourceFileFamily.time_log or not f.parse_result:
-            continue
         seconds.extend(_pour_seconds_from_events(f.parse_result.events))
     return seconds or None
+
+
+def _time_log_files(session_id: str, db: Session) -> list:
+    """This session's parsed time_log files, or [] when none can be read."""
+    from storage.repositories.runtime import RuntimeRepository
+
+    files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True) or []
+    return [
+        f for f in files
+        if f.classification.family == SourceFileFamily.time_log and f.parse_result
+    ]
 
 
 def recoat_accuracy(db: Session) -> dict:
