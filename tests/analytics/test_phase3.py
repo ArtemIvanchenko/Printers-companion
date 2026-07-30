@@ -16,6 +16,16 @@ client = TestClient(app)
 CUBE_STL = trimesh.creation.box(extents=[10, 10, 10]).export(file_type="stl")
 
 
+def _stored_snapshot(record_id: str) -> dict:
+    """The prediction as stored on the record.
+
+    The estimate endpoint hands the work to a background task and returns
+    "started" — TestClient runs those before returning, so by the time this is
+    called the snapshot is on the record.
+    """
+    return client.get(f"/prints/{record_id}").json()["metadata_json"]["prediction"]
+
+
 class TestAccuracyReport:
     def _seed_pair(self, db, idx: int, raw_predicted: float, actual_hours: float,
                    material: str = "steel") -> None:
@@ -152,15 +162,18 @@ class TestEstimateRecordEndpoint:
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
             data={"file_type": "stl"},
         )
+        # The estimate runs as a background task (a real plate takes minutes,
+        # see the endpoint's docstring). TestClient drains those before
+        # returning, so the snapshot is already stored by the time this asserts.
         r = client.post(f"/prints/{rec['record_id']}/estimate")
         assert r.status_code == 200
-        snap = r.json()["prediction"]
+        assert r.json()["status"] == "started"
+
+        snap = client.get(f"/prints/{rec['record_id']}").json()["metadata_json"]["prediction"]
         assert snap["print_hours"] > 0
         assert snap["raw_print_hours"] > 0
         # Plate estimator: parts via pyslm, supports via the section model
         assert snap["method"] == "plate:cohatch"
-        stored = client.get(f"/prints/{rec['record_id']}").json()
-        assert stored["metadata_json"]["prediction"]["method"] == "plate:cohatch"
 
     def test_estimate_two_stl_aggregates_correctly(self, monkeypatch):
         """Платформа из 2 STL: совместный хэтчинг, recoat от высоты объединения.
@@ -202,7 +215,7 @@ class TestEstimateRecordEndpoint:
             )
         r = client.post(f"/prints/{rid}/estimate")
         assert r.status_code == 200, r.text
-        snap = r.json()["prediction"]
+        snap = _stored_snapshot(rid)
         assert snap["n_parts"] == 2
 
         # Scan = сумма двух деталей → должен быть больше, чем у каждой по отдельности
@@ -211,13 +224,15 @@ class TestEstimateRecordEndpoint:
         client.post(f"/prints/{rec1['record_id']}/files",
             files={"file": ("cube10.stl", io.BytesIO(CUBE_STL), "model/stl")},
             data={"file_type": "stl"})
-        snap1 = client.post(f"/prints/{rec1['record_id']}/estimate").json()["prediction"]
+        client.post(f"/prints/{rec1['record_id']}/estimate")
+        snap1 = _stored_snapshot(rec1["record_id"])
 
         rec2 = client.post("/prints", json={"name": "только куб20"}).json()
         client.post(f"/prints/{rec2['record_id']}/files",
             files={"file": ("cube20.stl", io.BytesIO(TALL_STL), "model/stl")},
             data={"file_type": "stl"})
-        snap2 = client.post(f"/prints/{rec2['record_id']}/estimate").json()["prediction"]
+        client.post(f"/prints/{rec2['record_id']}/estimate")
+        snap2 = _stored_snapshot(rec2["record_id"])
 
         # scan ≈ Σ одиночных (разные высоты → разные recoat)
         combined_hours = snap["print_hours"]

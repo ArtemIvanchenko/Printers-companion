@@ -447,6 +447,35 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     return snapshot
 
 
+def _assert_estimatable(repo: PrintsRepository, record: dict) -> None:
+    """Raise if the estimate cannot run, before committing to a long job.
+
+    Only the cheap preconditions — an attached STL and the machine parameters.
+    Running these up front means the operator hears "no STL attached" straight
+    away instead of watching a background job produce nothing.
+    """
+    from api.routes.machine_settings import missing_for_estimation
+
+    files = repo.list_print_files(record["record_id"])
+    if not [f for f in files if f["file_type"] in ("stl", "stl_supports")]:
+        raise HTTPException(422, "К карточке не прикреплён STL")
+
+    params = repo.get_machine_params()
+    preset = repo.get_active_preset_for_material(record["material"])
+    if preset:
+        params = {**(params or {}), **{k: v for k, v in preset.items()
+                                       if k in _PRESET_SCANNING_KEYS and v is not None}}
+    if record.get("layer_thickness_mm"):
+        params = {**(params or {}), "layer_thickness_mm": record["layer_thickness_mm"]}
+    missing = missing_for_estimation(params)
+    if missing:
+        raise HTTPException(
+            422,
+            "Для расчёта не хватает параметров машины: " + ", ".join(missing)
+            + ". Заполните их в Настройки → Параметры машины.",
+        )
+
+
 def _auto_estimate(record_id: str) -> None:
     """Background prediction after an STL upload — best-effort, own DB session."""
     from storage.db.session import session_scope
@@ -465,11 +494,33 @@ def _auto_estimate(record_id: str) -> None:
 @router.post("/{record_id}/estimate")
 def estimate_print_record(
     record_id: str,
+    background_tasks: BackgroundTasks,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
-    """Manual (re)run of the prediction snapshot for a record's STL."""
-    snapshot = _compute_prediction_snapshot(repo, record_id)
-    return {"record_id": record_id, "prediction": snapshot}
+    """Manual (re)run of the prediction snapshot for a record's STL.
+
+    Runs in the background and returns immediately. Co-hatching a real plate is
+    not fast — a three-part build with 32 MB of support meshes takes minutes of
+    solid CPU, and the upload path already treats the estimate as a background
+    job for exactly that reason. Holding the request open for it means a
+    browser or proxy timeout decides whether the result is kept.
+
+    The caller polls GET /prints/{id} and watches for metadata_json.prediction
+    to appear or its estimated_at to move.
+    """
+    record = repo.get_print_record(record_id)
+    if not record:
+        raise HTTPException(404, "Карточка печати не найдена")
+    # Fail fast on the cheap preconditions so the operator hears about a
+    # missing STL or an unfilled parameter now, not after a silent no-op.
+    _assert_estimatable(repo, record)
+
+    background_tasks.add_task(_auto_estimate, record_id)
+    return {
+        "record_id": record_id,
+        "status": "started",
+        "previous": (record.get("metadata_json") or {}).get("prediction"),
+    }
 
 
 @router.get("/{record_id}")
