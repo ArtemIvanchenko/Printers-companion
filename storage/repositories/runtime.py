@@ -9,7 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from domain.enums.common import VerificationStatus
+from domain.enums.common import SourceFileFamily, VerificationStatus
 from domain.models.entities import (
     BuildSession,
     CanonicalEvent,
@@ -98,15 +98,106 @@ def _load_offloaded_report(storage_uri: str) -> dict[str, Any] | None:
         return None
 
 
-def _rehydrate_parse_results(files: list[IngestedFile]) -> list[IngestedFile]:
+# Log families worth keeping in shared object storage, and why only these.
+#
+# Every calibration the project has — scan time, recoat time, machine time as
+# the "actual" in predicted-vs-actual — reads exactly one family: time_log. On
+# this shop's 19 real prints that is 3 MB total (~160 KB per print), against
+# 10 GB for the full log set, of which stateFlow alone is 9 GB (and is already
+# skipped at ingest).
+#
+# This matters for the shared-NAS setup: without the logs, an operator who did
+# not import a print themselves gets None from every calibration path and the
+# accuracy loop silently falls back to wall-clock time — which includes
+# operator pauses, 18 h of 47.6 on one real build. Replicating 160 KB per print
+# fixes that; replicating 10 GB is not worth doing for it.
+_SHARED_LOG_FAMILIES = frozenset({SourceFileFamily.time_log})
+
+
+def _shared_log_object_name(session_id: str, file_name: str) -> str:
+    return f"{session_id}/{file_name}"
+
+
+def mirror_logs_to_object_store(session_id: str, files: list[IngestedFile]) -> int:
+    """Copy this session's calibration-critical logs into object storage.
+
+    Best-effort: object storage being down must never fail an import, since the
+    on-disk copy is still the primary. Returns how many files were stored.
+    """
+    from pathlib import Path
+
+    from storage.object_store.minio_client import ObjectStore
+
+    candidates = [
+        f for f in files
+        if f.classification.family in _SHARED_LOG_FAMILIES and f.path and Path(f.path).exists()
+    ]
+    if not candidates:
+        return 0
+    try:
+        store = ObjectStore()
+        if not store.is_available():
+            return 0
+        bucket = store.settings.minio_bucket_raw
+        for f in candidates:
+            name = f.classification.file_name or Path(f.relative_path).name
+            store.put_file(bucket, _shared_log_object_name(session_id, name), Path(f.path))
+    except Exception as exc:
+        logger.warning("mirror_logs_to_object_store(%s) failed: %s", session_id, exc)
+        return 0
+    return len(candidates)
+
+
+def _fetch_shared_log(session_id: str, file_name: str) -> "Path | None":  # noqa: F821
+    """Pull a mirrored log into a temp file so the parsers can read a path."""
+    import tempfile
+    from pathlib import Path
+
+    from storage.object_store.minio_client import ObjectStore
+
+    try:
+        store = ObjectStore()
+        data = store.get_bytes(
+            store.settings.minio_bucket_raw, _shared_log_object_name(session_id, file_name)
+        )
+    except Exception:
+        return None
+    if not data:
+        return None
+    tmp = Path(tempfile.gettempdir()) / "pc-shared-logs" / session_id
+    tmp.mkdir(parents=True, exist_ok=True)
+    path = tmp / file_name
+    path.write_bytes(data)
+    return path
+
+
+def _rehydrate_parse_results(
+    files: list[IngestedFile], session_id: str | None = None,
+) -> list[IngestedFile]:
     """Re-parse files that were stored without parse_result (events stripped).
 
     The session payload keeps slim files for size; consumers that need events
-    (report generation) re-read them from the original on-disk path. Files whose
-    source no longer exists keep their slim form.
+    (report generation, every calibration) re-read them from the original
+    on-disk path.
+
+    When the file is not on this machine's disk — the normal case for a print
+    imported by a different operator against a shared database — the mirrored
+    copy in object storage is used instead. Files available from neither keep
+    their slim form.
     """
     from pathlib import Path
-    need = [f for f in files if f.parse_result is None and f.path and Path(f.path).exists()]
+
+    need: list[tuple[IngestedFile, Path]] = []
+    for f in files:
+        if f.parse_result is not None:
+            continue
+        if f.path and Path(f.path).exists():
+            need.append((f, Path(f.path)))
+        elif session_id and f.classification.family in _SHARED_LOG_FAMILIES:
+            name = f.classification.file_name or Path(f.relative_path).name
+            shared = _fetch_shared_log(session_id, name)
+            if shared:
+                need.append((f, shared))
     if not need:
         return files
     try:
@@ -114,13 +205,13 @@ def _rehydrate_parse_results(files: list[IngestedFile]) -> list[IngestedFile]:
         from profiles.m350.profile import build_registry, get_profile
         registry = build_registry()
         profile = get_profile()
-        for f in need:
+        for f, path in need:
             ctx = ParserContext(
                 profile_id=profile.profile_id,
                 profile_version=profile.version,
                 signal_mappings=profile.signal_mappings,
             )
-            f.parse_result = registry.parse(Path(f.path), f.classification.family, ctx)
+            f.parse_result = registry.parse(path, f.classification.family, ctx)
     except Exception as exc:
         logger.warning("Rehydrate parse results failed: %s", exc)
     return files
@@ -340,7 +431,9 @@ class RuntimeRepository:
             return None
         files = [IngestedFile.model_validate(item) for item in payload.get("files", [])]
         if rehydrate:
-            files = _rehydrate_parse_results(files)
+            # session_id lets the mirrored copy stand in when the file is not on
+            # this machine — the normal case against a shared database.
+            files = _rehydrate_parse_results(files, session_id)
         return files
 
     def save_report(self, report: dict[str, Any], report_type: str = "session") -> None:
