@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import statistics
 from collections import defaultdict
+from collections.abc import Iterator
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -98,6 +99,47 @@ def _machine_hours_from_logs(
     return sum(per_layer.values()) / 3600.0
 
 
+def iter_linked_prints(db: Session) -> "Iterator[tuple[PrintRecord, BuildSession]]":
+    """Every print card that has a log session, with the session attached.
+
+    All three calibrations start the same way — select the linked records,
+    batch-load their sessions (never one ``db.get`` per row), then walk the
+    pairs. Only what they extract from each pair differs. Sharing the walk
+    keeps the "which rows are even candidates" question answered in one place:
+    the same filter was silently dropped from ``analysis._load_sessions``,
+    which then averaged preparation runs into the maintenance forecast.
+
+    Records whose session id points at nothing are skipped — that is a dangling
+    link, not a calibration input.
+    """
+    records = db.scalars(
+        select(PrintRecord).where(PrintRecord.session_id.is_not(None))
+    ).all()
+    session_ids = [r.session_id for r in records if r.session_id]
+    if not session_ids:
+        return
+
+    sessions = {
+        s.session_id: s
+        for s in db.scalars(
+            select(BuildSession).where(BuildSession.session_id.in_(session_ids))
+        ).all()
+    }
+    for record in records:
+        session = sessions.get(record.session_id)
+        if session is not None:
+            yield record, session
+
+
+def printed_at(record: PrintRecord, session: BuildSession) -> datetime:
+    """When this print actually ran — the log wins, the card is the fallback.
+
+    Calibration windows are "the most recent N", so this is what makes recency
+    mean anything.
+    """
+    return as_utc(session.start_ts) if session.start_ts else as_utc(record.created_at)
+
+
 def _actual_hours(session: BuildSession) -> float | None:
     """Wall-clock print span in hours — the FALLBACK actual, pause-contaminated.
 
@@ -136,42 +178,26 @@ def prediction_accuracy(db: Session) -> dict:
     Returns per-pair rows and per-material suggested factors plus an overall
     suggested factor (median across all pairs) for display.
     """
-    records = db.scalars(
-        select(PrintRecord).where(PrintRecord.session_id.is_not(None))
-    ).all()
-
-    # Batch-load the linked sessions instead of one db.get() per record.
-    session_ids = [r.session_id for r in records if r.session_id]
-    sessions: dict[str, BuildSession] = {}
-    if session_ids:
-        sessions = {
-            s.session_id: s
-            for s in db.scalars(select(BuildSession).where(BuildSession.session_id.in_(session_ids))).all()
-        }
-
     rows: list[dict] = []
     # (sort key, ratio) so the calibration window can be taken by recency.
     usable_by_mat: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
     all_usable: list[tuple[datetime, float]] = []
     excluded: list[dict] = []
 
-    for record in records:
+    for record, session in iter_linked_prints(db):
         snapshot = (record.metadata_json or {}).get("prediction")
         if not snapshot:
             continue
-        session = sessions.get(record.session_id)
-        actual = actual_source = None
-        if session is not None:
-            # Pause-free machine time from the printer's own logs is the ONLY
-            # actual consistent with what the model predicts; the wall-clock
-            # span is a legacy fallback and carries operator pauses.
-            actual = _machine_hours_from_logs(
-                record.session_id, snapshot.get("layer_count"), db,
-            )
-            actual_source = "machine_log" if actual is not None else None
-            if actual is None:
-                actual = _actual_hours(session)
-                actual_source = "wall_span" if actual is not None else None
+        # Pause-free machine time from the printer's own logs is the ONLY
+        # actual consistent with what the model predicts; the wall-clock
+        # span is a legacy fallback and carries operator pauses.
+        actual = _machine_hours_from_logs(
+            record.session_id, snapshot.get("layer_count"), db,
+        )
+        actual_source = "machine_log" if actual is not None else None
+        if actual is None:
+            actual = _actual_hours(session)
+            actual_source = "wall_span" if actual is not None else None
         raw = _raw_predicted(snapshot)
         if actual is None or raw is None:
             continue
@@ -184,7 +210,7 @@ def prediction_accuracy(db: Session) -> dict:
         skip_reason = _usable_for_calibration(session, actual)
 
         # Order pairs by when the print happened, so "most recent N" is real.
-        when = as_utc(session.start_ts) if session.start_ts else as_utc(record.created_at)
+        when = printed_at(record, session)
         if skip_reason is None:
             usable_by_mat[material].append((when, ratio))
             all_usable.append((when, ratio))

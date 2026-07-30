@@ -37,19 +37,18 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from analytics.prediction.accuracy import (
     CALIBRATION_WINDOW,
     MIN_PAIRS_FOR_CALIBRATION,
     PRINT_CLASSIFICATIONS,
-    as_utc,
+    iter_linked_prints,
+    printed_at,
     session_classification,
 )
 from domain.enums.common import SourceFileFamily
-from domain.models.prints import MachineParams, PrintRecord
-from domain.models.sessions import BuildSession
+from domain.models.prints import MachineParams
 
 logger = logging.getLogger(__name__)
 
@@ -162,31 +161,18 @@ def recoat_accuracy(db: Session) -> dict:
     print with a measurable session, a per-material windowed median as the
     calibration candidate.
     """
-    records = db.scalars(select(PrintRecord).where(PrintRecord.session_id.is_not(None))).all()
-    session_ids = [r.session_id for r in records if r.session_id]
-    sessions: dict[str, BuildSession] = {}
-    if session_ids:
-        sessions = {
-            s.session_id: s
-            for s in db.scalars(select(BuildSession).where(BuildSession.session_id.in_(session_ids))).all()
-        }
-
     rows: list[dict] = []
     usable_by_mat: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
     excluded: list[dict] = []
 
-    for record in records:
-        session = sessions.get(record.session_id)
-        if session is None:
-            continue
-
+    for record, session in iter_linked_prints(db):
         pour_seconds = session_recoat_seconds(record.session_id, db)
         if not pour_seconds:
             continue  # no time_log for this session (or its files are gone) — not an error, just no data
 
         median_s = statistics.median(pour_seconds)
         material = record.material or "—"
-        when = as_utc(session.start_ts) if session.start_ts else as_utc(record.created_at)
+        when = printed_at(record, session)
 
         skip_reason = None
         # Recoat physically happens on any run that actually printed layers,

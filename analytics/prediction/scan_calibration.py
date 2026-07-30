@@ -38,15 +38,17 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS, session_classification
+from analytics.prediction.accuracy import (
+    PRINT_CLASSIFICATIONS,
+    iter_linked_prints,
+    session_classification,
+)
 from analytics.prediction.layer_engine import GEOMETRY_FEATURES, LayerGeometrySeries
 from analytics.prediction.plate_estimator import scan_model_key
 from domain.enums.common import SourceFileFamily
-from domain.models.prints import MachineParams, PrintRecord
-from domain.models.sessions import BuildSession
+from domain.models.prints import MachineParams
 
 logger = logging.getLogger(__name__)
 
@@ -170,25 +172,15 @@ def _gate(model: dict[str, Any]) -> str | None:
 
 def scan_calibration_report(db: Session) -> dict:
     """Collect (geometry, burn) pairs per mode and fit candidate models."""
-    records = db.scalars(select(PrintRecord).where(PrintRecord.session_id.is_not(None))).all()
-    session_ids = [r.session_id for r in records if r.session_id]
-    sessions: dict[str, BuildSession] = {}
-    if session_ids:
-        sessions = {
-            s.session_id: s
-            for s in db.scalars(select(BuildSession).where(BuildSession.session_id.in_(session_ids))).all()
-        }
-
     rows: list[dict] = []
     by_key: dict[str, tuple[list[list[float]], list[float], list[str]]] = defaultdict(
         lambda: ([], [], [])
     )
 
-    for record in records:
+    for record, session in iter_linked_prints(db):
         snapshot = (record.metadata_json or {}).get("prediction") or {}
         geo = snapshot.get("scan_geometry")
-        session = sessions.get(record.session_id)
-        if not isinstance(geo, dict) or session is None:
+        if not isinstance(geo, dict):
             continue
         if session_classification(session) not in PRINT_CLASSIFICATIONS:
             rows.append({"record_id": record.record_id, "session_id": record.session_id,
