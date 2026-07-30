@@ -410,13 +410,16 @@ async def _geometry_prediction(
     if hatch_distance_mm and hatch_distance_mm > 0 and params is not None:
         params = {**params, "hatch_distance_mm": float(hatch_distance_mm)}
 
-    from api.routes.machine_settings import params_configured
+    from api.routes.machine_settings import effective_params, missing_for_estimation
 
-    if not params_configured(params):
+    missing = missing_for_estimation(params)
+    if missing:
         return {
             "available": False,
-            "reason": "Заполните параметры машины (вкладка Архив → Параметры машины)",
+            "reason": "Не хватает параметров машины: " + ", ".join(missing)
+                      + ". Заполните их в Настройки → Параметры машины.",
         }
+    params = effective_params(params)
 
     try:
         from analytics.prediction.cost_estimator import estimate_cost

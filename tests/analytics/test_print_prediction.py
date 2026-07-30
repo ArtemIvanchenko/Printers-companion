@@ -257,4 +257,10 @@ class TestStlEstimateEndpoint:
         assert r.status_code == 200
         pred = r.json()["prediction"]
         assert pred["available"] is False
-        assert "Заполните параметры" in pred["reason"]
+        # The message must name the fields, not just say "fill in the
+        # parameters": on the live DB four of five were already set by a preset
+        # and only one was missing, which the old wording never revealed.
+        assert "скорость штриховки" in pred["reason"]
+        # laser_count defaults for this single-laser machine, so clearing it
+        # must not block the estimate.
+        assert "количество лазеров" not in pred["reason"]

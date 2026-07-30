@@ -63,7 +63,7 @@ class BuildSession(Base):
     profile_id: Mapped[str | None] = mapped_column(ForeignKey("printer_profiles.profile_id"), index=True)
     start_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     end_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    classification: Mapped[str] = mapped_column(String(80), default="INCOMPLETE_OR_UNKNOWN")
+    classification: Mapped[str] = mapped_column(String(80), default="INCOMPLETE_OR_UNKNOWN", index=True)
     classification_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     grouping_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(80), default="new")

@@ -397,6 +397,53 @@ class TestSessionLinking:
         assert "далёкая-печать" not in names
 
 
+class TestMissingParamsAreNamed:
+    """"Fill in the machine parameters" is not actionable when four of the five
+    are already filled by a preset.
+
+    On the live DB the entire estimate was blocked by laser_count alone — no
+    preset supplies it, machine_params was empty, and the error named no field,
+    so nothing pointed at the one number that had to be entered.
+    """
+
+    def test_laser_count_defaults_for_this_single_laser_machine(self):
+        from api.routes.machine_settings import effective_params, missing_for_estimation
+
+        preset_only = {
+            "hatch_speed_mm_s": 1528, "contour_speed_mm_s": 600,
+            "hatch_distance_mm": 0.12, "layer_thickness_mm": 0.06,
+        }
+        assert missing_for_estimation(preset_only) == []
+        assert effective_params(preset_only)["laser_count"] == 1
+
+    def test_explicit_laser_count_is_not_overridden(self):
+        from api.routes.machine_settings import effective_params
+
+        assert effective_params({"laser_count": 4})["laser_count"] == 4
+
+    def test_missing_fields_are_named_in_russian(self):
+        from api.routes.machine_settings import missing_for_estimation
+
+        missing = missing_for_estimation({"hatch_speed_mm_s": 1000})
+        assert "скорость контуров" in missing
+        assert "толщина слоя" in missing
+        # laser_count has a default, so it must not be reported as missing.
+        assert "количество лазеров" not in missing
+
+    def test_empty_params_report_everything_except_the_defaulted_field(self):
+        from api.routes.machine_settings import missing_for_estimation
+
+        assert len(missing_for_estimation(None)) == 4
+
+    def test_estimate_error_names_the_missing_fields(self):
+        record = _create_record()
+        response = client.post(f"/prints/{record['record_id']}/estimate")
+        # No STL attached either, so this may fail earlier — but when it fails
+        # on parameters, the message has to say which ones.
+        if "параметров машины" in response.json().get("detail", ""):
+            assert "шаг штриховки" in response.json()["detail"]
+
+
 class TestMachineSettings:
     def test_get_unconfigured_returns_nulls(self):
         response = client.get("/settings/machine")

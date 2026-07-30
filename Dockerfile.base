@@ -13,7 +13,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=120 \
-    PIP_RETRIES=20
+    PIP_RETRIES=20 \
+    # Containers run read-only with a non-root user, so matplotlib cannot write
+    # its default cache under $HOME. Without this it rebuilds a throwaway cache
+    # in /tmp on every single import (it says so on stderr each time) — slower
+    # imports and noise in the logs. matplotlib arrives via shap/tsfresh.
+    MPLCONFIGDIR=/tmp/matplotlib
 
 RUN groupadd --system app && useradd --system --gid app --uid 10001 app
 WORKDIR /app

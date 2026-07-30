@@ -377,7 +377,7 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     if not platform_files:
         raise HTTPException(422, "К карточке не прикреплён STL")
 
-    from api.routes.machine_settings import params_configured
+    from api.routes.machine_settings import effective_params, missing_for_estimation
 
     material = record["material"]
     params = repo.get_machine_params()
@@ -389,10 +389,15 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     # scan model applies (models are keyed "material@thickness").
     if record.get("layer_thickness_mm"):
         params = {**(params or {}), "layer_thickness_mm": record["layer_thickness_mm"]}
-    if not params_configured(params):
+    missing = missing_for_estimation(params)
+    if missing:
         raise HTTPException(
-            422, "Заполните параметры машины (вкладка Настройки → Машина) перед расчётом"
+            422,
+            "Для расчёта не хватает параметров машины: "
+            + ", ".join(missing)
+            + ". Заполните их в Настройки → Параметры машины.",
         )
+    params = effective_params(params)
 
     store = ObjectStore()
     parts: list[tuple[str, bytes]] = []
