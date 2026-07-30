@@ -3433,25 +3433,32 @@
                     fetch('/prints/unlinked-sessions').then(r => r.json()),
                     fetch('/prints?limit=100').then(r => r.json()),
                 ]);
-                if (!d.total) { banner.style.display = 'none'; return; }
+                // Preparation runs are excluded from the count and the list.
+                // The banner claims something needs doing and states the cost of
+                // not doing it — neither is true for a pre-burn run, which has
+                // no print to cost and no estimate to check. Listing them made
+                // the banner argue with itself ("не привязано" next to
+                // "привязка обычно не нужна") and buried the rows that matter.
+                const realPrints = (d.items || []).filter(s => s.is_print);
+                const prep = (d.items || []).filter(s => !s.is_print);
+                if (!realPrints.length) { banner.style.display = 'none'; return; }
                 banner.style.display = 'block';
 
                 document.getElementById('unlinked-title').textContent =
-                    `⚠ ${d.total} ${_plural(d.total, 'сессия', 'сессии', 'сессий')} логов не привязано к печатям`;
+                    `⚠ ${realPrints.length} ${_plural(realPrints.length, 'печать', 'печати', 'печатей')} с логами без карточки`;
 
                 // Only unlinked cards can receive a session, so the picker is
                 // built once from them rather than per row.
                 const free = (prints.items || []).filter(r => !r.session_id);
                 const options = free.map(r => `<option value="${r.record_id}">${r.name}</option>`).join('');
 
-                document.getElementById('unlinked-rows').innerHTML = d.items.map(s => {
+                document.getElementById('unlinked-rows').innerHTML = realPrints.map(s => {
                     const when = s.start_ts ? new Date(s.start_ts).toLocaleDateString('ru') : '—';
                     const facts = [];
                     if (s.machine_min != null)       facts.push(`${(s.machine_min / 60).toFixed(1)} ч машинного`);
                     else if (s.duration_min != null) facts.push(`${(s.duration_min / 60).toFixed(1)} ч`);
                     if (s.layers)                    facts.push(`${s.layers} ${_plural(s.layers, 'слой', 'слоя', 'слоёв')}`);
                     if (s.idle_min > 1)              facts.push(`простой ${(s.idle_min / 60).toFixed(1)} ч`);
-                    if (!s.is_print)                 facts.push('подготовка — привязка к печати обычно не нужна');
 
                     // Creating a card from the log is always offered, not just as
                     // a fallback: most logs arrive without one waiting for them,
@@ -3469,7 +3476,13 @@
                         <span class="facts">${facts.join(' · ') || 'нет данных'}</span>
                         ${action}
                     </div>`;
-                }).join('');
+                }).join('')
+                // Preparation runs stay reachable but out of the way: they are
+                // not a task, and a count nobody has to act on is noise.
+                + (prep.length ? `<div style="margin-top:10px;font-size:12px;color:#fde68a;opacity:.7;">
+                        Кроме них — ${prep.length} ${_plural(prep.length, 'подготовительный прогон', 'подготовительных прогона', 'подготовительных прогонов')}
+                        (прожиг, прогрев). Карточка для них обычно не нужна.
+                   </div>` : '');
             } catch (e) {
                 banner.style.display = 'none';
             }

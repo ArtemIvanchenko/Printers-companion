@@ -54,3 +54,40 @@ def test_keys_are_named_not_numbered():
 @pytest.mark.parametrize("key", sorted(_template_keys()))
 def test_placeholder_names_are_readable(key):
     assert re.fullmatch(r"[a-z][a-z0-9_]*", key), f"{key} is not snake_case"
+
+
+def test_dashboard_script_parses():
+    """The dashboard's own JS is one 170k-character inline block.
+
+    A syntax error anywhere in it kills every handler on the page — the nav
+    stops responding and nothing renders — while the server keeps returning
+    200 and the browser console stays empty, because the parse fails before
+    any of it runs. That happened here: a `const prints` shadowing an existing
+    binding took the whole dashboard down, and only a manual `node --check`
+    found it. This test is that check.
+
+    Skipped where node is unavailable rather than failing: it is a linter for
+    a template, not a runtime dependency of the app.
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    blocks = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S)
+    assert blocks, "no inline script found in the dashboard template"
+
+    for i, block in enumerate(blocks):
+        # Server-side placeholders are not valid JS on their own; they are
+        # substituted before the browser ever sees them, so stand in a literal.
+        source = _PLACEHOLDER.sub("null", block)
+        result = subprocess.run(
+            [node, "--input-type=module", "--check"],
+            input=source, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"inline <script> #{i} does not parse:\n{result.stderr}"
+        )
