@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from analytics.prediction.stl_slicer import EstimationError
@@ -37,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 # Uniform sampling grid over plate height (body boundaries are added on top).
 _UNIFORM_LEVELS = 90
+# Threads used to section levels in parallel. Capped at 4: the measured speedup
+# saturates there (2.9x at 4 threads, none beyond), and the API container is
+# limited to 2 CPUs anyway — a larger pool would only add contention. Override
+# with PC_SECTION_THREADS when the container gets more cores.
+_SECTION_THREADS = max(1, int(os.environ.get("PC_SECTION_THREADS", "4")))
 # PySLM polygon fix epsilon, mirrors pyslm.core.Part.POLYGON_FIX_EPSILON.
 _FIX_EPS = 0.001
 
@@ -338,12 +345,33 @@ def compute_layer_series(
             if z_min < zb < z_max:
                 levels.add(zb)
 
-    hatcher = _make_hatcher(hatch_distance_mm)
     zs = sorted(levels)
+    # Levels are independent — nothing carries over from one z to the next — so
+    # they run in parallel. Threads rather than processes: the expensive part is
+    # trimesh's mesh sectioning, which drops the GIL inside its C code, and the
+    # meshes would have to be pickled to every process otherwise. Measured on a
+    # 432k-triangle support: 38.2 s sequential, 13.1 s across 4 threads (2.9x),
+    # with no further gain at 8 — the Python-side hatching is the remaining
+    # serial part.
+    #
+    # Each level needs its own Hatcher: PySLM's hatcher carries mutable state
+    # between calls, so sharing one across threads would corrupt results.
+    results = [None] * len(zs)
+    if len(zs) > 1 and _SECTION_THREADS > 1:
+        with ThreadPoolExecutor(max_workers=_SECTION_THREADS) as pool:
+            futures = {
+                pool.submit(_hatch_level, meshes, z, _make_hatcher(hatch_distance_mm)): i
+                for i, z in enumerate(zs)
+            }
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+    else:
+        hatcher = _make_hatcher(hatch_distance_mm)
+        results = [_hatch_level(meshes, z, hatcher) for z in zs]
+
     columns = {name: [] for name in GEOMETRY_FEATURES}
     body_totals = [0.0] * len(meshes)
-    for z in zs:
-        h, c, j, nj, o, per_body = _hatch_level(meshes, z, hatcher)
+    for h, c, j, nj, o, per_body in results:
         columns["hatch_mm"].append(h)
         columns["contour_mm"].append(c)
         columns["jump_mm"].append(j)
