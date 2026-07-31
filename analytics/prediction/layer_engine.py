@@ -193,15 +193,18 @@ def _make_hatcher(hatch_distance_mm: float):
 
 
 def _to_plate_xy(polygon, to_3d) -> "shapely.geometry.Polygon":  # noqa: F821
-    """Map a polygon from trimesh's per-section planar frame into plate XY.
+    """Map a polygon from a section's planar frame into plate XY.
 
-    ``to_2D()`` gives every body its OWN 2D frame (arbitrary in-plane rotation
-    and origin). Polygons from different bodies are not comparable in those
-    frames: unioning them merged geometry that is nowhere near itself on the
-    real plate, and inter-body jump distances were measured between unrelated
-    frames. ``to_3d`` is the section's 2D→3D transform; the section plane is
-    z=const, so applying it and keeping XY lands every body in the one shared
-    plate frame.
+    Polygons from different bodies are only comparable in one shared frame:
+    unioning them across mismatched frames merged geometry that is nowhere near
+    itself on the real plate, and inter-body jump distances came out measured
+    between unrelated origins. ``to_3d`` is the section's 2D→3D transform; the
+    section plane is z=const, so applying it and keeping XY lands every body in
+    the one plate frame.
+
+    Sectioning through a fixed plane origin/normal (see ``_section_polygons``)
+    already yields that shared frame, so in practice this is the identity — it
+    stays because the frame is trimesh's to define, not ours to assume.
     """
     import numpy as np
     import shapely.geometry
@@ -219,20 +222,44 @@ def _to_plate_xy(polygon, to_3d) -> "shapely.geometry.Polygon":  # noqa: F821
 
 
 def _section_polygons(mesh, z: float):
-    """Closed shapely polygons (in plate XY) + open track length of one body at z."""
+    """Closed shapely polygons (in plate XY) + open track length of one body at z.
+
+    Uses ``section_multiplane`` rather than ``section().to_2D()`` because the
+    latter builds a path twice — once from the 3D intersection segments, then
+    again after projecting to the plane — and path construction, not the
+    intersection itself, dominates the cost on support meshes. Measured 1.9x on
+    a 432k-triangle support (176 s → 93 s over 30 levels), 1.23x on a whole
+    plate, where Python-side hatching is the rest of the budget. Passing one
+    height per call is as fast as batching the whole plate (measured within
+    5%), so levels stay independent and parallel.
+
+    It is not bit-identical, and the reason is worth knowing. Building the path
+    once instead of twice merges coincident vertices once instead of twice, so
+    a handful of support-lattice contours that sit right on the closing
+    tolerance land on the other side of it: at five levels of one real plate the
+    closed/open split moved, changing the plate totals by at most 0.33% (open
+    track length, the bulk of a support, by 0.01%). That is below the ±0.7%
+    already contributed by sampling 90 levels instead of every layer, and no
+    geometry is discarded — unlike mesh simplification, which was rejected for
+    exactly that reason.
+    """
     import shapely.geometry
 
-    section = mesh.section(plane_origin=[0.0, 0.0, z], plane_normal=[0.0, 0.0, 1.0])
-    if section is None:
+    # A fixed plane origin and normal put every body — and every level — in the
+    # same 2D frame, which is what makes inter-body jump distances meaningful.
+    paths = mesh.section_multiplane(
+        plane_origin=[0.0, 0.0, 0.0], plane_normal=[0.0, 0.0, 1.0], heights=[z],
+    )
+    path = paths[0] if paths else None
+    if path is None:
         return [], 0.0
-    total_len = float(section.length)
+    total_len = float(path.length)
     polygons: list = []
     closed_perimeter = 0.0
     try:
-        to_2d = getattr(section, "to_2D", None) or section.to_planar
-        planar, to_3d = to_2d()
-        for poly in planar.polygons_full:
-            fixed = _to_plate_xy(poly, to_3d).buffer(_FIX_EPS)
+        to_3d = path.metadata.get("to_3D")
+        for poly in path.polygons_full:
+            fixed = (_to_plate_xy(poly, to_3d) if to_3d is not None else poly).buffer(_FIX_EPS)
             geoms = fixed.geoms if isinstance(fixed, shapely.geometry.MultiPolygon) else [fixed]
             for g in geoms:
                 closed_perimeter += g.exterior.length + sum(r.length for r in g.interiors)
