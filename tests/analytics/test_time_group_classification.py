@@ -6,7 +6,9 @@ from domain.enums.common import DataQualityStatus
 from domain.services.ingestion import IngestedFile
 from domain.services.session_classification import classify_session
 from domain.services.session_grouping import group_files_into_sessions, manual_merge, manual_split
-from domain.schemas.parsing import FileClassification, ParseResult, ParsedTableBatch
+from domain.schemas.parsing import (
+    CanonicalEventDraft, FileClassification, ParseResult, ParsedTableBatch,
+)
 
 
 def test_timestamp_rollover_uses_next_day(tmp_path: Path) -> None:
@@ -230,3 +232,84 @@ class TestLoglessFilesMakeNoSession:
                 for group in group_files_into_sessions(files) for f in group.files}
         assert kept == {"printer_run.txt", "Безымянный.png"}
 
+
+
+def _time_log(day: str, first: int, last: int) -> IngestedFile:
+    """A ``*_time.log`` carrying the layer range the printer recorded for a run."""
+    file = _file(f"{day}_time.log", "time_log", "primary")
+    file.parse_result.events = [
+        CanonicalEventDraft(
+            event_type="layer_timing_summary",
+            layer=n,
+            payload={"layer": n, "burn_ms": 40000, "pour_ms": 8000},
+        )
+        for n in range(first, last + 1)
+    ]
+    return file
+
+
+class TestRestartedPrintsAreOneSession:
+    """Stopping and restarting a print opens a log named by the restart date
+    while the layer counter carries on. Those runs are one print: left apart,
+    a calibration linked to either sees a fraction of the layers.
+
+    Every case below is taken from the real log set.
+    """
+
+    def test_restart_next_day_joins_the_run_it_resumed(self):
+        # 27.05 ran layers 2-384; 28.05 picked up at 384 and finished at 950.
+        groups = group_files_into_sessions(
+            [_time_log("27.05.2026", 2, 384), _time_log("28.05.2026", 384, 950)]
+        )
+        assert len(groups) == 1
+        assert len(groups[0].files) == 2
+        assert "resumed_run" in groups[0].reasons
+
+    def test_joined_session_keeps_the_id_of_the_run_that_started_it(self):
+        alone = group_files_into_sessions([_time_log("27.05.2026", 2, 384)])
+        joined = group_files_into_sessions(
+            [_time_log("27.05.2026", 2, 384), _time_log("28.05.2026", 384, 950)]
+        )
+        assert joined[0].group_id == alone[0].group_id
+
+    def test_days_between_the_runs_do_not_break_the_join(self):
+        # 23.03 ran to layer 6843; the print was finished on 27.03 — four days
+        # later — which a consecutive-dates rule would have missed.
+        groups = group_files_into_sessions(
+            [_time_log("23.03.2026", 2, 6843), _time_log("27.03.2026", 6843, 7016)]
+        )
+        assert len(groups) == 1
+
+    def test_pickup_one_layer_later_still_counts(self):
+        # 08.06 ended at 1133 and 09.06 opened at 1134 — the boundary layer is
+        # reported once, not twice, depending on where the stop landed.
+        groups = group_files_into_sessions(
+            [_time_log("08.06.2026", 2, 1133), _time_log("09.06.2026", 1134, 1983)]
+        )
+        assert len(groups) == 1
+
+    def test_a_reprint_of_the_same_plate_stays_separate(self):
+        # 29.05 reran the 27-28.05 plate: same final layer 950, but it opens at
+        # layer 2, so it is a print of its own and must not be absorbed.
+        groups = group_files_into_sessions(
+            [_time_log("28.05.2026", 384, 950), _time_log("29.05.2026", 2, 950)]
+        )
+        assert len(groups) == 2
+
+    def test_a_print_resumed_twice_ends_up_in_one_session(self):
+        groups = group_files_into_sessions([
+            _time_log("01.06.2026", 2, 100),
+            _time_log("02.06.2026", 100, 200),
+            _time_log("03.06.2026", 200, 300),
+        ])
+        assert len(groups) == 1
+        assert len(groups[0].files) == 3
+
+    def test_runs_with_no_layer_record_are_left_alone(self):
+        """Without a time log there is no continuity to read, so grouping falls
+        back to the run prefix — two dates stay two sessions."""
+        groups = group_files_into_sessions([
+            _file("27.05.2026.log", "main_event_log", "primary"),
+            _file("28.05.2026.log", "main_event_log", "primary"),
+        ])
+        assert len(groups) == 2

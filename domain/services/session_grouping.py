@@ -25,6 +25,11 @@ Time is still used, but only as a guard: two runs that genuinely reuse the same
 prefix (an operator retyping a job name months later) are split when a file
 falls further than ``max_span`` from the group start. That comparison is against
 the group start, never the previous file, so it cannot chain.
+
+One print can nonetheless span several prefixes: stopping and restarting it
+opens a new log named by the restart date while the layer counter carries on.
+Those runs are rejoined afterwards on layer continuity — see
+``_merge_resumed_runs``.
 """
 import hashlib
 from datetime import date, datetime, timedelta, timezone
@@ -59,6 +64,10 @@ MAX_SESSION_SPAN = timedelta(days=14)
 # Fallback for files whose name yields no run prefix (non-standard names).
 # Same non-chaining rule, tighter bound.
 PREFIXLESS_MAX_SPAN = timedelta(hours=36)
+
+# A run that begins at a layer this low is starting a print, not resuming one.
+# Real logs open at layer 1 or 2 depending on firmware version.
+_FIRST_LAYER_OF_A_PRINT = 2
 
 
 class SessionGroup(BaseModel):
@@ -201,6 +210,80 @@ def _drop_logless_files(files: list[IngestedFile]) -> list[IngestedFile]:
     return kept
 
 
+def _layer_span(files: list[IngestedFile]) -> tuple[int, int] | None:
+    """(first, last) layer the printer recorded for this run, or None.
+
+    Read from the same ``layer_timing_summary`` events the stored per-layer
+    timings come from, so grouping and calibration agree on what a run covered.
+    """
+    layers: list[int] = []
+    for file in files:
+        if file.classification.family != SourceFileFamily.time_log or not file.parse_result:
+            continue
+        for event in file.parse_result.events:
+            if getattr(event, "event_type", None) != "layer_timing_summary":
+                continue
+            layer = (getattr(event, "payload", None) or {}).get("layer")
+            if isinstance(layer, int):
+                layers.append(layer)
+    return (min(layers), max(layers)) if layers else None
+
+
+def _merge_resumed_runs(
+    pending: list[tuple[str | None, SessionGroup]], max_span: timedelta,
+) -> list[tuple[str | None, SessionGroup]]:
+    """Join runs that resume an interrupted print into the session that started it.
+
+    Stopping and restarting a print makes the printer open a fresh log named by
+    the restart date, while the layer counter carries on from where it stopped.
+    Those files are two runs of ONE print. Left apart, its duration, layer count
+    and per-layer timings are each split across two sessions, and a calibration
+    linked to either learns from a fraction of the layers — on 27.05 that meant
+    383 layers of a 949-layer print.
+
+    A run resumes the previous one when it does not start at the beginning and
+    picks up at the previous run's last layer (the same layer is usually
+    reported twice, once by each side, so ``last`` and ``last + 1`` both count).
+    Confirmed on every real log: 27.05 ended at 384 and 28.05 opened at 384;
+    23.03 ended at 6843 and 27.03 opened at 6843; 08.06 ended at 1133 and 09.06
+    opened at 1134. Reprints of the same plate open at layer 2 and so stay
+    separate — 29.05 reran the 27.05 plate to the same final layer 950 and must
+    not be absorbed into it.
+
+    The date gap is deliberately not part of the rule: it was one day for
+    27→28.05 but four for 23→27.03. ``max_span`` is only an outer bound.
+
+    Chaining is safe here, unlike the time-gap clustering this module warns
+    about: layer numbers must line up exactly, so A→B→C means one print resumed
+    twice, not two prints that happened to fall near each other.
+    """
+    merged: list[tuple[str | None, SessionGroup]] = []
+    spans: list[tuple[int, int] | None] = []
+    for prefix, group in pending:
+        span = _layer_span(group.files)
+        prev_span = spans[-1] if spans else None
+        if (
+            span is not None
+            and prev_span is not None
+            and span[0] > _FIRST_LAYER_OF_A_PRINT
+            and prev_span[1] <= span[0] <= prev_span[1] + 1
+            and group.start_ts is not None
+            and merged[-1][1].start_ts is not None
+            and group.start_ts - merged[-1][1].start_ts <= max_span
+        ):
+            head = merged[-1][1]
+            head.files.extend(group.files)
+            head.end_ts = max(filter(None, (head.end_ts, group.end_ts)), default=head.end_ts)
+            head.reasons.append("resumed_run")
+            head.confidence = _confidence(head)
+            # The print now reaches this run's last layer.
+            spans[-1] = (prev_span[0], span[1])
+            continue
+        merged.append((prefix, group))
+        spans.append(span)
+    return merged
+
+
 def _split_by_span(
     files: list[IngestedFile], max_span: timedelta, split_reason: str,
 ) -> list[SessionGroup]:
@@ -264,6 +347,10 @@ def group_files_into_sessions(
 
     _LAST = datetime.max.replace(tzinfo=timezone.utc)
     pending.sort(key=lambda item: item[1].start_ts or _LAST)
+    # Runs are joined after the split, so a resumed print ends up in the session
+    # that started it — and keeps that session's id, since the id is keyed on the
+    # first run's prefix.
+    pending = _merge_resumed_runs(pending, max_span)
 
     # Assign stable ids; disambiguate the rare case of a reused run prefix
     # producing two groups by appending an index.
