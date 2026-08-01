@@ -691,7 +691,10 @@ async def upload_print_file(
 
     The object key includes the content checksum, so same-named files with
     different content never overwrite each other; identical uploads dedupe.
-    Uploading a part STL schedules the time/cost prediction in the background.
+    Uploading a part or support STL schedules the time/cost prediction in the
+    background — both, not just parts: a part-only re-estimate silently
+    undercounts scan time for any record whose supports haven't been uploaded
+    yet at that moment (real supports can be a large share of scan time).
     """
     if file_type not in _FILE_TYPES:
         raise HTTPException(422, f"Недопустимый file_type. Допустимы: {', '.join(sorted(_FILE_TYPES))}")
@@ -738,9 +741,13 @@ async def upload_print_file(
     # Commit now (not at the request boundary): the background auto-estimate
     # runs in its own session and must see the just-attached file committed.
     repo.db.commit()
-    # Деталь без поддержек → автоматический прогноз времени/стоимости в фоне,
-    # чтобы пара «прогноз/факт» образовалась без ручного нажатия 📐
-    if file_type == "stl":
+    # Деталь или поддержка → автоматический прогноз времени/стоимости в фоне,
+    # чтобы пара «прогноз/факт» образовалась без ручного нажатия. Обе ветки —
+    # если бы триггерилось только на "stl", загрузка поддержек уже после
+    # деталей (обычный порядок ручного и массового прикрепления) молча
+    # оставляла бы прогноз без них: последний срабатывавший пересчёт не видел
+    # ни одной поддержки.
+    if file_type in ("stl", "stl_supports"):
         background_tasks.add_task(_auto_estimate, record_id)
     logger.info("prints: attached %s (%s, %d bytes) to %s", file_name, file_type, len(data), record_id)
     return saved
