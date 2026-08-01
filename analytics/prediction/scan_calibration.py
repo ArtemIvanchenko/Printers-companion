@@ -278,9 +278,18 @@ def recalibrate_scan_and_apply(db: Session) -> dict:
     current = dict(row.scan_model_by_mat or {})
     applied: dict[str, dict] = {}
     skipped: list[dict] = []
+    removed: list[str] = []
     for key, model in report["candidates"].items():
         if model.get("status") != "ok":
             skipped.append({"mode": key, "reason": model.get("status", "unknown")})
+            # A previously-fitted model for this mode is now unsupported by the
+            # current data (e.g. a record's material/thickness was corrected,
+            # or the pool grew and no longer clears the gate) — a stale model
+            # would otherwise sit in scan_model_by_mat forever and keep being
+            # applied to new estimates as if still valid.
+            if key in current:
+                del current[key]
+                removed.append(key)
             continue
         stored = {k: v for k, v in model.items() if k != "status"}
         if current.get(key) != stored:
@@ -288,12 +297,14 @@ def recalibrate_scan_and_apply(db: Session) -> dict:
                         key, model["r2"], model["n_layers"], model["total_err_pct"])
             applied[key] = stored
 
-    if applied:
+    if removed:
+        logger.info("scan calibration: removed stale model(s) no longer supported: %s", removed)
+    if applied or removed:
         current.update(applied)
         row.scan_model_by_mat = current
         row.updated_at = datetime.now(timezone.utc)
 
-    return {"applied": applied, "skipped": skipped, "locked": False}
+    return {"applied": applied, "skipped": skipped, "removed": removed, "locked": False}
 
 
 __all__ = [
