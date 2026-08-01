@@ -298,6 +298,78 @@ class TestEstimateRecordEndpoint:
         assert (stored["metadata_json"] or {}).get("prediction") is None
 
 
+class TestGeometryCacheAcrossRecords:
+    """PLAN_ACCURACY.md 2.2, exercised through the real API + DB, not a fake repo.
+
+    The primary case: a second print record built from the exact same STL
+    bytes (a reprint of the same layout, or the same file re-attached after
+    editing only material/notes) reuses the first record's geometry instead of
+    re-slicing — content-addressed, so it works across records with no shared
+    session/link.
+    """
+
+    def _store(self, monkeypatch):
+        class _Store:
+            data = {}
+            def __init__(self, *a, **k): pass
+            def is_available(self): return True
+            def put_bytes(self, b, o, d, content_type=""):
+                _Store.data[(b, o)] = d
+                return f"s3://{b}/{o}"
+            def get_bytes(self, b, o): return _Store.data.get((b, o))
+            def remove_object(self, b, o): return _Store.data.pop((b, o), None) is not None
+
+        monkeypatch.setattr("api.routes.prints.ObjectStore", _Store)
+        client.put("/settings/machine", json={
+            "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 500, "hatch_distance_mm": 0.1,
+            "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9000,
+            "powder_cost_rub_per_kg": 7000, "material_densities": {"steel": 7.9},
+        })
+
+    def _estimate_new_record(self, name: str, material: str = "steel") -> dict:
+        rec = client.post("/prints", json={"name": name, "material": material}).json()
+        client.post(
+            f"/prints/{rec['record_id']}/files",
+            files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
+            data={"file_type": "stl"},
+        )
+        client.post(f"/prints/{rec['record_id']}/estimate")
+        return _stored_snapshot(rec["record_id"])
+
+    def _cache_row_count(self) -> int:
+        from domain.models.prints import PlateGeometryCache
+        with SessionLocal() as db:
+            return db.query(PlateGeometryCache).count()
+
+    def test_second_record_with_identical_stl_reuses_cache_row(self, monkeypatch):
+        self._store(monkeypatch)
+        before = self._cache_row_count()
+
+        first = self._estimate_new_record("плита А")
+        after_first = self._cache_row_count()
+        assert after_first == before + 1, "the first estimate must create exactly one cache row"
+
+        second = self._estimate_new_record("плита А, реприз")
+        after_second = self._cache_row_count()
+        assert after_second == after_first, "an identical STL from a different record must not add a row"
+
+        # Same tolerance as TestGeometryCache in test_plate_estimator.py: a
+        # cache hit round-trips through to_snapshot()'s 1-decimal rounding.
+        assert second["print_hours"] == pytest.approx(first["print_hours"], rel=1e-3)
+
+    def test_material_only_change_reuses_cache_row(self, monkeypatch):
+        """Material never enters compute_layer_series — this is the case
+        PLAN_ACCURACY.md 2.2 names explicitly (changing material alone used to
+        redo the full co-hatch for no reason)."""
+        self._store(monkeypatch)
+        before = self._cache_row_count()
+
+        self._estimate_new_record("деталь сталь", material="steel")
+        self._estimate_new_record("та же деталь алюминий", material="aluminum")
+
+        assert self._cache_row_count() == before + 1
+
+
 class TestShiftDetector:
     def _sessions(self, values, signal="SO1"):
         return [

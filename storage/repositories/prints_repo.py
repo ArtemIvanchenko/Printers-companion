@@ -5,7 +5,9 @@ from typing import Any
 from sqlalchemy import delete as sql_delete, func, select
 from sqlalchemy.orm import Session
 
-from domain.models.prints import MachineParams, MachinePreset, PrintRecord, PrintRecordFile
+from domain.models.prints import (
+    MachineParams, MachinePreset, PlateGeometryCache, PrintRecord, PrintRecordFile,
+)
 
 _RECORD_FIELDS = (
     "name", "material", "layer_thickness_mm", "session_id", "status", "notes",
@@ -272,6 +274,26 @@ class PrintsRepository:
             .where(PrintRecordFile.checksum == checksum)
         ).first()
         return _file_to_dict(row) if row else None
+
+    # ── Plate geometry cache (content-addressed, see PlateGeometryCache) ───
+
+    def get_geometry_cache(self, cache_key: str) -> dict[str, Any] | None:
+        row = self.db.get(PlateGeometryCache, cache_key)
+        if row is None:
+            return None
+        row.hit_count += 1
+        row.last_used_at = datetime.now(timezone.utc)
+        return row.series_json
+
+    def save_geometry_cache(self, cache_key: str, series_json: dict[str, Any], body_count: int) -> None:
+        if self.db.get(PlateGeometryCache, cache_key) is not None:
+            return  # content-addressed: an existing row for this key is already correct
+        now = datetime.now(timezone.utc)
+        self.db.add(PlateGeometryCache(
+            cache_key=cache_key, series_json=series_json, body_count=body_count,
+            created_at=now, last_used_at=now,
+        ))
+        self.db.flush()
 
     # ── Machine parameters (single row, id=1) ──────────────────────────────
 

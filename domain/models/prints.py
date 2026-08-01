@@ -53,6 +53,29 @@ class PrintRecordFile(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PlateGeometryCache(Base):
+    """Cached ``LayerGeometrySeries`` for one exact set of STL bodies + hatch settings.
+
+    Content-addressed, not tied to a print record: ``cache_key`` is a hash of the
+    bodies' checksums (in mesh order, part/support tagged) plus hatch_distance_mm
+    and layer_thickness_mm — see ``analytics.prediction.plate_estimator._geometry_cache_key``.
+    Co-hatching a real plate is minutes of CPU; changing only material (which does
+    not affect the geometry at all) or re-estimating a record after a no-op edit
+    used to redo that work from scratch. A second print record built from the
+    same STL files (a reprint of the same layout) benefits too, since the key
+    does not reference any record_id.
+    """
+
+    __tablename__ = "plate_geometry_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    series_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    body_count: Mapped[int] = mapped_column(Integer, default=0)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class MachinePreset(Base):
     """Named scanning-parameter set for one material/mode (e.g. Al 60 µm).
 

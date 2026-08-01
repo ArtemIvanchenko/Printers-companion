@@ -40,9 +40,10 @@ logger = logging.getLogger(__name__)
 # Uniform sampling grid over plate height (body boundaries are added on top).
 _UNIFORM_LEVELS = 90
 # Threads used to section levels in parallel. Capped at 4: the measured speedup
-# saturates there (2.9x at 4 threads, none beyond), and the API container is
-# limited to 2 CPUs anyway — a larger pool would only add contention. Override
-# with PC_SECTION_THREADS when the container gets more cores.
+# saturates there (2.9x at 4 threads, none beyond). The API container's CPU
+# limit was raised from 2.0 to 4.0 to match (docker-compose.yml) — before that
+# these 4 threads were fighting over 2 CPU-equivalents. Override with
+# PC_SECTION_THREADS if the container's CPU limit changes again.
 _SECTION_THREADS = max(1, int(os.environ.get("PC_SECTION_THREADS", "4")))
 # PySLM polygon fix epsilon, mirrors pyslm.core.Part.POLYGON_FIX_EPSILON.
 _FIX_EPS = 0.001
@@ -119,12 +120,16 @@ class LayerGeometrySeries:
     def to_snapshot(self) -> dict:
         """Compact JSON form persisted in the prediction snapshot, so later
         calibration can pair stored geometry with real per-layer burn times
-        without re-slicing the plate."""
+        without re-slicing the plate. Also used to persist the geometry cache
+        (analytics.prediction.plate_estimator._geometry_cache_key) — includes
+        body_boundary_mm so a cache hit still gives correct per-body display
+        shares, not just correct aggregate totals."""
         return {
             "zs": [round(z, 3) for z in self.zs],
             **{name: [round(v, 1) for v in getattr(self, name)] for name in GEOMETRY_FEATURES},
             "z_min": round(self.z_min, 3),
             "z_max": round(self.z_max, 3),
+            "body_boundary_mm": [round(v, 1) for v in self.body_boundary_mm],
         }
 
     @classmethod
@@ -138,6 +143,10 @@ class LayerGeometrySeries:
             open_mm=list(data["open_mm"]),
             z_min=float(data["z_min"]),
             z_max=float(data["z_max"]),
+            # Older snapshots (before this field existed) fall back to an empty
+            # list, and body_shares() already splits evenly when it's empty —
+            # same behaviour as before this field was added.
+            body_boundary_mm=list(data.get("body_boundary_mm") or []),
         )
 
 

@@ -207,3 +207,90 @@ class TestFittedModelApplication:
             "steel",
         )
         assert est.scan_source == "physics"
+
+
+class _FakeGeometryCache:
+    """In-memory stand-in for PrintsRepository's two cache methods."""
+
+    def __init__(self):
+        self.store: dict[str, dict] = {}
+        self.gets = 0
+        self.saves = 0
+
+    def get_geometry_cache(self, cache_key):
+        self.gets += 1
+        return self.store.get(cache_key)
+
+    def save_geometry_cache(self, cache_key, series_json, body_count):
+        self.saves += 1
+        self.store[cache_key] = series_json
+
+
+class TestGeometryCache:
+    """PLAN_ACCURACY.md 2.2 — skip re-slicing an unchanged set of STL bodies."""
+
+    def test_second_call_skips_compute_layer_series(self, monkeypatch):
+        import analytics.prediction.plate_estimator as pe
+
+        calls = []
+        real_compute = pe.compute_layer_series
+        monkeypatch.setattr(pe, "compute_layer_series",
+                             lambda *a, **k: (calls.append(1), real_compute(*a, **k))[1])
+
+        cache = _FakeGeometryCache()
+        parts = [("box", _box_stl())]
+        first = estimate_plate(parts, [], _params(), "steel", geometry_cache=cache)
+        assert len(calls) == 1
+        assert cache.saves == 1
+
+        second = estimate_plate(parts, [], _params(), "steel", geometry_cache=cache)
+        assert len(calls) == 1, "compute_layer_series ran again on an identical cache hit"
+        assert cache.saves == 1, "an existing entry must not be rewritten"
+
+        # Numeric fidelity through to_snapshot()/from_snapshot() — not bit-exact,
+        # since to_snapshot() rounds hatch_mm etc. to 1 decimal place for compact
+        # storage (it was designed for calibration, which averages over
+        # thousands of layers). A single geometry component can be off by up to
+        # 0.1 mm against values in the thousands, i.e. rel~1e-4-1e-3 — far below
+        # this project's accepted +-0.7% sampling-grid noise floor and totally
+        # unlike the >=1% swings a real cache-key bug (wrong body, stale hatch
+        # distance) would produce, which is what this bound is actually guarding.
+        assert second.print_hours == pytest.approx(first.print_hours, rel=1e-3)
+        assert second.layer_count == first.layer_count
+        assert [b.scan_share for b in second.bodies] == pytest.approx(
+            [b.scan_share for b in first.bodies], rel=1e-3,
+        )
+
+    def test_material_change_alone_still_hits(self, monkeypatch):
+        """Material never enters compute_layer_series — a cache hit across a
+        material change is the primary case PLAN_ACCURACY.md 2.2 exists for."""
+        import analytics.prediction.plate_estimator as pe
+
+        calls = []
+        real_compute = pe.compute_layer_series
+        monkeypatch.setattr(pe, "compute_layer_series",
+                             lambda *a, **k: (calls.append(1), real_compute(*a, **k))[1])
+
+        cache = _FakeGeometryCache()
+        parts = [("box", _box_stl())]
+        estimate_plate(parts, [], _params(), "steel", geometry_cache=cache)
+        estimate_plate(parts, [], _params(), "aluminum", geometry_cache=cache)
+        assert len(calls) == 1
+
+    def test_different_hatch_distance_misses(self):
+        cache = _FakeGeometryCache()
+        parts = [("box", _box_stl())]
+        estimate_plate(parts, [], _params(hatch_distance_mm=0.10), "steel", geometry_cache=cache)
+        estimate_plate(parts, [], _params(hatch_distance_mm=0.12), "steel", geometry_cache=cache)
+        assert cache.saves == 2, "different hatch_distance_mm must not collide"
+
+    def test_different_body_misses(self):
+        cache = _FakeGeometryCache()
+        estimate_plate([("box", _box_stl())], [], _params(), "steel", geometry_cache=cache)
+        estimate_plate([("box2", _box_stl(x=25.0))], [], _params(), "steel", geometry_cache=cache)
+        assert cache.saves == 2, "a different STL body must not collide"
+
+    def test_no_cache_argument_behaves_exactly_as_before(self):
+        """geometry_cache=None (the default) must reproduce the uncached path."""
+        est = estimate_plate([("box", _box_stl())], [], _params(), "steel")
+        assert est.print_hours > 0

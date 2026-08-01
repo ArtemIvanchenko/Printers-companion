@@ -9,6 +9,7 @@ import os
 import shutil
 from datetime import datetime, time, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
 from sqlalchemy import select
@@ -297,6 +298,7 @@ def _combined_prediction(
     material: str,
     params: dict,
     powder_cost: float | None,
+    geometry_cache: Any | None = None,
 ) -> dict:
     """Time + cost estimate over a full print platform (parts + supports STLs).
 
@@ -305,13 +307,17 @@ def _combined_prediction(
 
     Powder mass for the cost estimate uses part volume only: sheet supports
     have no meaningful mesh volume (flagged in the response warnings).
+
+    ``geometry_cache`` (typically the calling repo) skips re-slicing when an
+    identical set of STL bodies at the same hatch_distance_mm was estimated
+    before — see plate_estimator._geometry_cache_key.
     """
     from analytics.prediction.cost_estimator import estimate_cost
     from analytics.prediction.plate_estimator import estimate_plate
     from analytics.prediction.stl_slicer import EstimationError, SliceResult
 
     try:
-        est = estimate_plate(parts, supports, params, material)
+        est = estimate_plate(parts, supports, params, material, geometry_cache=geometry_cache)
 
         combined_slices = SliceResult(
             volume_mm3=est.parts_volume_mm3,
@@ -414,7 +420,7 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     n_supports = len(supports)
 
     powder_cost = record.get("powder_cost_rub_per_kg") or repo.last_powder_cost()
-    result = _combined_prediction(parts, supports, material, params, powder_cost)
+    result = _combined_prediction(parts, supports, material, params, powder_cost, geometry_cache=repo)
     if not result.get("available"):
         raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
 
