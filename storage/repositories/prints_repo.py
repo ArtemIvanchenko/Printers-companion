@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete as sql_delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from domain.models.prints import (
@@ -289,11 +290,22 @@ class PrintsRepository:
         if self.db.get(PlateGeometryCache, cache_key) is not None:
             return  # content-addressed: an existing row for this key is already correct
         now = datetime.now(timezone.utc)
-        self.db.add(PlateGeometryCache(
-            cache_key=cache_key, series_json=series_json, body_count=body_count,
-            created_at=now, last_used_at=now,
-        ))
-        self.db.flush()
+        try:
+            # A nested savepoint, not the outer request transaction (get_db
+            # commits/rolls back the whole request once): two concurrent
+            # estimates of byte-identical STLs both pass the check above, then
+            # race this insert. Content-addressed means whichever one loses is
+            # by definition writing the same value again — safe to discard,
+            # but it must not poison the rest of this request's transaction
+            # the way an unhandled IntegrityError at commit time would.
+            with self.db.begin_nested():
+                self.db.add(PlateGeometryCache(
+                    cache_key=cache_key, series_json=series_json, body_count=body_count,
+                    created_at=now, last_used_at=now,
+                ))
+                self.db.flush()
+        except IntegrityError:
+            pass
 
     # ── Machine parameters (single row, id=1) ──────────────────────────────
 

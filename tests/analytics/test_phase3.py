@@ -369,6 +369,38 @@ class TestGeometryCacheAcrossRecords:
 
         assert self._cache_row_count() == before + 1
 
+    def test_concurrent_insert_of_the_same_key_does_not_raise(self, monkeypatch):
+        """PrintsRepository.save_geometry_cache's pre-check-then-insert has a
+        window: two requests estimating byte-identical STLs could both pass
+        the "not there yet" check before either commits. Reproducing genuine
+        DB-level concurrency needs two real connections racing, which isn't
+        practical here — this forces the same gap deterministically by making
+        the pre-check report "nothing" on a row that already exists, so the
+        insert itself is what has to tolerate the conflict.
+        """
+        from datetime import datetime, timezone
+
+        from domain.models.prints import PlateGeometryCache
+        from storage.repositories.prints_repo import PrintsRepository
+
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            db.add(PlateGeometryCache(
+                cache_key="race-test-key", series_json={"zs": [1]}, body_count=1,
+                created_at=now, last_used_at=now,
+            ))
+            db.commit()
+
+        with SessionLocal() as db2:
+            repo2 = PrintsRepository(db2)
+            monkeypatch.setattr(db2, "get", lambda *a, **k: None)
+            repo2.save_geometry_cache("race-test-key", {"zs": [2]}, 1)  # must not raise
+            db2.commit()
+
+        with SessionLocal() as db3:
+            row = db3.get(PlateGeometryCache, "race-test-key")
+            assert row.series_json == {"zs": [1]}, "the first writer's value must survive the conflict"
+
 
 class TestShiftDetector:
     def _sessions(self, values, signal="SO1"):
