@@ -15,6 +15,15 @@ height exactly; part volume matched within 0.6%):
   warn that the plate has supports whose geometry must come from the exported
   ``s_*.stl`` files instead.
 
+  ``scripts/read_magics.py`` goes further and decodes this section's facet
+  indices, XY footprint and Z wall profile (verified against the same
+  ``s_*.stl`` exports). It is not wired in here: the per-segment type byte
+  (values 1-4 observed) isn't decoded, and real SLM supports usually carry an
+  internal perforation/teeth pattern for easy removal that a footprint+height
+  reconstruction would miss entirely — likely *underestimating* scan time
+  rather than matching it. Do not lean on it for this module without first
+  validating the reconstructed hatch time against real burn_ms.
+
 Bodies that extend below the platform (z < 0) are reference/marker geometry,
 not printed parts; ``read_plate`` separates them out.
 """
