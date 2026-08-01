@@ -141,15 +141,41 @@ def _pairs_from_record(snapshot: dict, burn: dict[int, float]) -> tuple[list[lis
     return X_rows, y
 
 
-def _fit(X_rows: list[list[float]], y: list[float]) -> dict[str, Any] | None:
-    """NNLS fit + in-sample quality. Returns model dict or None."""
+def _fit(groups: list[tuple[list[list[float]], list[float]]]) -> dict[str, Any] | None:
+    """NNLS fit + in-sample quality, weighted equally per print.
+
+    ``groups`` is one (X_rows, y) per source print. A print with 2000 layers
+    and a print with 800 layers otherwise get 2000 vs 800 votes in the fit —
+    the longer print dominates purely by length, not by how well-measured or
+    representative it is. Each print's rows are scaled by ``1/n_layers`` of
+    that print before fitting, so every print contributes one equal share
+    regardless of length; R² and total_err_pct are still computed against the
+    real, unweighted data so they keep reporting genuine fit quality.
+    """
     import numpy as np
     from scipy.optimize import nnls
 
-    X = np.asarray(X_rows, dtype=float)
-    yv = np.asarray(y, dtype=float)
+    X_all: list[list[float]] = []
+    y_all: list[float] = []
+    X_weighted: list[list[float]] = []
+    y_weighted: list[float] = []
+    for X_rows, y in groups:
+        n = len(y)
+        if n == 0:
+            continue
+        sqrt_w = (1.0 / n) ** 0.5
+        for row, val in zip(X_rows, y):
+            X_all.append(row)
+            y_all.append(val)
+            X_weighted.append([v * sqrt_w for v in row])
+            y_weighted.append(val * sqrt_w)
+    if not X_all:
+        return None
+
+    X = np.asarray(X_all, dtype=float)
+    yv = np.asarray(y_all, dtype=float)
     try:
-        beta, _ = nnls(X, yv)
+        beta, _ = nnls(np.asarray(X_weighted, dtype=float), np.asarray(y_weighted, dtype=float))
     except Exception:
         logger.exception("scan calibration: NNLS failed")
         return None
@@ -163,7 +189,7 @@ def _fit(X_rows: list[list[float]], y: list[float]) -> dict[str, Any] | None:
         "features": list(GEOMETRY_FEATURES),
         "r2": round(r2, 4),
         "total_err_pct": round(total_err_pct, 2),
-        "n_layers": len(y),
+        "n_layers": len(y_all),
         "fitted_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -184,9 +210,9 @@ def _gate(model: dict[str, Any]) -> str | None:
 def scan_calibration_report(db: Session) -> dict:
     """Collect (geometry, burn) pairs per mode and fit candidate models."""
     rows: list[dict] = []
-    by_key: dict[str, tuple[list[list[float]], list[float], list[str]]] = defaultdict(
-        lambda: ([], [], [])
-    )
+    # One (X_rows, y) group per contributing print, not a flat pool — _fit
+    # weights each print's group equally regardless of its own layer count.
+    by_key: dict[str, list[tuple[list[list[float]], list[float], str]]] = defaultdict(list)
 
     for record, session in iter_linked_prints(db):
         snapshot = (record.metadata_json or {}).get("prediction") or {}
@@ -211,20 +237,17 @@ def scan_calibration_report(db: Session) -> dict:
         material = (snapshot.get("material") or record.material or "—")
         thickness = float(geo["layer_thickness_mm"])
         key = scan_model_key(material, thickness)
-        X_all, y_all, srcs = by_key[key]
-        X_all.extend(pairs[0])
-        y_all.extend(pairs[1])
-        srcs.append(record.record_id)
+        by_key[key].append((pairs[0], pairs[1], record.record_id))
         rows.append({"record_id": record.record_id, "session_id": record.session_id,
                      "used": True, "mode": key, "n_layers": len(pairs[1])})
 
     candidates: dict[str, dict] = {}
-    for key, (X_all, y_all, srcs) in by_key.items():
-        model = _fit(X_all, y_all)
+    for key, groups in by_key.items():
+        model = _fit([(X_rows, y) for X_rows, y, _ in groups])
         if model is None:
             candidates[key] = {"status": "fit_failed"}
             continue
-        model["source_records"] = srcs
+        model["source_records"] = [rid for _, _, rid in groups]
         reason = _gate(model)
         model["status"] = "ok" if reason is None else f"rejected: {reason}"
         candidates[key] = model
