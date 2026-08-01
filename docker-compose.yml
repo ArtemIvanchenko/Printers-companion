@@ -74,7 +74,7 @@ services:
       dockerfile: Dockerfile.api
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
-    # 2 workers, matching the container's 2.0 CPU limit — 4 oversubscribed it.
+    # 2 workers for steady-state traffic, unrelated to the CPU limit below.
     # Each worker holds its own DB pool, rate-limiter state and analysis cache,
     # so extra workers cost connections and cache hit-rate, not throughput,
     # at this deployment's scale (a handful of concurrent operators).
@@ -110,7 +110,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          # 4, matching analytics/prediction/layer_engine.py's _SECTION_THREADS
+          # default (4 concurrent section threads for a plate estimate). At 2.0
+          # those threads fought over 2 CPU-equivalents; a plate estimate is an
+          # occasional, manual, CPU-bound burst (recalculate/recalibrate), not
+          # steady-state traffic, so this doesn't need a matching change to
+          # --workers above. Host has 8 cores.
+          cpus: "4.0"
           memory: 4g
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10)"]
