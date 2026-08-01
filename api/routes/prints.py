@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import shutil
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
@@ -482,14 +483,58 @@ def _assert_estimatable(repo: PrintsRepository, record: dict) -> None:
         )
 
 
-def _auto_estimate(record_id: str) -> None:
-    """Background prediction after an STL upload — best-effort, own DB session."""
+# PLAN_ACCURACY.md 2.4. One worker: compute_layer_series already parallelises
+# internally across 4 threads (layer_engine._SECTION_THREADS) up to this
+# container's own CPU limit — a second concurrent estimate would only fight
+# the first one for the same cores, not add real throughput. A second request
+# just queues behind it in the pool rather than racing it.
+_ESTIMATE_POOL: ProcessPoolExecutor | None = None
+
+
+def _estimate_pool() -> ProcessPoolExecutor:
+    global _ESTIMATE_POOL
+    if _ESTIMATE_POOL is None:
+        _ESTIMATE_POOL = ProcessPoolExecutor(max_workers=1)
+    return _ESTIMATE_POOL
+
+
+def _run_estimate_in_process(record_id: str) -> None:
+    """The actual estimate, run in a separate OS process (see _auto_estimate).
+
+    Needs its own DB session — nothing from the api process's session or
+    request state crosses this boundary. Module-level so ProcessPoolExecutor
+    can pickle a reference to it (a closure or bound method can't be).
+    """
     from storage.db.session import session_scope
 
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        _compute_prediction_snapshot(repo, record_id)
+
+
+async def _auto_estimate(record_id: str) -> None:
+    """Background prediction after an STL upload or manual re-estimate.
+
+    The heavy part runs in a separate OS process, not a thread in this one:
+    compute_layer_series is CPU-bound Python/C, and a thread here would still
+    contend for THIS process's own GIL with every other request this instance
+    is serving. There is no other operator sharing this process to blame —
+    each PC runs its own full stack — so "every other request" means this same
+    operator's own next dashboard click while they wait for their own
+    estimate. A subprocess sidesteps that; the container's CPU limit still
+    applies (raised to 4.0 for exactly this — see docker-compose.yml).
+
+    Tests run this inline in the same process instead (APP_ENV=test): a real
+    subprocess would not see this process's monkeypatched ObjectStore — the
+    in-memory store tests substitute for MinIO exists only in this process's
+    memory, and a spawned/forked child does not share it.
+    """
     try:
-        with session_scope() as db:
-            repo = PrintsRepository(db)
-            _compute_prediction_snapshot(repo, record_id)
+        if get_settings().app_env == "test":
+            _run_estimate_in_process(record_id)
+        else:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(_estimate_pool(), _run_estimate_in_process, record_id)
     except HTTPException as exc:
         # Параметры машины не заполнены и т.п. — это не ошибка загрузки файла
         logger.info("prints: auto-estimate for %s skipped: %s", record_id, exc.detail)
@@ -510,6 +555,10 @@ def estimate_print_record(
     solid CPU, and the upload path already treats the estimate as a background
     job for exactly that reason. Holding the request open for it means a
     browser or proxy timeout decides whether the result is kept.
+
+    The heavy part also runs in its own OS process (see _auto_estimate), so
+    the rest of this dashboard stays responsive while it grinds through a
+    heavy plate instead of contending for this process's own GIL.
 
     The caller polls GET /prints/{id} and watches for metadata_json.prediction
     to appear or its estimated_at to move.
