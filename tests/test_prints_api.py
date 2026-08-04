@@ -129,6 +129,117 @@ class TestLayerThicknessOnThePrint:
         assert response.status_code == 200
         assert response.json()["layer_thickness_mm"] is None
 
+
+class TestHatchDistanceOnThePrint:
+    """Hatch distance belongs to the print, not to the material preset.
+
+    It used to come only from the per-material preset, which held a fixed
+    0.12 mm — while the machine's own Monitor100 log shows the applied value
+    moving 0.16 -> 0.10 -> 0.90 mm across steel jobs. Scan length goes as
+    ~1/hatch, so that one number rescales the entire estimate.
+    """
+
+    def test_hatch_is_stored_and_returned(self):
+        record = client.post(
+            "/prints", json={"name": "Кронштейн", "hatch_distance_mm": 0.9},
+        ).json()
+        assert record["hatch_distance_mm"] == 0.9
+        assert client.get(f"/prints/{record['record_id']}").json()["hatch_distance_mm"] == 0.9
+
+    def test_hatch_is_optional(self):
+        """Omitted means "use the material preset", not an error."""
+        assert client.post("/prints", json={"name": "x"}).json()["hatch_distance_mm"] is None
+
+    def test_microns_are_rejected(self):
+        """0.09 mm typed as 90 must not silently become a 90 mm hatch."""
+        assert client.post("/prints", json={"name": "x", "hatch_distance_mm": 90}).status_code == 422
+
+    def test_non_positive_is_rejected(self):
+        assert client.post("/prints", json={"name": "x", "hatch_distance_mm": 0}).status_code == 422
+        assert client.post("/prints", json={"name": "x", "hatch_distance_mm": -0.1}).status_code == 422
+
+    def test_non_numeric_is_rejected(self):
+        assert client.post("/prints", json={"name": "x", "hatch_distance_mm": "мелкий"}).status_code == 422
+
+    def test_the_widest_value_the_machine_actually_ran_is_accepted(self):
+        """0.90 mm is a real setting on this machine, not a typo to reject."""
+        assert client.post("/prints", json={"name": "x", "hatch_distance_mm": 0.9}).status_code == 200
+
+    def test_hatch_can_be_patched(self):
+        record = _create_record()
+        response = client.patch(
+            f"/prints/{record['record_id']}", json={"hatch_distance_mm": 0.15},
+        )
+        assert response.status_code == 200
+        assert response.json()["hatch_distance_mm"] == 0.15
+
+    def test_hatch_can_be_cleared_back_to_the_preset(self):
+        record = client.post(
+            "/prints", json={"name": "x", "hatch_distance_mm": 0.9},
+        ).json()
+        response = client.patch(
+            f"/prints/{record['record_id']}", json={"hatch_distance_mm": None},
+        )
+        assert response.status_code == 200
+        assert response.json()["hatch_distance_mm"] is None
+
+
+class TestScanParamsResolution:
+    """machine_params < material preset < the print's own fields."""
+
+    class _Repo:
+        def __init__(self, machine, preset):
+            self._machine, self._preset = machine, preset
+
+        def get_machine_params(self):
+            return self._machine
+
+        def get_active_preset_for_material(self, material):
+            return self._preset
+
+    def _resolve(self, record, machine=None, preset=None):
+        from api.routes.prints import params_for_record
+        return params_for_record(self._Repo(machine, preset), {"material": "steel", **record})
+
+    def test_preset_overrides_the_machine_default(self):
+        params = self._resolve(
+            {},
+            machine={"hatch_distance_mm": 0.12, "laser_count": 1},
+            preset={"hatch_distance_mm": 0.2},
+        )
+        assert params["hatch_distance_mm"] == 0.2
+        assert params["laser_count"] == 1  # untouched by the preset
+
+    def test_the_print_overrides_the_preset(self):
+        """The whole point: a 0.90 mm job must not be estimated at the preset's 0.12."""
+        params = self._resolve(
+            {"hatch_distance_mm": 0.9, "layer_thickness_mm": 0.06},
+            machine={"hatch_distance_mm": 0.12, "layer_thickness_mm": 0.03},
+            preset={"hatch_distance_mm": 0.12},
+        )
+        assert params["hatch_distance_mm"] == 0.9
+        assert params["layer_thickness_mm"] == 0.06
+
+    def test_unset_print_fields_fall_through(self):
+        params = self._resolve(
+            {"hatch_distance_mm": None, "layer_thickness_mm": None},
+            machine={"hatch_distance_mm": 0.12, "layer_thickness_mm": 0.03},
+            preset={"hatch_distance_mm": 0.2},
+        )
+        assert params["hatch_distance_mm"] == 0.2
+        assert params["layer_thickness_mm"] == 0.03
+
+    def test_preset_nulls_do_not_erase_the_machine_value(self):
+        params = self._resolve(
+            {}, machine={"hatch_distance_mm": 0.12}, preset={"hatch_distance_mm": None},
+        )
+        assert params["hatch_distance_mm"] == 0.12
+
+    def test_no_machine_params_at_all_is_not_a_crash(self):
+        assert self._resolve({}, machine=None, preset=None) == {}
+
+
+class TestPrintRecordReads:
     def test_get_returns_record_with_files(self):
         record = _create_record()
         response = client.get(f"/prints/{record['record_id']}")

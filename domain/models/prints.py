@@ -24,6 +24,12 @@ class PrintRecord(Base):
     # different thicknesses per job, and the fitted scan models are keyed
     # "material@thickness" — they do not transfer across thicknesses.
     layer_thickness_mm: Mapped[float | None] = mapped_column(Float)
+    # Hatch distance this print was run at. NULL = not specified, fall back to
+    # the material preset. Per-print for the same reason as thickness: the
+    # machine's own Monitor100 log shows this moving 0.16 -> 0.10 -> 0.90 mm
+    # between steel jobs, and scan length goes as ~1/hatch, so a per-material
+    # constant mis-scales the whole estimate.
+    hatch_distance_mm: Mapped[float | None] = mapped_column(Float)
     session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     status: Mapped[str] = mapped_column(String(40), default="draft")
     notes: Mapped[str | None] = mapped_column(Text)

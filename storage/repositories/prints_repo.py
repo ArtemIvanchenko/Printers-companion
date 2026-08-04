@@ -11,8 +11,8 @@ from domain.models.prints import (
 )
 
 _RECORD_FIELDS = (
-    "name", "material", "layer_thickness_mm", "session_id", "status", "notes",
-    "metadata_json", "printed_at", "powder_cost_rub_per_kg",
+    "name", "material", "layer_thickness_mm", "hatch_distance_mm", "session_id",
+    "status", "notes", "metadata_json", "printed_at", "powder_cost_rub_per_kg",
 )
 _PRESET_FIELDS = (
     "name", "material", "layer_thickness_mm", "hatch_speed_mm_s",
@@ -37,6 +37,7 @@ def _record_to_dict(row: PrintRecord) -> dict[str, Any]:
         "name": row.name,
         "material": row.material,
         "layer_thickness_mm": row.layer_thickness_mm,
+        "hatch_distance_mm": row.hatch_distance_mm,
         "session_id": row.session_id,
         "status": row.status,
         "notes": row.notes,

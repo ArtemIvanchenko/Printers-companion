@@ -113,6 +113,22 @@ def _parse_layer_thickness(raw) -> float | None:
     return value
 
 
+def _parse_hatch_distance(raw) -> float | None:
+    """Hatch distance in mm, or None for "use the material preset"."""
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Поле 'hatch_distance_mm' должно быть числом")
+    # This machine's own logs show applied values from 0.10 to 0.90 mm, and the
+    # operator briefly typed 3.00 while editing, so the window is genuinely
+    # wide. The guard only rejects nonsense (microns, a negative).
+    if not (0.0 < value <= 5.0):
+        raise HTTPException(422, "Шаг штриховки должен быть в мм, в диапазоне 0–5")
+    return value
+
+
 def _date_from_text(text: str) -> datetime | None:
     """Print date hint from a record/file name like '23.03.2026_кронштейн'."""
     hint = date_hint_from_filename(Path(text))
@@ -123,10 +139,10 @@ def _date_from_text(text: str) -> datetime | None:
 def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
     """Create a print record.
 
-    Body: {name, material?, layer_thickness_mm?, notes?, printed_at?,
-    powder_cost_rub_per_kg?}. When printed_at is omitted, a date embedded in the
-    name is used if found; the linked log session overwrites it later with the
-    real start time.
+    Body: {name, material?, layer_thickness_mm?, hatch_distance_mm?, notes?,
+    printed_at?, powder_cost_rub_per_kg?}. When printed_at is omitted, a date
+    embedded in the name is used if found; the linked log session overwrites it
+    later with the real start time.
     """
     name = (payload.get("name") or "").strip()
     if not name:
@@ -138,6 +154,7 @@ def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repo
         "name": name,
         "material": material,
         "layer_thickness_mm": _parse_layer_thickness(payload.get("layer_thickness_mm")),
+        "hatch_distance_mm": _parse_hatch_distance(payload.get("hatch_distance_mm")),
         "notes": (payload.get("notes") or "").strip() or None,
         "printed_at": printed_at,
         "powder_cost_rub_per_kg": _parse_powder_cost(payload.get("powder_cost_rub_per_kg")),
@@ -366,6 +383,38 @@ def _combined_prediction(
     }
 
 
+def params_for_record(repo: PrintsRepository, record: dict) -> dict:
+    """Scanning parameters for one print, most specific source winning.
+
+    machine_params (global) < material preset < the print's own fields.
+
+    Both per-print overrides exist because this shop changes them per job while
+    the machine holds one global value:
+
+    * ``layer_thickness_mm`` also selects which fitted scan model applies —
+      those are keyed "material@thickness" and do not transfer across
+      thicknesses.
+    * ``hatch_distance_mm`` rescales the whole estimate, since scan length goes
+      as ~1/hatch. The material preset claimed a fixed 0.12 mm while the
+      machine's Monitor100 log recorded 0.16 / 0.10 / 0.90 mm applied on steel
+      jobs — a 9x span that landed entirely in the prediction error.
+
+    NULL on the record means "not specified": fall through to the preset, then
+    to the machine default, so records that predate these fields are unaffected.
+    """
+    params = dict(repo.get_machine_params() or {})
+    preset = repo.get_active_preset_for_material(record["material"])
+    if preset:
+        params.update({
+            k: v for k, v in preset.items()
+            if k in _PRESET_SCANNING_KEYS and v is not None
+        })
+    for field in ("layer_thickness_mm", "hatch_distance_mm"):
+        if record.get(field):
+            params[field] = record[field]
+    return params
+
+
 def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict:
     """Run the PySLM time/cost estimate over the whole platform and store the snapshot.
 
@@ -387,15 +436,7 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     from api.routes.machine_settings import effective_params, missing_for_estimation
 
     material = record["material"]
-    params = repo.get_machine_params()
-    preset = repo.get_active_preset_for_material(material)
-    if preset:
-        params = {**(params or {}), **{k: v for k, v in preset.items() if k in _PRESET_SCANNING_KEYS and v is not None}}
-    # The print's own thickness wins over both the preset and the machine
-    # default: it is what this job actually ran at, and it selects which fitted
-    # scan model applies (models are keyed "material@thickness").
-    if record.get("layer_thickness_mm"):
-        params = {**(params or {}), "layer_thickness_mm": record["layer_thickness_mm"]}
+    params = params_for_record(repo, record)
     missing = missing_for_estimation(params)
     if missing:
         raise HTTPException(
@@ -430,6 +471,13 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         "n_parts": len(parts),
         "n_supports": n_supports,
         "material": material,
+        # The two geometry inputs that scale the whole estimate. Recorded so a
+        # stored prediction can be read back and checked against the machine
+        # log — without them there is no way to tell what a number was computed
+        # at, which is exactly how a preset's 0.12 mm went unnoticed against
+        # 0.90 mm on the machine.
+        "layer_thickness_mm": params.get("layer_thickness_mm"),
+        "hatch_distance_mm": params.get("hatch_distance_mm"),
         "method": result["method"],
         "build_axis": result.get("build_axis", "Z"),
         "layer_count": result.get("layer_count"),
@@ -467,14 +515,9 @@ def _assert_estimatable(repo: PrintsRepository, record: dict) -> None:
     if not [f for f in files if f["file_type"] in ("stl", "stl_supports")]:
         raise HTTPException(422, "К карточке не прикреплён STL")
 
-    params = repo.get_machine_params()
-    preset = repo.get_active_preset_for_material(record["material"])
-    if preset:
-        params = {**(params or {}), **{k: v for k, v in preset.items()
-                                       if k in _PRESET_SCANNING_KEYS and v is not None}}
-    if record.get("layer_thickness_mm"):
-        params = {**(params or {}), "layer_thickness_mm": record["layer_thickness_mm"]}
-    missing = missing_for_estimation(params)
+    # Same resolution the real estimate uses, or this precondition reports a
+    # parameter as missing that the record itself supplies.
+    missing = missing_for_estimation(params_for_record(repo, record))
     if missing:
         raise HTTPException(
             422,
@@ -594,8 +637,8 @@ def update_print(
     payload: dict,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
-    """Partial update: name, material, layer thickness, notes, status,
-    session_id, printed_at, powder cost."""
+    """Partial update: name, material, layer thickness, hatch distance, notes,
+    status, session_id, printed_at, powder cost."""
     values: dict = {}
     if "name" in payload:
         name = (payload["name"] or "").strip()
@@ -606,6 +649,8 @@ def update_print(
         values["material"] = _clean_material(payload["material"])
     if "layer_thickness_mm" in payload:
         values["layer_thickness_mm"] = _parse_layer_thickness(payload["layer_thickness_mm"])
+    if "hatch_distance_mm" in payload:
+        values["hatch_distance_mm"] = _parse_hatch_distance(payload["hatch_distance_mm"])
     if "status" in payload:
         status = (payload["status"] or "").strip().lower()
         if status not in _STATUSES:
