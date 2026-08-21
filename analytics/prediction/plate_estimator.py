@@ -141,8 +141,10 @@ from analytics.prediction.layer_engine import (
     scan_model_key,
     scan_seconds_from_model,
 )
+from analytics.prediction.contract import PredictionResult
 from analytics.prediction.print_time import (
     PrintTimeEstimate,
+    build_time_prediction,
     resolve_correction_factor,
     resolve_recoat_ms,
 )
@@ -182,6 +184,7 @@ class PlateEstimate:
     bodies: list[BodyEstimate] = field(default_factory=list)
     geometry_series: LayerGeometrySeries | None = None
     warnings: list[str] = field(default_factory=list)
+    prediction: PredictionResult | None = None
 
     def as_print_time_estimate(self) -> PrintTimeEstimate:
         """Adapter for consumers of the single-part result (cost estimator)."""
@@ -197,6 +200,7 @@ class PlateEstimate:
                       "recoat_time_source": self.recoat_time_source,
                       "scan_source": self.scan_source},
             warnings=list(self.warnings),
+            prediction=self.prediction,
         )
 
 
@@ -401,6 +405,14 @@ def estimate_plate(
         bodies=bodies,
         geometry_series=series,
         warnings=warnings,
+        prediction=build_time_prediction(
+            print_hours=raw_total * factor,
+            correction_factor=factor,
+            scan_source=scan_source,
+            recoat_source=recoat_source,
+            fitted_model=model if scan_source == "fitted" else None,
+            warnings=warnings,
+        ),
     )
 
 

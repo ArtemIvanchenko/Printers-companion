@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from analytics.prediction.contract import PredictionResult, PredictionSource
 from analytics.prediction.print_time import PrintTimeEstimate
 from analytics.prediction.stl_slicer import SliceResult
 
@@ -18,6 +19,7 @@ class CostEstimate:
     powder_kg: float | None
     breakdown: dict = field(default_factory=dict)   # статья → руб
     warnings: list[str] = field(default_factory=list)
+    prediction: PredictionResult | None = None
 
 
 def estimate_cost(
@@ -61,11 +63,31 @@ def estimate_cost(
     else:
         warnings.append("Не задана стоимость обработки платформы — статья не учтена.")
 
+    total_rub = round(sum(breakdown.values()), 2)
+    cost_warnings = list(warnings)
+    time_source = (time_estimate.prediction.source if time_estimate.prediction else None)
+    if time_source == PredictionSource.CALCULATED:
+        cost_warnings.append(
+            "Стоимость машинного времени посчитана по некалиброванному прогнозу времени "
+            "печати — точность ограничена."
+        )
     return CostEstimate(
-        total_rub=round(sum(breakdown.values()), 2),
+        total_rub=total_rub,
         powder_kg=round(powder_kg, 3) if powder_kg is not None else None,
         breakdown=breakdown,
         warnings=warnings,
+        prediction=PredictionResult(
+            value=total_rub,
+            unit="руб",
+            source=PredictionSource.CALCULATED,
+            sample_size=None,
+            warnings=cost_warnings,
+            explanation=(
+                "Сумма по статьям (порошок, газ, фильтр, платформа) из ставок, заданных "
+                "оператором в параметрах машины; отсутствующая ставка исключает свою статью, "
+                "а не подставляет значение по умолчанию."
+            ),
+        ),
     )
 
 

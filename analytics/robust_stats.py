@@ -48,3 +48,37 @@ def theil_sen_slope(
         return float(theilslopes(vals, x).slope)
     except Exception:
         return 0.0
+
+
+def theil_sen_slope_ci(
+    values: Sequence[float] | np.ndarray,
+    xs: Sequence[float] | np.ndarray | None = None,
+    *,
+    max_points: int = _DEFAULT_MAX_POINTS,
+    alpha: float = 0.95,
+) -> tuple[float, float | None, float | None]:
+    """Theil-Sen slope with a confidence interval on the slope itself.
+
+    Returns ``(slope, low_slope, high_slope)`` at the given confidence level.
+    The bounds are ``None`` — not a fabricated zero-width interval — whenever
+    scipy cannot estimate them (too few points, degenerate input): callers
+    must treat that as "no interval available", not as "the slope is exact".
+    """
+    vals = np.asarray(values, dtype=float)
+    n = vals.size
+    if n < 2:
+        return 0.0, None, None
+
+    x = np.arange(n, dtype=float) if xs is None else np.asarray(xs, dtype=float)
+    if n > max_points:
+        idx = np.round(np.linspace(0, n - 1, max_points)).astype(int)
+        vals, x = vals[idx], x[idx]
+
+    try:
+        result = theilslopes(vals, x, alpha=alpha)
+        low, high = float(result.low_slope), float(result.high_slope)
+        if not (np.isfinite(low) and np.isfinite(high)):
+            return float(result.slope), None, None
+        return float(result.slope), low, high
+    except Exception:
+        return 0.0, None, None

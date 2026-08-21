@@ -440,6 +440,17 @@ async def _geometry_prediction(
         logger.exception("stl_estimate: geometry prediction failed")
         return {"available": False, "reason": "Не удалось нарезать модель — проверьте файл"}
 
+    prediction = time_est.prediction.to_dict() if time_est.prediction else None
+    if prediction is not None and prediction["source"] in ("calculated", "calibrated"):
+        try:
+            from analytics.prediction.accuracy import calibration_interval_hours
+            with SessionLocal() as db2:
+                interval = calibration_interval_hours(db2, material, time_est.raw_print_hours)
+            if interval is not None:
+                prediction["interval"] = list(interval)
+        except Exception:
+            logger.exception("stl_estimate: calibration interval lookup failed")
+
     return {
         "available": True,
         "material": material,
@@ -458,6 +469,8 @@ async def _geometry_prediction(
         "cost_breakdown": cost_est.breakdown,
         "powder_kg": cost_est.powder_kg,
         "powder_cost_rub_per_kg": powder_cost,
+        "prediction": prediction,
+        "cost_prediction": cost_est.prediction.to_dict() if cost_est.prediction else None,
         "warnings": time_est.warnings + cost_est.warnings,
     }
 

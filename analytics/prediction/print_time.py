@@ -28,6 +28,7 @@ import io
 import logging
 from dataclasses import dataclass, field
 
+from analytics.prediction.contract import PredictionResult, PredictionSource
 from analytics.prediction.stl_slicer import EstimationError, SliceResult
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,71 @@ class PrintTimeEstimate:
     correction_factor: float = 1.0  # calibration multiplier applied (per-material → global)
     breakdown: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Unified cross-predictor summary (analytics.prediction.contract). Additive:
+    # every field above stays exactly as before for existing callers.
+    prediction: PredictionResult | None = None
+
+
+def _recoat_provenance_note(recoat_source: str) -> str:
+    return {
+        "calibrated": "по калиброванной медиане из логов",
+        "manual": "по значению оператора",
+        "default": "по значению по умолчанию",
+    }.get(recoat_source, "по значению по умолчанию")
+
+
+def build_time_prediction(
+    *,
+    print_hours: float,
+    correction_factor: float,
+    scan_source: str,
+    recoat_source: str,
+    fitted_model: dict | None,
+    warnings: list[str],
+) -> PredictionResult:
+    """Unified contract wrapper for a scan+recoat time estimate.
+
+    ``scan_source``/``recoat_source`` are the same provenance strings already
+    stored in ``breakdown`` — this only translates them into the shared
+    vocabulary. The uncertainty interval is left ``None``: it is filled from
+    real predicted-vs-actual history in a separate step (analytics.prediction.accuracy),
+    not guessed at here.
+    """
+    recoat_note = _recoat_provenance_note(recoat_source)
+    if scan_source == "fitted":
+        source = PredictionSource.MODEL
+        n_layers = (fitted_model or {}).get("n_layers")
+        r2 = (fitted_model or {}).get("r2")
+        explanation = (
+            "Скан рассчитан по модели, подогнанной под реальный burn_ms этого режима печати "
+            f"(материал+толщина{f', R²={r2}' if r2 is not None else ''}); "
+            f"нанесение слоя — {recoat_note}."
+        )
+        sample_size = n_layers if isinstance(n_layers, int) else None
+    elif correction_factor != 1.0:
+        source = PredictionSource.CALIBRATED
+        explanation = (
+            f"Скан рассчитан по паспортным скоростям и скорректирован коэффициентом "
+            f"×{correction_factor:.3f}, выученным из истории предсказано/факт; "
+            f"нанесение слоя — {recoat_note}."
+        )
+        sample_size = None  # число пар калибровки не передаётся на этот вызов
+    else:
+        source = PredictionSource.CALCULATED
+        explanation = (
+            "Скан рассчитан по паспортным скоростям без калибровки (нет истории печатей "
+            f"этого режима); нанесение слоя — {recoat_note}."
+        )
+        sample_size = None
+
+    return PredictionResult(
+        value=round(print_hours, 3),
+        unit="ч",
+        source=source,
+        sample_size=sample_size,
+        warnings=list(warnings),
+        explanation=explanation,
+    )
 
 
 def _resolve_params(params: dict, material: str) -> tuple[float, float, float, int]:
@@ -225,10 +291,18 @@ def estimate_print_time(
             "scan_source": scan_source,
         },
         warnings=warnings,
+        prediction=build_time_prediction(
+            print_hours=print_hours,
+            correction_factor=factor,
+            scan_source=scan_source,
+            recoat_source=recoat_source,
+            fitted_model=fitted if scan_source == "fitted" else None,
+            warnings=warnings,
+        ),
     )
 
 
 __all__ = [
     "PrintTimeEstimate", "estimate_print_time", "EstimationError",
-    "resolve_correction_factor", "resolve_recoat_ms",
+    "resolve_correction_factor", "resolve_recoat_ms", "build_time_prediction",
 ]

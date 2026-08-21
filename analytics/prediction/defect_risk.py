@@ -23,6 +23,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from analytics.prediction.contract import PredictionResult, PredictionSource
+
 # Minimum labelled sessions (with BOTH classes present) before we trust a model.
 #
 # Was 8 — with 8 features that is one observation per parameter, where a
@@ -117,11 +119,22 @@ def _heuristic_risk(row: dict[str, float | None]) -> dict[str, Any]:
         ({"factor": n, "contribution": round(r * w / total_w, 4)} for n, r, w in contributions),
         key=lambda d: -d["contribution"],
     )
+    risk = round(risk, 4)
     return {
-        "risk": round(risk, 4),
+        "risk": risk,
         "grade": _grade(risk),
         "method": "heuristic",
         "top_factors": [t for t in top if t["contribution"] > 0][:4],
+        "prediction": PredictionResult(
+            value=risk,
+            unit="0..1",
+            source=PredictionSource.HEURISTIC,
+            sample_size=None,
+            explanation=(
+                "Прозрачная взвешенная эвристика по известным факторам риска — "
+                "обученной модели пока нет или она не прошла кросс-валидацию."
+            ),
+        ).to_dict(),
     }
 
 
@@ -277,6 +290,24 @@ def train_defect_model(
     return None
 
 
+def _model_prediction(risk: float, model: dict[str, Any], method: str) -> dict[str, Any]:
+    """Shared PredictionResult wrapper for both learned-model risk paths."""
+    n_train = model.get("n_train")
+    cv_auc = model.get("cv_auc")
+    return PredictionResult(
+        value=risk,
+        unit="0..1",
+        source=PredictionSource.MODEL,
+        sample_size=n_train if isinstance(n_train, int) else None,
+        explanation=(
+            f"Обученная модель ({method}), прошедшая кросс-валидацию "
+            f"(AUC={cv_auc}) на {n_train} размеченных сессиях."
+            if n_train is not None else
+            f"Обученная модель ({method}), прошедшая кросс-валидацию."
+        ),
+    ).to_dict()
+
+
 def _lightgbm_risk(row: dict[str, float | None], model: dict[str, Any]) -> dict[str, Any] | None:
     feats = model["features"]
     if any(row.get(f) is None for f in feats):
@@ -297,12 +328,14 @@ def _lightgbm_risk(row: dict[str, float | None], model: dict[str, Any]) -> dict[
         ),
         key=lambda d: -d["contribution"],
     )
+    risk = round(risk, 4)
     return {
-        "risk": round(risk, 4),
+        "risk": risk,
         "grade": _grade(risk),
         "method": "lightgbm",
         "top_factors": [t for t in top if t["contribution"] > 0][:4],
         "model_info": _model_info(model),
+        "prediction": _model_prediction(risk, model, "LightGBM"),
     }
 
 
@@ -320,17 +353,18 @@ def _model_risk(row: dict[str, float | None], model: dict[str, Any]) -> dict[str
         contrib = coef * std_x
         z += contrib
         contributions.append((f, contrib))
-    risk = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, z))))
+    risk = round(1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, z)))), 4)
     top = sorted(
         ({"factor": _LABEL.get(f, f), "contribution": round(c, 4)} for f, c in contributions),
         key=lambda d: -abs(d["contribution"]),
     )
     return {
-        "risk": round(risk, 4),
+        "risk": risk,
         "grade": _grade(risk),
         "method": "model",
         "top_factors": top[:4],
         "model_info": _model_info(model),
+        "prediction": _model_prediction(risk, model, "логистическая регрессия"),
     }
 
 

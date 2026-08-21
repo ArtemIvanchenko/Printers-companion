@@ -5,14 +5,16 @@ chronological order and project how many more sessions until that mean crosses
 the signal's alarm threshold (from signals.yaml). A signal drifting toward a
 limit is an early, quantified warning that a component is degrading.
 
-Reuses ``analytics.robust_stats.theil_sen_slope`` and
-``analytics.thresholds.load_alarm_thresholds``. No raw-log access.
+Reuses ``analytics.robust_stats.theil_sen_slope_ci`` (point slope plus its
+confidence interval) and ``analytics.thresholds.load_alarm_thresholds``. No
+raw-log access.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from analytics.robust_stats import theil_sen_slope
+from analytics.prediction.contract import PredictionResult, PredictionSource
+from analytics.robust_stats import theil_sen_slope_ci
 
 # Need at least this many sessions with the signal to trust a trend.
 MIN_SESSIONS = 4
@@ -42,6 +44,34 @@ def _group_for(sessions: list[dict[str, Any]], signal: str) -> str:
     return ""
 
 
+def _sessions_to_for_slope(
+    current: float, threshold: float, slope: float, *, increasing: bool,
+) -> float | None:
+    """Sessions to threshold for one candidate slope value.
+
+    ``increasing`` is the POINT estimate's drift direction (alarm_high with a
+    positive point slope, or alarm_low with a negative one) — fixed once per
+    forecast, not re-derived from ``slope``. A confidence-interval bound can
+    have the opposite sign from the point estimate (the trend could plausibly
+    be flat or reversing); using ``slope``'s own sign to decide "already past"
+    conflated that case with "already past the threshold right now", which
+    fabricated a spurious 0-session bound whenever the interval crossed zero.
+
+    "Already past" is a fact about ``current`` vs ``threshold`` alone, so it
+    does not depend on which candidate slope is being evaluated. Returns
+    ``None`` when this slope never reaches the threshold (zero, or pointed
+    the wrong way relative to ``increasing``) — the caller must not treat
+    that as "far away", it means "this bound of the interval is open-ended".
+    """
+    remaining = threshold - current
+    if remaining <= 0 if increasing else remaining >= 0:
+        return 0.0
+    if slope == 0 or ((slope <= 0) if increasing else (slope >= 0)):
+        return None
+    sessions = remaining / slope
+    return sessions if sessions > 0 else None
+
+
 def forecast_maintenance(
     sessions: list[dict[str, Any]],
     alarm_thresholds: dict[str, dict[str, float]] | None = None,
@@ -56,8 +86,12 @@ def forecast_maintenance(
 
     Returns: list of forecasts (most urgent first), each
         ``{signal, group, direction, slope_per_session, current_mean,
-           threshold, threshold_kind, sessions_to_threshold, recommendation}``.
+           threshold, threshold_kind, sessions_to_threshold,
+           sessions_to_threshold_interval, recommendation, prediction}``.
         Signals that are stable or drifting away from limits are omitted.
+        ``sessions_to_threshold_interval`` (and ``prediction.interval``) is
+        ``None`` when the slope's confidence interval could not be estimated
+        (too few points) — never a fabricated symmetric spread.
     """
     if alarm_thresholds is None:
         from analytics.thresholds import load_alarm_thresholds
@@ -77,7 +111,7 @@ def forecast_maintenance(
         if len(series) < MIN_SESSIONS:
             continue
 
-        slope = theil_sen_slope(series)
+        slope, low_slope, high_slope = theil_sen_slope_ci(series)
         current = series[-1]
         mean_abs = abs(sum(series) / len(series)) or 1.0
         if abs(slope) < MIN_REL_SLOPE * mean_abs:
@@ -108,6 +142,37 @@ def forecast_maintenance(
             rec = (f"Сигнал {signal} {direction} к порогу {kind} ({threshold:g}); "
                    f"≈{sessions_to:.0f} печат(ей) до достижения — запланируйте ТО")
 
+        sessions_to = round(sessions_to, 1)
+
+        # Interval from the slope's own confidence bounds: the fast bound is
+        # whichever of low_slope/high_slope is steeper in the drift direction,
+        # the slow bound the shallower one. A slow bound that doesn't reach the
+        # threshold at all (its sign disagrees with the point estimate) is not
+        # "no upper bound" — it means the true trend could plausibly never get
+        # there, so it is reported capped at MAX_HORIZON_SESSIONS with a warning
+        # rather than silently omitted.
+        interval: tuple[float, float] | None = None
+        interval_warnings: list[str] = []
+        if low_slope is not None and high_slope is not None:
+            fast_slope, slow_slope = (high_slope, low_slope) if slope > 0 else (low_slope, high_slope)
+            sessions_fast = _sessions_to_for_slope(current, threshold, fast_slope, increasing=slope > 0)
+            sessions_slow = _sessions_to_for_slope(current, threshold, slow_slope, increasing=slope > 0)
+            if sessions_fast is not None:
+                if sessions_slow is None:
+                    sessions_slow = float(MAX_HORIZON_SESSIONS)
+                    interval_warnings.append(
+                        "Верхняя граница интервала не определена статистически (в пределах "
+                        "доверительного интервала наклон может смениться) — показан потолок "
+                        f"{MAX_HORIZON_SESSIONS} печатей."
+                    )
+                interval = (round(min(sessions_fast, sessions_slow), 1),
+                            round(max(sessions_fast, sessions_slow), 1))
+        else:
+            interval_warnings.append(
+                "Доверительный интервал наклона недоступен (мало точек) — показана только "
+                "точечная оценка."
+            )
+
         forecasts.append({
             "signal": signal,
             "group": _group_for(sessions, signal),
@@ -116,9 +181,26 @@ def forecast_maintenance(
             "current_mean": round(current, 6),
             "threshold": threshold,
             "threshold_kind": kind,
-            "sessions_to_threshold": round(sessions_to, 1),
+            "sessions_to_threshold": sessions_to,
+            "sessions_to_threshold_interval": list(interval) if interval is not None else None,
             "n_sessions": len(series),
             "recommendation": rec,
+            "prediction": PredictionResult(
+                value=sessions_to,
+                unit="печатей",
+                source=PredictionSource.MODEL,
+                interval=interval,
+                sample_size=len(series),
+                warnings=(
+                    ([f"Прогноз построен на минимально допустимом числе сессий ({MIN_SESSIONS})."]
+                     if len(series) == MIN_SESSIONS else [])
+                    + interval_warnings
+                ),
+                explanation=(
+                    f"Робастный тренд (Тейл-Сен) по {len(series)} последним значениям сигнала "
+                    f"{signal}, спроецированный до порога {kind} ({threshold:g})."
+                ),
+            ).to_dict(),
         })
 
     return sorted(forecasts, key=lambda f: f["sessions_to_threshold"])

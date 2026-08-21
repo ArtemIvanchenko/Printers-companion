@@ -40,6 +40,14 @@ CALIBRATION_WINDOW = 20
 # it silently; surface it instead.
 CORRECTION_MIN, CORRECTION_MAX = 0.5, 2.0
 
+# Percentile band for the print-time uncertainty interval, taken from the same
+# actual/raw ratio history the point factor uses. 0.1/0.9 (an 80% band) rather
+# than a tighter one — with only MIN_PAIRS_FOR_CALIBRATION..CALIBRATION_WINDOW
+# points, a 95% band's tails are single outlier pairs and swing wildly print
+# to print; 80% is still informative without over-claiming precision on a
+# handful of samples.
+RATIO_INTERVAL_LOW, RATIO_INTERVAL_HIGH = 0.1, 0.9
+
 # Sessions the calibration loop refuses to learn from. A session's measured
 # span is only a print duration if the session really is a print: service runs,
 # idle diagnostics and mis-grouped sessions have spans that are not comparable
@@ -172,6 +180,23 @@ def _raw_predicted(snapshot: dict) -> float | None:
     return raw if (raw and raw > 0) else None
 
 
+def _quantile_bounds(sample: list[float], low: float, high: float) -> tuple[float, float]:
+    """Linear-interpolated [low, high] percentile bounds of ``sample``.
+
+    Same interpolation convention as ``numpy.percentile`` (reimplemented here
+    rather than pulling in numpy just for this one call).
+    """
+    s = sorted(sample)
+
+    def _pct(p: float) -> float:
+        idx = p * (len(s) - 1)
+        lo = int(idx)
+        frac = idx - lo
+        return s[lo] + frac * (s[lo + 1] - s[lo]) if lo + 1 < len(s) else s[lo]
+
+    return round(_pct(low), 3), round(_pct(high), 3)
+
+
 def prediction_accuracy(db: Session) -> dict:
     """Compare stored prediction snapshots with actual session durations.
 
@@ -243,6 +268,9 @@ def prediction_accuracy(db: Session) -> dict:
 
     rows.sort(key=lambda r: r["printed_at"], reverse=True)
 
+    def _window_sample(pairs: list[tuple[datetime, float]]) -> list[float]:
+        return [ratio for _, ratio in sorted(pairs, key=lambda p: p[0], reverse=True)[:CALIBRATION_WINDOW]]
+
     def _median(pairs: list[tuple[datetime, float]]) -> float | None:
         """Median ratio over the most recent CALIBRATION_WINDOW pairs.
 
@@ -250,13 +278,27 @@ def prediction_accuracy(db: Session) -> dict:
         code sliced the list in DB-scan order, so it kept an arbitrary subset
         while claiming to track the machine's current state.
         """
-        sample = [ratio for _, ratio in sorted(pairs, key=lambda p: p[0], reverse=True)[:CALIBRATION_WINDOW]]
+        sample = _window_sample(pairs)
         if len(sample) < MIN_PAIRS_FOR_CALIBRATION:
             return None
         return round(statistics.median(sample), 3)
 
+    def _ratio_interval(pairs: list[tuple[datetime, float]]) -> tuple[float, float] | None:
+        """[RATIO_INTERVAL_LOW, RATIO_INTERVAL_HIGH] percentile band of actual/raw,
+        over the same recency window as the point factor. ``None`` — not a
+        fabricated spread — below MIN_PAIRS_FOR_CALIBRATION.
+        """
+        sample = _window_sample(pairs)
+        if len(sample) < MIN_PAIRS_FOR_CALIBRATION:
+            return None
+        return _quantile_bounds(sample, RATIO_INTERVAL_LOW, RATIO_INTERVAL_HIGH)
+
     by_material = {
-        mat: {"n_pairs": len(pairs), "suggested_factor": _median(pairs)}
+        mat: {
+            "n_pairs": len(pairs),
+            "suggested_factor": _median(pairs),
+            "ratio_interval": _ratio_interval(pairs),
+        }
         for mat, pairs in usable_by_mat.items()
     }
 
@@ -271,6 +313,28 @@ def prediction_accuracy(db: Session) -> dict:
         "min_pairs_for_calibration": MIN_PAIRS_FOR_CALIBRATION,
         "calibration_window": CALIBRATION_WINDOW,
     }
+
+
+def calibration_interval_hours(
+    db: Session, material: str, raw_hours: float,
+) -> tuple[float, float] | None:
+    """Print-time interval in hours for ``material``, from calibration history.
+
+    Scales the material's actual/raw ratio interval (``_ratio_interval`` inside
+    ``prediction_accuracy``) by ``raw_hours`` — the same raw geometric estimate
+    the ratio was computed against, so this must be called with the *raw*
+    (uncorrected) hours, not the already-corrected quote.
+
+    Returns ``None`` — never a fabricated interval — when the material has
+    fewer than ``MIN_PAIRS_FOR_CALIBRATION`` usable pairs, exactly like the
+    point correction factor.
+    """
+    report = prediction_accuracy(db)
+    info = report["by_material"].get(material)
+    if not info or info["ratio_interval"] is None:
+        return None
+    low, high = info["ratio_interval"]
+    return round(low * raw_hours, 3), round(high * raw_hours, 3)
 
 
 def recalibrate_and_apply(db: Session) -> dict:
@@ -320,10 +384,13 @@ def recalibrate_and_apply(db: Session) -> dict:
 __all__ = [
     "prediction_accuracy",
     "recalibrate_and_apply",
+    "calibration_interval_hours",
     "MIN_PAIRS_FOR_CALIBRATION",
     "CALIBRATION_WINDOW",
     "CORRECTION_MIN",
     "CORRECTION_MAX",
+    "RATIO_INTERVAL_LOW",
+    "RATIO_INTERVAL_HIGH",
     "PRINT_CLASSIFICATIONS",
     "as_utc",
     "session_classification",

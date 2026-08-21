@@ -11,6 +11,7 @@ import pytest
 from analytics.prediction.accuracy import (
     CORRECTION_MAX,
     MIN_PAIRS_FOR_CALIBRATION,
+    calibration_interval_hours,
     prediction_accuracy,
     recalibrate_and_apply,
 )
@@ -144,6 +145,51 @@ class TestPredictionAccuracy:
         assert report["n_pairs"] == 1
         assert report["n_usable_pairs"] == 0
         assert report["excluded"][0]["reason"] == "implausible_duration"
+
+
+class TestRatioInterval:
+    """Print-time uncertainty band from actual/raw history — never fabricated."""
+
+    def test_none_below_minimum_pairs(self, db):
+        start = datetime(2027, 3, 1, 8, 0, tzinfo=timezone.utc)
+        for i in range(MIN_PAIRS_FOR_CALIBRATION - 1):
+            _session(db, f"s_few{i}", start.replace(day=i + 1), hours=10.0)
+            _record(db, f"pr_few{i}", f"s_few{i}", raw_hours=10.0)
+        db.flush()
+
+        info = prediction_accuracy(db)["by_material"]["steel"]
+        assert info["suggested_factor"] is None
+        assert info["ratio_interval"] is None
+        assert calibration_interval_hours(db, "steel", 10.0) is None
+
+    def test_present_and_brackets_the_point_factor(self, db):
+        start = datetime(2027, 3, 1, 8, 0, tzinfo=timezone.utc)
+        # Spread actual/raw ratios around 1.0: 0.8, 0.9, 1.0, 1.1, 1.2.
+        for i, actual in enumerate((8.0, 9.0, 10.0, 11.0, 12.0)):
+            _session(db, f"s_spread{i}", start.replace(day=i + 1), hours=actual)
+            _record(db, f"pr_spread{i}", f"s_spread{i}", raw_hours=10.0)
+        db.flush()
+
+        info = prediction_accuracy(db)["by_material"]["steel"]
+        low, high = info["ratio_interval"]
+        assert low < info["suggested_factor"] < high
+        # 80% band over a symmetric spread stays inside the observed range.
+        assert 0.8 <= low < high <= 1.2
+
+    def test_calibration_interval_hours_scales_by_raw_hours(self, db):
+        start = datetime(2027, 3, 1, 8, 0, tzinfo=timezone.utc)
+        for i, actual in enumerate((8.0, 9.0, 10.0, 11.0, 12.0)):
+            _session(db, f"s_scale{i}", start.replace(day=i + 1), hours=actual)
+            _record(db, f"pr_scale{i}", f"s_scale{i}", raw_hours=10.0)
+        db.flush()
+
+        ratio_low, ratio_high = prediction_accuracy(db)["by_material"]["steel"]["ratio_interval"]
+        hours_low, hours_high = calibration_interval_hours(db, "steel", 20.0)
+        assert hours_low == pytest.approx(ratio_low * 20.0, abs=0.01)
+        assert hours_high == pytest.approx(ratio_high * 20.0, abs=0.01)
+
+    def test_none_for_material_with_no_history(self, db):
+        assert calibration_interval_hours(db, "titanium", 10.0) is None
 
 
 class TestRecalibration:

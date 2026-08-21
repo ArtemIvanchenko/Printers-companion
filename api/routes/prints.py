@@ -317,6 +317,7 @@ def _combined_prediction(
     params: dict,
     powder_cost: float | None,
     geometry_cache: Any | None = None,
+    db: Any | None = None,
 ) -> dict:
     """Time + cost estimate over a full print platform (parts + supports STLs).
 
@@ -357,6 +358,22 @@ def _combined_prediction(
         logger.exception("prints: combined prediction failed")
         return {"available": False, "reason": "Не удалось нарезать модель — проверьте файлы"}
 
+    prediction = est.prediction.to_dict() if est.prediction else None
+    # The physics/calibrated path has no interval of its own (print_time.py has
+    # no DB access) — attach one from calibration history here, when there is
+    # enough of it. Left None (not fabricated) for the fitted/MODEL path and
+    # for materials below MIN_PAIRS_FOR_CALIBRATION. A failure here must not
+    # sink the whole estimate — it is extra precision info, not the estimate
+    # itself.
+    if prediction is not None and db is not None and prediction["source"] in ("calculated", "calibrated"):
+        try:
+            from analytics.prediction.accuracy import calibration_interval_hours
+            interval = calibration_interval_hours(db, material, est.raw_print_hours)
+            if interval is not None:
+                prediction["interval"] = list(interval)
+        except Exception:
+            logger.exception("prints: calibration interval lookup failed")
+
     return {
         "available": True,
         "n_parts": sum(1 for b in est.bodies if b.kind == "part"),
@@ -372,6 +389,8 @@ def _combined_prediction(
         "recoat_hours": round(est.recoat_hours, 3),
         "cost_total_rub": cost_est.total_rub,
         "scan_source": est.scan_source,
+        "prediction": prediction,
+        "cost_prediction": cost_est.prediction.to_dict() if cost_est.prediction else None,
         "warnings": est.warnings + cost_warnings,
         # Per-layer geometry series — persisted into the snapshot so scan
         # calibration can later pair it with real burn_ms without re-slicing.
@@ -462,10 +481,13 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     n_supports = len(supports)
 
     powder_cost = record.get("powder_cost_rub_per_kg") or repo.last_powder_cost()
-    result = _combined_prediction(parts, supports, material, params, powder_cost, geometry_cache=repo)
+    result = _combined_prediction(parts, supports, material, params, powder_cost,
+                                   geometry_cache=repo, db=repo.db)
     if not result.get("available"):
         raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
 
+    time_prediction = result.get("prediction")
+    cost_prediction = result.get("cost_prediction")
     snapshot: dict = {
         "estimated_at": datetime.now(timezone.utc).isoformat(),
         "n_parts": len(parts),
@@ -489,6 +511,14 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         "scan_source": result.get("scan_source", "physics"),
         "cost_total_rub": result["cost_total_rub"],
         "scan_geometry": result.get("scan_geometry"),
+        # Flat, additive fields from the unified prediction contract — kept
+        # flat (not nested under a "prediction" key) so they don't collide
+        # with this whole snapshot already being metadata_json["prediction"].
+        "prediction_source": (time_prediction or {}).get("source"),
+        "prediction_interval": (time_prediction or {}).get("interval"),
+        "prediction_warnings": (time_prediction or {}).get("warnings", []),
+        "prediction_explanation": (time_prediction or {}).get("explanation"),
+        "cost_prediction_warnings": (cost_prediction or {}).get("warnings", []),
     }
 
     meta = dict(record.get("metadata_json") or {})
