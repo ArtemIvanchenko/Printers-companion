@@ -64,7 +64,8 @@ def test_model_trains_and_predicts_with_separable_data():
             for i in range(12)]
     bad = [(_group(readiness=22 + i % 6, anomalies=5, burn_slope=0.7, dq=48 + i % 3), 1)
            for i in range(12)]
-    model = train_defect_model(good + bad)
+    chronological = [item for pair in zip(good, bad) for item in pair]
+    model = train_defect_model(chronological)
     assert model is not None
     assert model["n_train"] == 24
     assert model["n_defects"] == 12
@@ -77,6 +78,15 @@ def test_model_trains_and_predicts_with_separable_data():
     assert risk_bad["risk"] > risk_good["risk"]
     assert risk_bad["top_factors"]
     assert risk_bad["model_info"]["cv_auc"] == model["cv_auc"]
+
+
+def test_temporal_class_shift_is_not_validated_with_future_leakage():
+    good = [(_group(readiness=95, anomalies=0), 0) for _ in range(12)]
+    bad = [(_group(readiness=25, anomalies=5), 1) for _ in range(12)]
+    # A shuffled split would score this perfectly while training on future bad
+    # sessions to "predict" earlier good ones. Forward chaining correctly has
+    # no evaluable past window with both classes.
+    assert train_defect_model(good + bad) is None
 
 
 def test_model_is_rejected_when_labels_carry_no_signal():

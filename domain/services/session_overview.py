@@ -11,6 +11,7 @@ so it is cheap enough to run inline during API ingest. Storage-agnostic — the
 result is a plain JSON-serializable dict persisted by the runtime repository.
 """
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -111,7 +112,7 @@ def _series(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list]:
         if any(isinstance(v, (int, float)) for v in values):
             cleaned = []
             for v in values:
-                if isinstance(v, (int, float)) and math.isfinite(v):
+                if isinstance(v, (int, float)) and math.isfinite(v) and abs(v) <= 1e7:
                     cleaned.append(v)
                 else:
                     cleaned.append(None)
@@ -135,40 +136,82 @@ def _assemble_groups(time_axis: list, col_series: dict[str, list]) -> dict[str, 
     return telemetry
 
 
-def _full_range_sensor_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
-    """Chart series sampled evenly across the ENTIRE sensors.log on disk.
+def _sensor_file_date(file: IngestedFile):
+    match = re.search(r"(?<!\d)(\d{2}\.\d{2}\.\d{4})(?!\d)", Path(file.path).name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+def _full_range_sensor_telemetry(
+    files: list[IngestedFile],
+    active_start: datetime | None = None,
+    active_end: datetime | None = None,
+) -> dict[str, Any]:
+    """Chart series sampled across all sensor logs, clipped to active printing.
 
     The bounded table sample keeps only the first ~5000 rows, so for a long
     print the chart would show only its first ~80 minutes. Reading the full
     file (evenly downsampled) makes the chart span the whole run.
     """
-    sensors_file = next(
-        (f for f in files
-         if f.classification and f.classification.family == SourceFileFamily.sensors_log),
-        None,
-    )
-    if sensors_file is None:
+    sensor_files = [
+        file for file in files
+        if file.classification and file.classification.family == SourceFileFamily.sensors_log
+        and Path(file.path).exists()
+    ]
+    if not sensor_files:
         return {}
-    path = Path(sensors_file.path)
-    if not path.exists():
-        return {}
-    try:
-        from analytics.telemetry_parser import downsample_full_series
-        cols = _OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _HUMIDITY_COLUMNS + _PRESSURE_COLUMNS
-        raw = downsample_full_series(path, cols, time_column=_TIME_COLUMN, max_points=_MAX_TELEMETRY_POINTS)
-    except Exception as exc:
-        logger.warning("Full-range telemetry failed for %s: %s", path.name, exc)
-        return {}
-    # Keep only columns that actually carry numeric data.
+    rows: list[dict[str, Any]] = []
+    cols = _OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _HUMIDITY_COLUMNS + _PRESSURE_COLUMNS
+    for file in sorted(sensor_files, key=lambda item: (_sensor_file_date(item) or item.mtime.date(), item.path)):
+        path = Path(file.path)
+        file_date = _sensor_file_date(file)
+        if active_start and active_end and file_date:
+            if not (active_start.date() <= file_date <= active_end.date()):
+                continue
+            start_seconds = (
+                active_start.hour * 3600 + active_start.minute * 60 + active_start.second
+                if file_date == active_start.date() else None
+            )
+            end_seconds = (
+                active_end.hour * 3600 + active_end.minute * 60 + active_end.second
+                if file_date == active_end.date() else None
+            )
+        else:
+            start_seconds = end_seconds = None
+        try:
+            from analytics.telemetry_parser import downsample_full_series
+
+            raw = downsample_full_series(
+                path, cols, time_column=_TIME_COLUMN,
+                max_points=_MAX_TELEMETRY_POINTS,
+                start_clock_seconds=start_seconds,
+                end_clock_seconds=end_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Full-range telemetry failed for %s: %s", path.name, exc)
+            continue
+        n = max((len(values) for values in raw.values()), default=0)
+        for idx in range(n):
+            row = {col: values[idx] if idx < len(values) else None for col, values in raw.items()}
+            if file_date and row.get(_TIME_COLUMN):
+                row[_TIME_COLUMN] = f"{file_date.strftime('%d.%m')} {row[_TIME_COLUMN]}"
+            rows.append(row)
+    rows = _downsample(rows, _MAX_TELEMETRY_POINTS)
     col_series = {
-        c: vals for c, vals in raw.items()
-        if c != _TIME_COLUMN and any(isinstance(v, (int, float)) for v in vals)
+        col: [row.get(col) for row in rows]
+        for col in cols
+        if any(isinstance(row.get(col), (int, float)) for row in rows)
     }
     if not col_series:
         return {}
-    n = len(next(iter(col_series.values())))
-    time_axis = raw.get(_TIME_COLUMN) or list(range(n))
-    return _assemble_groups(time_axis, col_series)
+    time_axis = [row.get(_TIME_COLUMN) for row in rows]
+    result = _assemble_groups(time_axis, col_series)
+    result["scope"] = "active_print" if active_start and active_end else "full_sensor_session"
+    return result
 
 
 def _sample_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
@@ -185,10 +228,14 @@ def _sample_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
     return _assemble_groups(time_axis, col_series)
 
 
-def _build_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
+def _build_telemetry(
+    files: list[IngestedFile],
+    active_start: datetime | None = None,
+    active_end: datetime | None = None,
+) -> dict[str, Any]:
     # Prefer the full-range series (whole sensors.log); fall back to the bounded
     # table sample when the raw file isn't on disk (e.g. re-analysed payloads).
-    telemetry = _full_range_sensor_telemetry(files) or _sample_telemetry(files)
+    telemetry = _full_range_sensor_telemetry(files, active_start, active_end) or _sample_telemetry(files)
     telemetry["layer_burn_times"] = _layer_burn_times(files)
     return telemetry
 
@@ -236,7 +283,7 @@ def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
                 seen[layer] = round(dur_ms / 1000.0, 1)
 
     if seen:
-        return [{"layer": layer, "duration_sec": dur} for layer, dur in sorted(seen.items())][:1000]
+        return [{"layer": layer, "duration_sec": dur} for layer, dur in sorted(seen.items())]
 
     # Fallback: approximate from a burn table's layer (N) + Time columns.
     table = None
@@ -274,7 +321,28 @@ def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
         for layer, (lo, hi) in sorted(spans.items())
         if hi >= lo
     ]
-    return result[:300]
+    return result
+
+
+def compute_burn_span(
+    files: list[IngestedFile],
+) -> tuple[datetime | None, datetime | None]:
+    """First/last timestamped layer burn, excluding purge and shutdown phases."""
+    burn_ts: list[datetime] = []
+    for file in files:
+        parse_result = file.parse_result
+        if not parse_result or parse_result.file_family == SourceFileFamily.monitor100_log:
+            continue
+        for event in parse_result.events:
+            event_type = (event.event_type or "").lower()
+            phase = (event.phase or "").lower().strip()
+            if event.ts is not None and (
+                phase == "burn" or "burn" in event_type or event.layer is not None
+            ):
+                burn_ts.append(event.ts)
+    if len(burn_ts) < 2 or max(burn_ts) <= min(burn_ts):
+        return None, None
+    return min(burn_ts), max(burn_ts)
 
 
 def compute_print_span(
@@ -400,7 +468,8 @@ def build_group_overview(
         "material": raw_features.get("material") or "unknown",
     }
 
-    telemetry = _build_telemetry(files)
+    burn_start, burn_end = compute_burn_span(files)
+    telemetry = _build_telemetry(files, burn_start or span_start, burn_end or span_end)
     health = build_process_health(telemetry)
     # Surface the headline readiness score in features for the dashboard cards/table.
     features["atmosphere_readiness"] = (health.get("readiness") or {}).get("score")

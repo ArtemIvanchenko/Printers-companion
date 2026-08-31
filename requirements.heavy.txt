@@ -11,6 +11,7 @@ rtree==1.4.1
 PythonSLM==0.6.1
 pymeshfix==0.18.1
 ruptures==1.1.10
+plotly>=5.22
 
 # analytics/test_metrics — "Тестовые метрики" dashboard tab.
 # Versions confirmed to resolve cleanly alongside scikit-learn/polars/scipy

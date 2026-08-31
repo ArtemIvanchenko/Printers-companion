@@ -95,14 +95,18 @@ class TestPrintTime:
         with pytest.raises(EstimationError):
             estimate_print_time(s, PARAMS, "steel")  # без stl_bytes → PySLM не запустить
 
-    def test_per_material_correction_scales_total(self):
+    def test_per_material_correction_scales_scan_only(self):
         s = slice_stl(CUBE_STL, 0.05)
         base = estimate_print_time(s, PARAMS, "steel", stl_bytes=CUBE_STL)
         corrected = estimate_print_time(
             s, {**PARAMS, "time_correction_by_mat": {"steel": 1.5}}, "steel", stl_bytes=CUBE_STL,
         )
         assert corrected.correction_factor == 1.5
-        assert corrected.print_hours == pytest.approx(base.print_hours * 1.5, rel=0.01)
+        assert corrected.scan_hours == pytest.approx(base.scan_hours * 1.5, rel=0.01)
+        assert corrected.recoat_hours == pytest.approx(base.recoat_hours, rel=0.01)
+        assert corrected.print_hours == pytest.approx(
+            base.scan_hours * 1.5 + base.recoat_hours, rel=0.01,
+        )
         # raw остаётся некалиброванным — на нём строится обучение
         assert corrected.raw_print_hours == pytest.approx(base.raw_print_hours, rel=0.01)
 
@@ -114,6 +118,16 @@ class TestPrintTime:
         alu = estimate_print_time(s, params, "aluminum", stl_bytes=CUBE_STL)  # нет в by_mat → глобальный
         assert steel.correction_factor == 1.2
         assert alu.correction_factor == 2.0
+
+    def test_mode_factor_overrides_pooled_legacy_factor(self):
+        s = slice_stl(CUBE_STL, 0.05)
+        params = {
+            **PARAMS,
+            "time_correction_factor": 2.0,
+            "time_correction_by_mat": {"steel": 1.4, "steel@0.050": 1.15},
+        }
+        result = estimate_print_time(s, params, "steel", stl_bytes=CUBE_STL)
+        assert result.correction_factor == 1.15
 
     def test_material_hatch_speed_override(self):
         params = {**PARAMS, "hatch_speeds_by_mat": {"steel": 2000.0}}

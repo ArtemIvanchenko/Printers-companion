@@ -29,12 +29,15 @@ Two hard-won honesty rules, both from real-data validation:
 
 Robustness to the known multi-day log-splitting bug: a session holding only
 part of a print's layers still yields valid (geometry, burn) pairs for the
-layers it has — partial coverage narrows the sample, it does not bias the fit.
+layers it has. Acceptance nevertheless requires at least two independent
+prints and leave-one-print-out validation; an in-sample fit of one build is not
+evidence that the model predicts the next build.
 """
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+import statistics
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,6 +45,7 @@ from sqlalchemy.orm import Session
 
 from analytics.prediction.accuracy import (
     PRINT_CLASSIFICATIONS,
+    calibration_is_excluded,
     iter_linked_prints,
     session_classification,
 )
@@ -54,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 # Gates a fitted model must clear before it is ever used for predictions.
 MIN_LAYERS_FOR_FIT = 150          # enough layers to constrain the fit
+MIN_PRINTS_FOR_FIT = 2            # one print can only prove memorisation
 MIN_FIT_R2 = 0.6                  # strong per-layer explanatory power
 MAX_TOTAL_ERR_PCT = 15.0          # in-sample total must reconstruct within this
 # Secondary acceptance channel, from real-data validation: a build whose
@@ -64,6 +69,8 @@ MAX_TOTAL_ERR_PCT = 15.0          # in-sample total must reconstruct within this
 # fits R²≈0 and still fails.
 MIN_FIT_R2_FLOOR = 0.2
 TIGHT_TOTAL_ERR_PCT = 5.0
+MAX_CV_MEDIAN_TOTAL_ERR_PCT = 25.0
+MAX_CV_WORST_TOTAL_ERR_PCT = 35.0
 # Plausibility bounds on a single layer's burn reading (ms) — mirrors the
 # pour_ms guards in recoat_calibration.
 _MIN_BURN_MS, _MAX_BURN_MS = 100.0, 3_600_000.0
@@ -141,8 +148,32 @@ def _pairs_from_record(snapshot: dict, burn: dict[int, float]) -> tuple[list[lis
     return X_rows, y
 
 
+def _fit_beta(groups: list[tuple[list[list[float]], list[float]]]):
+    """Fit one equally-per-print weighted NNLS coefficient vector."""
+    import numpy as np
+    from scipy.optimize import nnls
+
+    X_weighted: list[list[float]] = []
+    y_weighted: list[float] = []
+    for X_rows, y in groups:
+        if not y:
+            continue
+        sqrt_w = (1.0 / len(y)) ** 0.5
+        for row, val in zip(X_rows, y):
+            X_weighted.append([v * sqrt_w for v in row])
+            y_weighted.append(val * sqrt_w)
+    if not X_weighted:
+        return None
+    try:
+        beta, _ = nnls(np.asarray(X_weighted, dtype=float), np.asarray(y_weighted, dtype=float))
+    except Exception:
+        logger.exception("scan calibration: NNLS failed")
+        return None
+    return beta
+
+
 def _fit(groups: list[tuple[list[list[float]], list[float]]]) -> dict[str, Any] | None:
-    """NNLS fit + in-sample quality, weighted equally per print.
+    """NNLS fit with in-sample and leave-one-print-out quality.
 
     ``groups`` is one (X_rows, y) per source print. A print with 2000 layers
     and a print with 800 layers otherwise get 2000 vs 800 votes in the fit —
@@ -153,53 +184,74 @@ def _fit(groups: list[tuple[list[list[float]], list[float]]]) -> dict[str, Any] 
     real, unweighted data so they keep reporting genuine fit quality.
     """
     import numpy as np
-    from scipy.optimize import nnls
 
     X_all: list[list[float]] = []
     y_all: list[float] = []
-    X_weighted: list[list[float]] = []
-    y_weighted: list[float] = []
     for X_rows, y in groups:
-        n = len(y)
-        if n == 0:
+        if not y:
             continue
-        sqrt_w = (1.0 / n) ** 0.5
         for row, val in zip(X_rows, y):
             X_all.append(row)
             y_all.append(val)
-            X_weighted.append([v * sqrt_w for v in row])
-            y_weighted.append(val * sqrt_w)
     if not X_all:
         return None
 
     X = np.asarray(X_all, dtype=float)
     yv = np.asarray(y_all, dtype=float)
-    try:
-        beta, _ = nnls(np.asarray(X_weighted, dtype=float), np.asarray(y_weighted, dtype=float))
-    except Exception:
-        logger.exception("scan calibration: NNLS failed")
+    beta = _fit_beta(groups)
+    if beta is None:
         return None
     pred = X @ beta
     ss_res = float(((yv - pred) ** 2).sum())
     ss_tot = float(((yv - yv.mean()) ** 2).sum())
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     total_err_pct = (float(pred.sum()) - float(yv.sum())) / float(yv.sum()) * 100.0 if yv.sum() else 0.0
-    return {
+    model = {
         "beta": [float(b) for b in beta],
         "features": list(GEOMETRY_FEATURES),
         "r2": round(r2, 4),
         "total_err_pct": round(total_err_pct, 2),
         "n_layers": len(y_all),
+        "n_prints": len(groups),
         "fitted_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    cv_errors: list[float] = []
+    if len(groups) >= 2:
+        for holdout_idx, (X_holdout, y_holdout) in enumerate(groups):
+            train = [group for idx, group in enumerate(groups) if idx != holdout_idx]
+            fold_beta = _fit_beta(train)
+            if fold_beta is None or not y_holdout:
+                continue
+            fold_pred = np.asarray(X_holdout, dtype=float) @ fold_beta
+            actual_total = float(np.asarray(y_holdout, dtype=float).sum())
+            if actual_total > 0:
+                cv_errors.append((float(fold_pred.sum()) - actual_total) / actual_total * 100.0)
+    model["cv_total_errors_pct"] = [round(value, 2) for value in cv_errors]
+    model["cv_median_abs_total_err_pct"] = (
+        round(statistics.median(abs(value) for value in cv_errors), 2)
+        if cv_errors else None
+    )
+    model["cv_worst_abs_total_err_pct"] = (
+        round(max(abs(value) for value in cv_errors), 2) if cv_errors else None
+    )
+    return model
 
 
 def _gate(model: dict[str, Any]) -> str | None:
     """Reason this fit must not be used, or None if it passes."""
+    if model["n_prints"] < MIN_PRINTS_FOR_FIT:
+        return f"too_few_prints ({model['n_prints']} < {MIN_PRINTS_FOR_FIT})"
     if model["n_layers"] < MIN_LAYERS_FOR_FIT:
         return f"too_few_layers ({model['n_layers']} < {MIN_LAYERS_FOR_FIT})"
     if abs(model["total_err_pct"]) > MAX_TOTAL_ERR_PCT:
         return f"total_err ({model['total_err_pct']}% > {MAX_TOTAL_ERR_PCT}%)"
+    cv_median = model.get("cv_median_abs_total_err_pct")
+    cv_worst = model.get("cv_worst_abs_total_err_pct")
+    if cv_median is None or cv_median > MAX_CV_MEDIAN_TOTAL_ERR_PCT:
+        return f"cv_median_total_err ({cv_median}% > {MAX_CV_MEDIAN_TOTAL_ERR_PCT}%)"
+    if cv_worst is None or cv_worst > MAX_CV_WORST_TOTAL_ERR_PCT:
+        return f"cv_worst_total_err ({cv_worst}% > {MAX_CV_WORST_TOTAL_ERR_PCT}%)"
     if model["r2"] >= MIN_FIT_R2:
         return None
     if model["r2"] >= MIN_FIT_R2_FLOOR and abs(model["total_err_pct"]) <= TIGHT_TOTAL_ERR_PCT:
@@ -214,7 +266,9 @@ def scan_calibration_report(db: Session) -> dict:
     # weights each print's group equally regardless of its own layer count.
     by_key: dict[str, list[tuple[list[list[float]], list[float], str]]] = defaultdict(list)
 
-    for record, session in iter_linked_prints(db):
+    linked = list(iter_linked_prints(db))
+    link_counts = Counter(record.session_id for record, _ in linked)
+    for record, session in linked:
         snapshot = (record.metadata_json or {}).get("prediction") or {}
         geo = snapshot.get("scan_geometry")
         if not isinstance(geo, dict):
@@ -222,6 +276,14 @@ def scan_calibration_report(db: Session) -> dict:
         if session_classification(session) not in PRINT_CLASSIFICATIONS:
             rows.append({"record_id": record.record_id, "session_id": record.session_id,
                          "used": False, "reason": "not_a_print"})
+            continue
+        if calibration_is_excluded(record, "scan"):
+            rows.append({"record_id": record.record_id, "session_id": record.session_id,
+                         "used": False, "reason": "manually_excluded"})
+            continue
+        if link_counts[record.session_id] > 1:
+            rows.append({"record_id": record.record_id, "session_id": record.session_id,
+                         "used": False, "reason": "duplicate_session_link"})
             continue
         burn = session_burn_by_layer(record.session_id, db)
         if not burn:
@@ -256,6 +318,7 @@ def scan_calibration_report(db: Session) -> dict:
         "records": rows,
         "candidates": candidates,
         "min_layers_for_fit": MIN_LAYERS_FOR_FIT,
+        "min_prints_for_fit": MIN_PRINTS_FOR_FIT,
         "min_r2": MIN_FIT_R2,
         "max_total_err_pct": MAX_TOTAL_ERR_PCT,
     }
@@ -297,6 +360,13 @@ def recalibrate_scan_and_apply(db: Session) -> dict:
                         key, model["r2"], model["n_layers"], model["total_err_pct"])
             applied[key] = stored
 
+    # Models are auto-managed when unlocked. A key that is no longer backed by
+    # any candidate (records deleted/reclassified/excluded) is stale too.
+    for key in list(current):
+        if key not in report["candidates"] and key not in removed:
+            del current[key]
+            removed.append(key)
+
     if removed:
         logger.info("scan calibration: removed stale model(s) no longer supported: %s", removed)
     if applied or removed:
@@ -312,8 +382,11 @@ __all__ = [
     "recalibrate_scan_and_apply",
     "session_burn_by_layer",
     "MIN_LAYERS_FOR_FIT",
+    "MIN_PRINTS_FOR_FIT",
     "MIN_FIT_R2",
     "MIN_FIT_R2_FLOOR",
     "MAX_TOTAL_ERR_PCT",
     "TIGHT_TOTAL_ERR_PCT",
+    "MAX_CV_MEDIAN_TOTAL_ERR_PCT",
+    "MAX_CV_WORST_TOTAL_ERR_PCT",
 ]

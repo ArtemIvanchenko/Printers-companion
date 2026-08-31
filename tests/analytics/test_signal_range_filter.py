@@ -9,7 +9,7 @@ forecast as a genuine reading.
 """
 import pytest
 
-from analytics.telemetry_parser import compute_full_signal_stats
+from analytics.telemetry_parser import compute_full_signal_stats, downsample_full_series
 
 _HEADER = ("      Time|       LIR|       ST4|       ST3|       ST5|"
            "    Flow T|    Flow H|       SO1|       SO2|       SF1|\n")
@@ -61,6 +61,22 @@ def test_absurd_filter_applies_without_any_profile_range(tmp_path):
 
     assert stats["ST3"]["mean"] == pytest.approx(25.0)
     assert stats["ST3"]["out_of_range"] == 3
+
+
+def test_downsample_drops_finite_firmware_garbage(tmp_path):
+    rows = [{"Flow H": 7.0}] * 9 + [{"Flow H": -2.58e18}]
+    sampled = downsample_full_series(_log(tmp_path, rows), ["Flow H"], max_points=10)
+    assert sampled["Flow H"][-1] is None
+
+
+def test_downsample_can_clip_to_active_clock_window(tmp_path):
+    rows = [{"SO1": float(i)} for i in range(60)]
+    sampled = downsample_full_series(
+        _log(tmp_path, rows), ["SO1"], max_points=60,
+        start_clock_seconds=10, end_clock_seconds=19,
+        valid_ranges={},
+    )
+    assert sampled["SO1"] == [float(i) for i in range(10, 20)]
 
 
 class TestWrongProfileRangeIsIgnored:

@@ -7,6 +7,7 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from api.main import app
+from domain.models.events import LayerSnapshot
 from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession
 from storage.db.session import SessionLocal
@@ -40,6 +41,16 @@ class TestAccuracyReport:
             classification="REAL_PRINT",
             context={"runtime_payload": {"group": {"classification": "REAL_PRINT"}}},
         ))
+        pour_ms = 500.0
+        burn_ms = actual_hours * 3_600_000 / 100 - pour_ms
+        db.add_all([
+            LayerSnapshot(
+                session_id=sid, layer=layer,
+                features={"burn_ms": burn_ms, "pour_ms": pour_ms},
+            )
+            for layer in range(1, 101)
+        ])
+        raw_recoat = 100 * pour_ms / 3_600_000
         db.add(PrintRecord(
             record_id=f"pr_acc_{idx}", name=f"acc{idx}", session_id=sid, material=material,
             metadata_json={"prediction": {
@@ -48,7 +59,14 @@ class TestAccuracyReport:
                 "method": "cohatch",
                 "print_hours": raw_predicted,
                 "raw_print_hours": raw_predicted,
+                "raw_scan_hours": raw_predicted - raw_recoat,
+                "raw_recoat_hours": raw_recoat,
+                "scan_hours": raw_predicted - raw_recoat,
+                "recoat_hours": raw_recoat,
                 "correction_factor": 1.0,
+                "scan_source": "physics",
+                "layer_count": 100,
+                "layer_thickness_mm": 0.06,
                 "cost_total_rub": 1,
             }},
         ))
@@ -88,10 +106,10 @@ class TestAccuracyReport:
             params = repo.get_machine_params()
             db.rollback()
 
-        assert result["applied"].get("steel") == pytest.approx(1.3, abs=0.05)
-        assert (params["time_correction_by_mat"] or {}).get("steel") == pytest.approx(1.3, abs=0.05)
-        assert "aluminum" not in result["applied"]
-        assert any(s["material"] == "aluminum" for s in result["skipped"])
+        assert result["applied"].get("steel@0.060") == pytest.approx(1.3, abs=0.05)
+        assert (params["time_correction_by_mat"] or {}).get("steel@0.060") == pytest.approx(1.3, abs=0.05)
+        assert "aluminum@0.060" not in result["applied"]
+        assert any(s["mode"] == "aluminum@0.060" for s in result["skipped"])
 
     def test_recalibrate_respects_manual_lock(self):
         from analytics.prediction.accuracy import recalibrate_and_apply
@@ -131,9 +149,12 @@ class TestCorrectionFactor:
         base = estimate_print_time(s, params, "steel", stl_bytes=CUBE_STL)
         doubled = estimate_print_time(
             s, {**params, "time_correction_factor": 2.0}, "steel", stl_bytes=CUBE_STL)
-        # Коэффициент масштабирует всю оценку (скан, отсыпку и итог)
+        # Коэффициент относится только к скану; отсыпка калибруется отдельно.
         assert doubled.scan_hours == pytest.approx(base.scan_hours * 2, rel=0.01)
-        assert doubled.print_hours == pytest.approx(base.print_hours * 2, rel=0.01)
+        assert doubled.recoat_hours == pytest.approx(base.recoat_hours, rel=0.01)
+        assert doubled.print_hours == pytest.approx(
+            base.scan_hours * 2 + base.recoat_hours, rel=0.01,
+        )
         # raw остаётся некалиброванным — основа для обучения
         assert doubled.raw_print_hours == pytest.approx(base.raw_print_hours, rel=0.01)
 
@@ -463,7 +484,8 @@ class TestLightGBMDefectModel:
 
         # MIN_LABELS_GBM is 40 with at least 10 of the minority class; below
         # that the logistic regression is used instead.
-        data = [(self._group(0.1), 0) for _ in range(24)] + [(self._group(0.9), 1) for _ in range(24)]
+        data = [item for _ in range(24)
+                for item in ((self._group(0.1), 0), (self._group(0.9), 1))]
         model = train_defect_model(data)
         assert model is not None
         assert model["type"] == "lightgbm"
@@ -473,11 +495,13 @@ class TestLightGBMDefectModel:
         safe = predict_defect_risk(self._group(0.1), model)
         assert risky["method"] == "lightgbm"
         assert risky["risk"] > safe["risk"]
+        assert all("direction" in factor for factor in risky["top_factors"])
 
     def test_logreg_with_medium_labels(self):
         from analytics.prediction.defect_risk import train_defect_model
 
-        data = [(self._group(0.1), 0) for _ in range(12)] + [(self._group(0.9), 1) for _ in range(12)]
+        data = [item for _ in range(12)
+                for item in ((self._group(0.1), 0), (self._group(0.9), 1))]
         model = train_defect_model(data)
         assert model is not None
         assert model["type"] == "logreg"

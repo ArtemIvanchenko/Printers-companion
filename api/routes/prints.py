@@ -204,6 +204,7 @@ def _attach_plan_vs_fact(repo: PrintsRepository, records: list[dict]) -> None:
     pauses reports an error the geometry never made. On one real build that gap
     was 18 of 47.6 hours.
     """
+    from analytics.prediction.accuracy import _actual_hours, _machine_hours_from_logs
     from domain.models.sessions import BuildSession
 
     session_ids = [r["session_id"] for r in records if r.get("session_id")]
@@ -228,10 +229,15 @@ def _attach_plan_vs_fact(repo: PrintsRepository, records: list[dict]) -> None:
             layers = features.get("layers")
             if features.get("idle_min") is not None:
                 idle_hours = round(features["idle_min"] / 60, 2)
-            if features.get("machine_min"):
-                actual_hours, actual_source = round(features["machine_min"] / 60, 2), "machine_log"
-            elif features.get("duration_min"):
-                actual_hours, actual_source = round(features["duration_min"] / 60, 2), "wall_span"
+            machine_hours = _machine_hours_from_logs(
+                session.session_id, snapshot.get("layer_count"), repo.db,
+            )
+            if machine_hours is not None:
+                actual_hours, actual_source = round(machine_hours, 2), "machine_log"
+            else:
+                wall_hours = _actual_hours(session)
+                if wall_hours is not None:
+                    actual_hours, actual_source = round(wall_hours, 2), "wall_span"
 
         error_pct = None
         if predicted_hours and actual_hours:
@@ -368,9 +374,20 @@ def _combined_prediction(
     if prediction is not None and db is not None and prediction["source"] in ("calculated", "calibrated"):
         try:
             from analytics.prediction.accuracy import calibration_interval_hours
-            interval = calibration_interval_hours(db, material, est.raw_print_hours)
+            interval = calibration_interval_hours(
+                db, material, float(params["layer_thickness_mm"]),
+                est.raw_scan_hours, est.raw_recoat_hours,
+            )
             if interval is not None:
                 prediction["interval"] = list(interval)
+                warning = _calibration_mismatch_warning(
+                    est.print_hours,
+                    interval,
+                    material,
+                    float(params["layer_thickness_mm"]),
+                )
+                if warning:
+                    prediction.setdefault("warnings", []).append(warning)
         except Exception:
             logger.exception("prints: calibration interval lookup failed")
 
@@ -383,6 +400,8 @@ def _combined_prediction(
         "layer_count": est.layer_count,
         "height_mm": round(est.height_mm, 2),
         "print_hours": round(est.print_hours, 3),
+        "raw_scan_hours": round(est.raw_scan_hours, 3),
+        "raw_recoat_hours": round(est.raw_recoat_hours, 3),
         "raw_print_hours": round(est.raw_print_hours, 3),
         "correction_factor": round(est.correction_factor, 3),
         "scan_hours": round(est.scan_hours, 3),
@@ -400,6 +419,30 @@ def _combined_prediction(
             "laser_count": int(params.get("laser_count") or 1),
         } if est.geometry_series is not None else None,
     }
+
+
+def _calibration_mismatch_warning(
+    point_hours: float,
+    interval: tuple[float, float],
+    material: str,
+    layer_thickness_mm: float,
+) -> str | None:
+    """Warn when history contradicts the uncalibrated physics point.
+
+    An out-of-range correction factor is deliberately not auto-applied, but
+    silently returning the raw point would still make a known-bad number look
+    authoritative.  Keep the point for auditability and surface the empirical
+    interval as the operator-facing safety signal.
+    """
+    low, high = interval
+    if low <= point_hours <= high:
+        return None
+    mode = f"{material.strip().lower()}@{layer_thickness_mm:.3f}"
+    return (
+        f"История режима {mode} не подтверждает физическую точку {point_hours:.2f} ч: "
+        f"она вне эмпирического интервала {low:.2f}–{high:.2f} ч. "
+        "Используйте интервал и проверьте параметры сканирования/полноту геометрии."
+    )
 
 
 def params_for_record(repo: PrintsRepository, record: dict) -> dict:
@@ -434,6 +477,24 @@ def params_for_record(repo: PrintsRepository, record: dict) -> dict:
     return params
 
 
+def _geometry_quality(record: dict) -> dict:
+    """Operator/importer assessment of how complete the attached geometry is."""
+    value = (record.get("metadata_json") or {}).get("geometry_quality") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _assert_geometry_usable(record: dict) -> None:
+    """Refuse a customer-facing estimate for a plate known to be incomplete."""
+    quality = _geometry_quality(record)
+    if quality.get("status") != "incomplete":
+        return
+    note = quality.get("note") or "компоновка содержит не все детали или поддержки"
+    raise HTTPException(
+        422,
+        "Расчёт заблокирован: геометрия карточки помечена как неполная. " + str(note),
+    )
+
+
 def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict:
     """Run the PySLM time/cost estimate over the whole platform and store the snapshot.
 
@@ -446,6 +507,7 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
     record = repo.get_print_record(record_id)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
+    _assert_geometry_usable(record)
 
     files = repo.list_print_files(record_id)
     platform_files = [f for f in files if f["file_type"] in ("stl", "stl_supports")]
@@ -488,6 +550,17 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
 
     time_prediction = result.get("prediction")
     cost_prediction = result.get("cost_prediction")
+    geometry_quality = _geometry_quality(record)
+    quality_status = geometry_quality.get("status") or "standard"
+    quality_warning = None
+    if quality_status == "lower_bound":
+        quality_warning = geometry_quality.get("note") or (
+            "Оценка является нижней границей: часть печатаемой геометрии отсутствует."
+        )
+    prediction_warnings = list((time_prediction or {}).get("warnings", []))
+    if quality_warning and quality_warning not in prediction_warnings:
+        prediction_warnings.append(str(quality_warning))
+
     snapshot: dict = {
         "estimated_at": datetime.now(timezone.utc).isoformat(),
         "n_parts": len(parts),
@@ -507,6 +580,10 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         # raw (uncorrected) hours feed the calibration loop, so the learned
         # factor stays absolute and never compounds on itself.
         "raw_print_hours": result.get("raw_print_hours", result["print_hours"]),
+        "raw_scan_hours": result.get("raw_scan_hours"),
+        "raw_recoat_hours": result.get("raw_recoat_hours"),
+        "scan_hours": result.get("scan_hours"),
+        "recoat_hours": result.get("recoat_hours"),
         "correction_factor": result.get("correction_factor", 1.0),
         "scan_source": result.get("scan_source", "physics"),
         "cost_total_rub": result["cost_total_rub"],
@@ -516,9 +593,11 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         # with this whole snapshot already being metadata_json["prediction"].
         "prediction_source": (time_prediction or {}).get("source"),
         "prediction_interval": (time_prediction or {}).get("interval"),
-        "prediction_warnings": (time_prediction or {}).get("warnings", []),
+        "prediction_warnings": prediction_warnings,
         "prediction_explanation": (time_prediction or {}).get("explanation"),
         "cost_prediction_warnings": (cost_prediction or {}).get("warnings", []),
+        "estimate_quality": quality_status,
+        "geometry_quality": geometry_quality or None,
     }
 
     meta = dict(record.get("metadata_json") or {})
@@ -540,6 +619,8 @@ def _assert_estimatable(repo: PrintsRepository, record: dict) -> None:
     away instead of watching a background job produce nothing.
     """
     from api.routes.machine_settings import missing_for_estimation
+
+    _assert_geometry_usable(record)
 
     files = repo.list_print_files(record["record_id"])
     if not [f for f in files if f["file_type"] in ("stl", "stl_supports")]:

@@ -4,12 +4,13 @@ The prediction lives in the record's own snapshot, the outcome lives on the
 linked log session, and until now nothing joined them — so "did the estimate
 hold?" could not be answered from the list at all.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from domain.models.events import LayerSnapshot
 from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession
 from storage.db.session import SessionLocal
@@ -26,9 +27,11 @@ def db():
 
 def _session(db, session_id: str, *, machine_min=None, duration_min=None,
              idle_min=None, layers=174, classification="REAL_PRINT"):
+    start = datetime(2026, 3, 27, 10, tzinfo=timezone.utc)
     db.add(BuildSession(
         session_id=session_id,
-        start_ts=datetime(2026, 3, 27, 10, tzinfo=timezone.utc),
+        start_ts=start,
+        end_ts=start + timedelta(minutes=duration_min) if duration_min else None,
         classification=classification,
         context={"runtime_payload": {"group": {
             "classification": classification,
@@ -38,13 +41,28 @@ def _session(db, session_id: str, *, machine_min=None, duration_min=None,
             },
         }}},
     ))
+    if machine_min and layers:
+        pour_ms = 500.0
+        burn_ms = machine_min * 60_000 / layers - pour_ms
+        db.add_all([
+            LayerSnapshot(
+                session_id=session_id, layer=layer,
+                features={"burn_ms": burn_ms, "pour_ms": pour_ms},
+            )
+            for layer in range(1, layers + 1)
+        ])
     db.commit()
 
 
-def _record(db, record_id: str, *, session_id=None, predicted_hours=None, cost=None):
+def _record(db, record_id: str, *, session_id=None, predicted_hours=None, cost=None,
+            layer_count=174):
     metadata = {}
     if predicted_hours is not None:
-        metadata["prediction"] = {"print_hours": predicted_hours, "cost_total_rub": cost}
+        metadata["prediction"] = {
+            "print_hours": predicted_hours,
+            "cost_total_rub": cost,
+            "layer_count": layer_count,
+        }
     db.add(PrintRecord(
         record_id=record_id, name=f"печать {record_id}", material="alsi10mg",
         session_id=session_id, metadata_json=metadata,
@@ -81,6 +99,15 @@ class TestPlanVsFactSummary:
         summary = _summary("pr_ws")
         assert summary["actual_source"] == "wall_span"
         assert summary["actual_hours"] == pytest.approx(4.4)
+
+    def test_partial_machine_summary_is_not_trusted(self, db):
+        _session(db, "s_partial", machine_min=264.0, duration_min=492.0, layers=174)
+        _record(db, "pr_partial", session_id="s_partial", predicted_hours=4.1,
+                layer_count=1000)
+
+        summary = _summary("pr_partial")
+        assert summary["actual_source"] == "wall_span"
+        assert summary["actual_hours"] == pytest.approx(8.2)
 
     def test_unlinked_record_reports_plan_without_fact(self, db):
         _record(db, "pr_plan", predicted_hours=4.1, cost=12400)

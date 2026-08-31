@@ -172,6 +172,8 @@ class PlateEstimate:
     recoat_hours: float
     print_hours: float
     total_days: float
+    raw_scan_hours: float
+    raw_recoat_hours: float
     raw_print_hours: float
     correction_factor: float
     layer_count: int            # plate layers (union height)
@@ -194,6 +196,8 @@ class PlateEstimate:
             print_hours=self.print_hours,
             total_days=self.total_days,
             method=self.method,
+            raw_scan_hours=self.raw_scan_hours,
+            raw_recoat_hours=self.raw_recoat_hours,
             raw_print_hours=self.raw_print_hours,
             correction_factor=self.correction_factor,
             breakdown={"recoat_time_ms": round(self.recoat_time_ms, 1),
@@ -242,19 +246,19 @@ def _physics_scan_seconds(
 # Cache format version: bump if compute_layer_series's output shape changes
 # (e.g. a new GEOMETRY_FEATURES entry) so stale rows stop being served instead
 # of silently returned as if complete.
-_GEOMETRY_CACHE_VERSION = 1
+_GEOMETRY_CACHE_VERSION = 2
 
 
-def _geometry_cache_key(named: list[tuple[str, bytes, str]], hatch_distance_mm: float) -> str:
+def _geometry_cache_key(
+    named: list[tuple[str, bytes, str]], hatch_distance_mm: float,
+    layer_thickness_mm: float,
+) -> str:
     """Content-addressed key for a plate's LayerGeometrySeries.
 
     Keyed on each body's checksum (in mesh order, part/support tagged) and
-    hatch_distance_mm only — material and layer_thickness_mm do not affect
-    compute_layer_series's sampled series. Thickness shifts the sample points
-    slightly (half a layer of boundary padding); measured impact on summed
-    hatch_mm was <=0.21% for a 2x thickness change (0.06->0.12mm on a real
-    support+part pair), below the already-accepted +-0.7% noise floor of the
-    90-level sampling grid, so it is deliberately left out of the key.
+    hatch distance and layer thickness. ``compute_layer_series`` uses thickness
+    when positioning boundary samples, so omitting it can return geometry
+    computed for another print mode even when the difference is usually small.
 
     Order matters: two records with the same files attached in a different
     order would (correctly) miss the cache, since LayerGeometrySeries.
@@ -262,7 +266,11 @@ def _geometry_cache_key(named: list[tuple[str, bytes, str]], hatch_distance_mm: 
     missed optimization, never a wrong answer — a miss just recomputes.
     """
     tokens = [f"{kind}:{hashlib.sha256(blob).hexdigest()}" for _, blob, kind in named]
-    raw = "|".join(tokens) + f"|hatch={hatch_distance_mm:.6f}|v={_GEOMETRY_CACHE_VERSION}"
+    raw = (
+        "|".join(tokens)
+        + f"|hatch={hatch_distance_mm:.6f}|layer={layer_thickness_mm:.6f}"
+        + f"|v={_GEOMETRY_CACHE_VERSION}"
+    )
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -324,7 +332,10 @@ def estimate_plate(
         metas.append((name, kind, mesh, volume))
 
     series = None
-    cache_key = _geometry_cache_key(named, hatch_distance) if geometry_cache is not None else None
+    cache_key = (
+        _geometry_cache_key(named, hatch_distance, thickness)
+        if geometry_cache is not None else None
+    )
     if cache_key is not None:
         cached = geometry_cache.get_geometry_cache(cache_key)
         if cached is not None:
@@ -358,7 +369,7 @@ def estimate_plate(
     else:
         raw_scan_hours = _physics_scan_seconds(totals, params, material, laser_count, warnings) / 3600.0
         scan_source = "physics"
-        factor = resolve_correction_factor(params, material)
+        factor = resolve_correction_factor(params, material, thickness)
         warnings.append(
             "Скан рассчитан по паспортным скоростям (нет откалиброванной модели для "
             f"режима {scan_model_key(material, thickness)}) — точность ограничена; "
@@ -390,9 +401,11 @@ def estimate_plate(
 
     return PlateEstimate(
         scan_hours=raw_scan_hours * factor,
-        recoat_hours=raw_recoat_hours * factor,
-        print_hours=raw_total * factor,
-        total_days=raw_total * factor / 24.0,
+        recoat_hours=raw_recoat_hours,
+        print_hours=raw_scan_hours * factor + raw_recoat_hours,
+        total_days=(raw_scan_hours * factor + raw_recoat_hours) / 24.0,
+        raw_scan_hours=raw_scan_hours,
+        raw_recoat_hours=raw_recoat_hours,
         raw_print_hours=raw_total,
         correction_factor=factor,
         layer_count=plate_layers,
@@ -406,7 +419,7 @@ def estimate_plate(
         geometry_series=series,
         warnings=warnings,
         prediction=build_time_prediction(
-            print_hours=raw_total * factor,
+            print_hours=raw_scan_hours * factor + raw_recoat_hours,
             correction_factor=factor,
             scan_source=scan_source,
             recoat_source=recoat_source,

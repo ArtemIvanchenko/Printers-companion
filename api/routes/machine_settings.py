@@ -6,6 +6,7 @@ the dashboard — calculation code must never hardcode them.
 from __future__ import annotations
 
 import logging
+import math
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -23,6 +24,11 @@ _NUMERIC_FIELDS = {
     "build_area_cm2", "time_correction_factor",
 }
 _INT_FIELDS = {"laser_count"}
+_STRICTLY_POSITIVE_FIELDS = {
+    "hatch_speed_mm_s", "hatch_distance_mm",
+    "layer_thickness_mm", "recoat_time_ms", "jump_speed_mm_s",
+    "filter_lifetime_hours", "build_area_cm2", "time_correction_factor",
+}
 _DICT_FIELDS = {
     "material_densities", "hatch_speeds_by_mat", "time_correction_by_mat", "recoat_time_by_mat",
 }
@@ -108,17 +114,25 @@ def update_machine_params(
                 values[key] = None
                 continue
             try:
+                if isinstance(raw, bool):
+                    raise TypeError
                 value = float(raw)
             except (TypeError, ValueError):
                 raise HTTPException(422, f"Поле '{key}' должно быть числом")
+            if not math.isfinite(value):
+                raise HTTPException(422, f"Поле '{key}' должно быть конечным числом")
             if value < 0:
                 raise HTTPException(422, f"Поле '{key}' не может быть отрицательным")
+            if key in _STRICTLY_POSITIVE_FIELDS and value == 0:
+                raise HTTPException(422, f"Поле '{key}' должно быть > 0")
             values[key] = value
         elif key in _INT_FIELDS:
             if raw is None:
                 values[key] = None
                 continue
             try:
+                if isinstance(raw, bool):
+                    raise TypeError
                 value = int(raw)
             except (TypeError, ValueError):
                 raise HTTPException(422, f"Поле '{key}' должно быть целым числом")
@@ -130,13 +144,25 @@ def update_machine_params(
                 raise HTTPException(422, f"Поле '{key}' должно быть объектом")
             cleaned: dict[str, float] = {}
             for mat, num in raw.items():
+                material = str(mat).strip()
+                if not material:
+                    raise HTTPException(422, f"Ключ материала в '{key}' не может быть пустым")
                 try:
-                    cleaned[str(mat)] = float(num)
+                    if isinstance(num, bool):
+                        raise TypeError
+                    value = float(num)
                 except (TypeError, ValueError):
                     raise HTTPException(422, f"Значение '{key}.{mat}' должно быть числом")
+                if not math.isfinite(value) or value <= 0:
+                    raise HTTPException(
+                        422, f"Значение '{key}.{mat}' должно быть конечным числом > 0",
+                    )
+                cleaned[material] = value
             values[key] = cleaned
         elif key in _BOOL_FIELDS:
-            values[key] = bool(raw)
+            if not isinstance(raw, bool):
+                raise HTTPException(422, f"Поле '{key}' должно быть true или false")
+            values[key] = raw
         # Unknown keys are ignored — keeps the endpoint forward-compatible
 
     # Manually editing a correction factor or recoat time pins it: auto-calibration
@@ -161,6 +187,7 @@ _PRESET_NUMERIC = {
     "layer_thickness_mm", "hatch_speed_mm_s", "contour_speed_mm_s",
     "hatch_distance_mm", "jump_speed_mm_s", "jump_delay_ms", "laser_power_w",
 }
+_PRESET_POSITIVE = _PRESET_NUMERIC - {"jump_delay_ms"}
 
 
 def _validate_preset_payload(payload: dict) -> dict:
@@ -181,14 +208,22 @@ def _validate_preset_payload(payload: dict) -> dict:
                 values[key] = None
                 continue
             try:
+                if isinstance(raw, bool):
+                    raise TypeError
                 v = float(raw)
             except (TypeError, ValueError):
                 raise HTTPException(422, f"Поле '{key}' должно быть числом")
+            if not math.isfinite(v):
+                raise HTTPException(422, f"Поле '{key}' должно быть конечным числом")
             if v < 0:
                 raise HTTPException(422, f"Поле '{key}' не может быть отрицательным")
+            if key in _PRESET_POSITIVE and v == 0:
+                raise HTTPException(422, f"Поле '{key}' должно быть > 0")
             values[key] = v
         elif key == "is_default":
-            values["is_default"] = bool(raw)
+            if not isinstance(raw, bool):
+                raise HTTPException(422, "Поле 'is_default' должно быть true или false")
+            values["is_default"] = raw
         elif key == "notes":
             values["notes"] = (raw or "").strip() or None
     return values

@@ -285,25 +285,31 @@ def detect_signal_shifts(
         return []
 
     findings: list[dict[str, Any]] = []
-    session_ids = df["session_id"].to_list()
+    all_session_ids = df["session_id"].to_list()
 
     for sig in _signal_columns(df):
         col = f"{sig}__mean"
         if col not in df.columns:
             continue
-        vals = df[col].drop_nulls().to_numpy()
+        aligned = df.select("session_id", col).drop_nulls()
+        vals = aligned[col].to_numpy()
+        session_ids = aligned["session_id"].to_list()
         if len(vals) < MIN_SESSIONS_FOR_SHIFT:
             continue
 
         # PELT with L2 cost: optimal segmentation, penalty scaled to variance
         sigma2 = float(np.var(vals)) or 1e-12
-        algo = rpt.Pelt(model="l2", min_size=2).fit(vals.reshape(-1, 1))
+        # ``jump=1`` keeps the reported session exact. The library default
+        # searches only every fifth index, which can attribute a shift to a
+        # neighbouring build — unacceptable when the operator investigates it.
+        algo = rpt.Pelt(model="l2", min_size=2, jump=1).fit(vals.reshape(-1, 1))
         breakpoints = algo.predict(pen=3.0 * sigma2)  # BIC-style penalty
 
         prev = 0
-        for bp in breakpoints[:-1]:  # last breakpoint is len(vals)
+        for bp_idx, bp in enumerate(breakpoints[:-1]):  # last breakpoint is len(vals)
+            next_bp = breakpoints[bp_idx + 1]
             before = float(np.mean(vals[prev:bp]))
-            after = float(np.mean(vals[bp:]))
+            after = float(np.mean(vals[bp:next_bp]))
             prev = bp
             if abs(before) < 1e-9:
                 continue
@@ -316,7 +322,7 @@ def detect_signal_shifts(
                 "group":            _group_for(sessions, sig),
                 "direction":        "up" if after > before else "down",
                 "at_session":       session_ids[bp] if bp < len(session_ids) else session_ids[-1],
-                "session_index":    bp,
+                "session_index":    all_session_ids.index(session_ids[bp]) if bp < len(session_ids) else len(all_session_ids) - 1,
                 "level_before":     round(before, 6),
                 "level_after":      round(after, 6),
                 "jump_pct":         round(jump_pct, 1),

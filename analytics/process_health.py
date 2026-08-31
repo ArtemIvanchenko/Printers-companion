@@ -7,9 +7,9 @@ Three capabilities, all pure functions over the compact telemetry dict produced 
 2. analyze_layer_burn_drift  — per-layer burn-time trend and outlier layers.
 3. atmosphere_readiness_score — 0..100 composite of inert-atmosphere quality.
 
-Units of the raw channels are not fully confirmed (see signals.yaml), so detection
-is built on *relative* statistics (z-scores, coefficient of variation, trend slope)
-which are robust to unknown scaling, plus a few clearly-labelled heuristic levels.
+Relative statistics detect changes, while passport alarm thresholds detect a
+stable but unsafe absolute level. Both are required: perfectly stable
+atmospheric oxygen is not a healthy inert chamber.
 """
 from __future__ import annotations
 
@@ -19,15 +19,35 @@ from typing import Any
 
 
 def _clean(values: list[Any]) -> list[float]:
-    """Return finite floats only — drops None, NaN, Inf, and non-numeric values."""
+    """Return finite, non-firmware-garbage floats."""
     result = []
     for v in values:
         if not isinstance(v, (int, float)):
             continue
         f = float(v)
-        if math.isfinite(f):
+        if math.isfinite(f) and abs(f) <= 1e7:
             result.append(f)
     return result
+
+
+def _clean_signal(signal: str, values: list[Any]) -> list[float]:
+    """Apply physical bounds when the profile agrees with the sampled data."""
+    cleaned = _clean(values)
+    if not cleaned:
+        return []
+    from analytics.thresholds import load_valid_ranges
+
+    rng = load_valid_ranges().get(signal) or {}
+    if not rng:
+        return cleaned
+    accepted = [
+        value for value in cleaned
+        if (rng.get("min_val") is None or value >= rng["min_val"])
+        and (rng.get("max_val") is None or value <= rng["max_val"])
+    ]
+    # Candidate profile mappings can have wrong units. Match the full-stats
+    # parser: ignore a range that rejects more than 20% instead of erasing data.
+    return accepted if len(accepted) >= 0.8 * len(cleaned) else cleaned
 
 
 def _pstdev(values: list[float]) -> float:
@@ -94,15 +114,21 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
     Returns anomaly dicts: {signal, semantic, severity, kind, value, z_score, detail}.
     """
     anomalies: list[dict[str, Any]] = []
+    from analytics.thresholds import load_alarm_thresholds
+
+    thresholds = load_alarm_thresholds()
 
     def _scan(group: str, semantic: str, severity: str):
         for col, raw in (telemetry.get(group) or {}).items():
-            values = _clean(raw)
-            peak = _robust_spike(values)
-            if peak is None:
+            values = _clean_signal(col, raw)
+            if not values:
                 continue
-            peak_idx, z = peak
-            if abs(z) >= z_threshold:
+            peak = _robust_spike(values)
+            if peak is not None:
+                peak_idx, z = peak
+            else:
+                peak_idx, z = 0, 0.0
+            if peak is not None and abs(z) >= z_threshold:
                 anomalies.append({
                     "signal": col,
                     "semantic": semantic,
@@ -111,6 +137,29 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
                     "value": round(values[peak_idx], 4),
                     "z_score": round(z, 2),
                     "detail": f"{semantic} '{col}' отклонение {z:+.1f} (макс {max(values):.3g})",
+                })
+
+            thr = thresholds.get(col) or {}
+            high = thr.get("alarm_high")
+            low = thr.get("alarm_low")
+            alarm_values = [
+                value for value in values
+                if (high is not None and value > high) or (low is not None and value < low)
+            ]
+            if alarm_values:
+                direction = "выше" if high is not None and max(alarm_values) > high else "ниже"
+                boundary = high if direction == "выше" else low
+                anomalies.append({
+                    "signal": col,
+                    "semantic": semantic,
+                    "kind": "threshold",
+                    "severity": severity,
+                    "value": round(max(alarm_values) if direction == "выше" else min(alarm_values), 4),
+                    "alarm_fraction": round(len(alarm_values) / len(values), 3),
+                    "detail": (
+                        f"{semantic} '{col}': {len(alarm_values)}/{len(values)} измерений "
+                        f"{direction} порога {boundary:g}"
+                    ),
                 })
 
     # Oxygen excursions are the most safety-relevant for metal AM (oxidation).
@@ -141,11 +190,13 @@ def analyze_layer_burn_drift(layer_burn_times: list[dict[str, Any]]) -> dict[str
     denom = sum((x - mean_x) ** 2 for x in xs)
     slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom if denom else 0.0
 
-    # Trend judged relative to the mean burn time so it is unit-robust.
-    rel = (slope / mean_y) if mean_y else 0.0
-    if rel > 0.01:
+    # Judge the estimated change over the observed layer span. Comparing a
+    # per-layer slope directly with the mean made the same 10→20 s drift look
+    # weaker merely because a build had more layers.
+    rel_change = slope * (max(xs) - min(xs)) / mean_y if mean_y else 0.0
+    if rel_change > 0.05:
         trend = "rising"
-    elif rel < -0.01:
+    elif rel_change < -0.05:
         trend = "falling"
     else:
         trend = "stable"
@@ -160,6 +211,7 @@ def analyze_layer_burn_drift(layer_burn_times: list[dict[str, Any]]) -> dict[str
         "n_layers": len(points),
         "mean_sec": round(mean_y, 1),
         "slope_sec_per_layer": round(slope, 4),
+        "relative_change_pct": round(rel_change * 100, 1),
         "trend": trend,
         "outlier_layers": outliers[:20],
     }
@@ -177,14 +229,34 @@ def atmosphere_readiness_score(telemetry: dict[str, Any]) -> dict[str, Any]:
     """
     factors: dict[str, float] = {}
 
+    from analytics.thresholds import load_alarm_thresholds
+
+    thresholds = load_alarm_thresholds()
+
     def _stability_factor(group: str) -> float | None:
         series = telemetry.get(group) or {}
-        cvs = [_coefficient_of_variation(_clean(v)) for v in series.values() if len(_clean(v)) >= 5]
-        if not cvs:
+        channel_factors: list[float] = []
+        for signal, raw in series.items():
+            values = _clean_signal(signal, raw)
+            if len(values) < 5:
+                continue
+            cv = _coefficient_of_variation(values)
+            stability = max(0.0, 1.0 - cv / 0.5)
+            thr = thresholds.get(signal) or {}
+            high, low = thr.get("alarm_high"), thr.get("alarm_low")
+            if high is None and low is None:
+                channel_factors.append(stability)
+                continue
+            safe_fraction = sum(
+                1 for value in values
+                if (high is None or value <= high) and (low is None or value >= low)
+            ) / len(values)
+            # Absolute safety dominates; stability remains useful inside the
+            # safe range and prevents noisy near-limit data scoring perfectly.
+            channel_factors.append(0.35 * stability + 0.65 * safe_fraction)
+        if not channel_factors:
             return None
-        cv = sum(cvs) / len(cvs)
-        # Map CV (0 = perfectly stable) to 0..1; cv>=0.5 -> 0.
-        return max(0.0, 1.0 - cv / 0.5)
+        return sum(channel_factors) / len(channel_factors)
 
     weights = {"oxygen": 0.5, "pressure": 0.3, "humidity": 0.2}
     for group, weight in weights.items():

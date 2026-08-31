@@ -8,10 +8,11 @@ everything outside the single sliced part) and only misled the operator. When
 PySLM cannot build the trajectories for a file we raise ``EstimationError``
 rather than return a wrong number.
 
-Accuracy is closed-loop: the raw geometric estimate (``raw_print_hours``) is
-multiplied by a calibration factor learned per material from predicted-vs-actual
-history (``time_correction_by_mat`` → falls back to the global
-``time_correction_factor``). See ``analytics.prediction.accuracy``.
+Accuracy is closed-loop: only the raw **scan** estimate is multiplied by a
+calibration factor learned per material+layer-thickness mode from
+predicted-vs-actual history. Recoat is calibrated independently from ``pour_ms``
+and must never be multiplied by the scan correction. See
+``analytics.prediction.accuracy``.
 
 Recoat time is calibrated separately and *before* that multiplier, because it
 is a measured duration, not a scan-time error ratio: ``recoat_time_by_mat`` is
@@ -50,6 +51,8 @@ class PrintTimeEstimate:
     print_hours: float          # scan + recoat = machine busy time (after correction)
     total_days: float           # continuous printing, 24 h/day
     method: str                 # "pyslm"
+    raw_scan_hours: float = 0.0     # scan before the scan-only correction
+    raw_recoat_hours: float = 0.0   # recoat is independently calibrated
     raw_print_hours: float = 0.0    # geometric estimate BEFORE calibration (for accuracy loop)
     correction_factor: float = 1.0  # calibration multiplier applied (per-material → global)
     breakdown: dict = field(default_factory=dict)
@@ -136,10 +139,25 @@ def _resolve_params(params: dict, material: str) -> tuple[float, float, float, i
     return float(hatch_speed), float(contour_speed), float(hatch_distance), laser_count
 
 
-def resolve_correction_factor(params: dict, material: str) -> float:
-    """Calibration multiplier for this material: per-material → global → 1.0."""
+def resolve_correction_factor(
+    params: dict, material: str, layer_thickness_mm: float | None = None,
+) -> float:
+    """Scan calibration multiplier for a material+thickness mode.
+
+    New learned factors are keyed exactly like scan models (for example
+    ``steel@0.060``), because a correction learned at one layer thickness is
+    not transferable to another. The material/global lookups are retained as
+    a compatibility path for explicitly pinned legacy settings; an unlocked
+    recalibration removes those unsafe pooled entries.
+    """
     by_mat = params.get("time_correction_by_mat") or {}
-    factor = by_mat.get(material)
+    factor = None
+    if layer_thickness_mm is not None:
+        from analytics.prediction.layer_engine import scan_model_key
+
+        factor = by_mat.get(scan_model_key(material, layer_thickness_mm))
+    if factor is None:
+        factor = by_mat.get(material)
     if factor is None:
         factor = params.get("time_correction_factor")
     try:
@@ -261,10 +279,12 @@ def estimate_print_time(
     # Calibration: the physics path scales by the per-material factor learned
     # from predicted-vs-actual history. The fitted path is already absolute
     # (trained on real burn seconds) — a factor on top would double-correct.
-    factor = 1.0 if scan_source == "fitted" else resolve_correction_factor(params, material)
+    factor = 1.0 if scan_source == "fitted" else resolve_correction_factor(
+        params, material, slices.layer_thickness_mm,
+    )
     scan_hours = raw_scan_hours * factor
-    recoat_hours = raw_recoat_hours * factor
-    print_hours = raw_print_hours * factor
+    recoat_hours = raw_recoat_hours
+    print_hours = scan_hours + recoat_hours
 
     return PrintTimeEstimate(
         scan_hours=scan_hours,
@@ -272,6 +292,8 @@ def estimate_print_time(
         print_hours=print_hours,
         total_days=print_hours / 24.0,
         method="cohatch" + ("+fitted" if scan_source == "fitted" else ""),
+        raw_scan_hours=raw_scan_hours,
+        raw_recoat_hours=raw_recoat_hours,
         raw_print_hours=raw_print_hours,
         correction_factor=factor,
         breakdown={

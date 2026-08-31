@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,6 +43,7 @@ from analytics.prediction.accuracy import (
     CALIBRATION_WINDOW,
     MIN_PAIRS_FOR_CALIBRATION,
     PRINT_CLASSIFICATIONS,
+    calibration_is_excluded,
     iter_linked_prints,
     printed_at,
     session_classification,
@@ -87,14 +88,14 @@ def _pour_seconds_from_events(events: list[Any]) -> list[float]:
     return list(seen.values())
 
 
-def machine_seconds_from_events(events: list) -> dict[int, float]:
-    """{layer: burn+pour seconds} — полное машинное время слоя, без пауз.
+def layer_seconds_from_events(events: list) -> dict[int, tuple[float, float]]:
+    """{layer: (burn, pour) seconds} from validated timing events.
 
-    Использует burn_ms + pour_ms (а не make_layer_ms): make_layer_ms на части
-    прошивок включает межслойные ожидания, а политика проекта — только чистое
-    машинное время (см. базу знаний в plate_estimator.py, п.1).
+    Keeping the components separate is essential: burn calibrates scan while
+    pour calibrates recoat. Combining them and fitting one blanket multiplier
+    makes the two independent calibration loops contaminate each other.
     """
-    out: dict[int, float] = {}
+    out: dict[int, tuple[float, float]] = {}
     for event in events:
         event_type = getattr(event, "event_type", None) if not isinstance(event, dict) else event.get("event_type")
         if event_type != "layer_timing_summary":
@@ -109,8 +110,44 @@ def machine_seconds_from_events(events: list) -> dict[int, float]:
             continue
         if burn_ms <= 0 or not (_MIN_POUR_MS <= pour_ms <= _MAX_POUR_MS):
             continue
-        out.setdefault(layer, (burn_ms + pour_ms) / 1000.0)
+        out.setdefault(layer, (burn_ms / 1000.0, pour_ms / 1000.0))
     return out
+
+
+def machine_seconds_from_events(events: list) -> dict[int, float]:
+    """{layer: burn+pour seconds} — полное машинное время слоя, без пауз.
+
+    Использует burn_ms + pour_ms (а не make_layer_ms): make_layer_ms на части
+    прошивок включает межслойные ожидания, а политика проекта — только чистое
+    машинное время (см. базу знаний в plate_estimator.py, п.1).
+    """
+    return {
+        layer: burn_s + pour_s
+        for layer, (burn_s, pour_s) in layer_seconds_from_events(events).items()
+    }
+
+
+def session_layer_seconds_by_layer(
+    session_id: str, db: Session,
+) -> dict[int, tuple[float, float]] | None:
+    """Validated per-layer ``(burn, pour)`` seconds for one session."""
+    from analytics.prediction.layer_timings import stored_timings
+
+    stored = stored_timings(session_id, db)
+    if stored:
+        return {
+            layer: (burn / 1000.0, pour / 1000.0)
+            for layer, (burn, pour) in stored.items()
+        }
+
+    files = _time_log_files(session_id, db)
+    if not files:
+        return None
+    out: dict[int, tuple[float, float]] = {}
+    for f in files:
+        for layer, values in layer_seconds_from_events(f.parse_result.events).items():
+            out.setdefault(layer, values)
+    return out or None
 
 
 def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
@@ -125,20 +162,10 @@ def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, 
     возможно (суточная ротация логов) — вызывающий обязан проверять полноту,
     если суммирует (accuracy._machine_hours_from_logs).
     """
-    from analytics.prediction.layer_timings import stored_timings
-
-    stored = stored_timings(session_id, db)
-    if stored:
-        return {layer: (burn + pour) / 1000.0 for layer, (burn, pour) in stored.items()}
-
-    files = _time_log_files(session_id, db)
-    if not files:
+    timings = session_layer_seconds_by_layer(session_id, db)
+    if not timings:
         return None
-    out: dict[int, float] = {}
-    for f in files:
-        for layer, sec in machine_seconds_from_events(f.parse_result.events).items():
-            out.setdefault(layer, sec)
-    return out or None
+    return {layer: burn + pour for layer, (burn, pour) in timings.items()}
 
 
 def session_recoat_seconds(session_id: str, db: Session) -> list[float] | None:
@@ -146,19 +173,8 @@ def session_recoat_seconds(session_id: str, db: Session) -> list[float] | None:
 
     Prefers the stored per-layer conclusions; falls back to re-parsing the log.
     """
-    from analytics.prediction.layer_timings import stored_timings
-
-    stored = stored_timings(session_id, db)
-    if stored:
-        return [pour / 1000.0 for _, pour in stored.values()]
-
-    files = _time_log_files(session_id, db)
-    if not files:
-        return None
-    seconds: list[float] = []
-    for f in files:
-        seconds.extend(_pour_seconds_from_events(f.parse_result.events))
-    return seconds or None
+    timings = session_layer_seconds_by_layer(session_id, db)
+    return [pour for _, pour in timings.values()] if timings else None
 
 
 def _time_log_files(session_id: str, db: Session) -> list:
@@ -183,13 +199,17 @@ def recoat_accuracy(db: Session) -> dict:
     usable_by_mat: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
     excluded: list[dict] = []
 
-    for record, session in iter_linked_prints(db):
+    linked = list(iter_linked_prints(db))
+    link_counts = Counter(record.session_id for record, _ in linked)
+    observed_materials: set[str] = set()
+    for record, session in linked:
         pour_seconds = session_recoat_seconds(record.session_id, db)
         if not pour_seconds:
             continue  # no time_log for this session (or its files are gone) — not an error, just no data
 
         median_s = statistics.median(pour_seconds)
         material = record.material or "—"
+        observed_materials.add(material)
         when = printed_at(record, session)
 
         skip_reason = None
@@ -198,6 +218,10 @@ def recoat_accuracy(db: Session) -> dict:
         # other than a print is still not representative production behaviour.
         if session_classification(session) not in PRINT_CLASSIFICATIONS:
             skip_reason = "not_a_print"
+        elif calibration_is_excluded(record, "recoat"):
+            skip_reason = "manually_excluded"
+        elif link_counts[record.session_id] > 1:
+            skip_reason = "duplicate_session_link"
 
         if skip_reason is None:
             usable_by_mat[material].append((when, median_s))
@@ -224,8 +248,11 @@ def recoat_accuracy(db: Session) -> dict:
         return round(statistics.median(sample) * 1000.0, 1)
 
     by_material = {
-        mat: {"n_sessions": len(pairs), "suggested_recoat_ms": _windowed_median_ms(pairs)}
-        for mat, pairs in usable_by_mat.items()
+        mat: {
+            "n_sessions": len(usable_by_mat.get(mat, [])),
+            "suggested_recoat_ms": _windowed_median_ms(usable_by_mat.get(mat, [])),
+        }
+        for mat in sorted(observed_materials)
     }
 
     return {
@@ -274,19 +301,29 @@ def recalibrate_recoat_and_apply(db: Session) -> dict:
                         material, current.get(material), value, info["n_sessions"])
             applied[material] = value
 
-    if applied:
-        current.update(applied)
+    active_materials = {
+        material for material, info in by_material.items()
+        if info["suggested_recoat_ms"] is not None
+        and RECOAT_MIN_MS <= info["suggested_recoat_ms"] <= RECOAT_MAX_MS
+    }
+    removed = sorted(material for material in current if material not in active_materials)
+    for material in removed:
+        current.pop(material, None)
+    current.update(applied)
+    if applied or removed:
         row.recoat_time_by_mat = current
         row.updated_at = datetime.now(timezone.utc)
 
-    return {"applied": applied, "skipped": skipped, "locked": False}
+    return {"applied": applied, "removed": removed, "skipped": skipped, "locked": False}
 
 
 __all__ = [
     "recoat_accuracy",
     "recalibrate_recoat_and_apply",
     "session_recoat_seconds",
+    "session_layer_seconds_by_layer",
     "session_machine_seconds_by_layer",
+    "layer_seconds_from_events",
     "machine_seconds_from_events",
     "RECOAT_MIN_MS",
     "RECOAT_MAX_MS",

@@ -131,6 +131,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     command: python -m worker.tasks
     volumes:
       - type: bind
@@ -166,6 +168,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.watcher
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     command: python -m worker.watcher
     volumes:
       - type: bind
@@ -196,6 +200,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.scheduler
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     command: python -m scheduler.jobs
     depends_on:
       postgres:

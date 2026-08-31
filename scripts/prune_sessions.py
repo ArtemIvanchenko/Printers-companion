@@ -101,6 +101,11 @@ def prune(session_ids: list[str], apply: bool) -> int:
 
         for rec in linked:
             rec.session_id = None
+        # The session delete below is a bulk SQL statement. SQLAlchemy's
+        # autoflush does not reliably order pending ORM attribute changes
+        # ahead of it, so PostgreSQL can still see the old FK and reject the
+        # delete. Make the unlink explicit before deleting parents.
+        db.flush()
         for table in _DEPENDENT_TABLES:
             db.execute(
                 text(f"DELETE FROM {table} WHERE session_id = ANY(:ids)"),  # noqa: S608 - see above

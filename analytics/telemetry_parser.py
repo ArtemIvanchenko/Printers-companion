@@ -152,6 +152,9 @@ def downsample_full_series(
     columns: list[str],
     time_column: str = "Time",
     max_points: int = 150,
+    start_clock_seconds: float | None = None,
+    end_clock_seconds: float | None = None,
+    valid_ranges: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, list]:
     """Return up to ``max_points`` rows spaced evenly across the ENTIRE file.
 
@@ -165,6 +168,32 @@ def downsample_full_series(
     """
     from parsers.common.encoding import estimate_encoding
 
+    def _clock_seconds(raw: str) -> float | None:
+        try:
+            parts = raw.strip().split(":")
+            if len(parts) != 3:
+                return None
+            hour, minute, second = (float(part.replace(",", ".")) for part in parts)
+            return hour * 3600 + minute * 60 + second
+        except (TypeError, ValueError):
+            return None
+
+    def _in_window(line: str, time_idx: int | None) -> bool:
+        if start_clock_seconds is None and end_clock_seconds is None:
+            return True
+        if time_idx is None:
+            return False
+        cells = line.split("|")
+        if time_idx >= len(cells):
+            return False
+        seconds = _clock_seconds(cells[time_idx])
+        if seconds is None:
+            return False
+        return (
+            (start_clock_seconds is None or seconds >= start_clock_seconds)
+            and (end_clock_seconds is None or seconds <= end_clock_seconds)
+        )
+
     try:
         enc = estimate_encoding(path)
         with path.open(encoding=enc, errors="replace", buffering=1 << 20) as fh:
@@ -174,7 +203,8 @@ def downsample_full_series(
             wanted = {c: index_of[c] for c in [*columns, time_column] if c in index_of}
             if not wanted:
                 return {}
-            total = sum(1 for _ in fh)
+            time_idx = index_of.get(time_column)
+            total = sum(1 for line in fh if _in_window(line, time_idx))
         if total <= 0:
             return {}
 
@@ -187,8 +217,12 @@ def downsample_full_series(
         out: dict[str, list] = {c: [] for c in wanted}
         with path.open(encoding=enc, errors="replace", buffering=1 << 20) as fh:
             fh.readline()  # skip header
-            for row_i, line in enumerate(fh):
-                if row_i not in picks:
+            eligible_i = -1
+            for line in fh:
+                if not _in_window(line, time_idx):
+                    continue
+                eligible_i += 1
+                if eligible_i not in picks:
                     continue
                 cells = line.split("|")
                 for col, ci in wanted.items():
@@ -198,9 +232,35 @@ def downsample_full_series(
                     else:
                         try:
                             val = float(raw)
-                            out[col].append(val if np.isfinite(val) else None)
+                            out[col].append(
+                                val if np.isfinite(val) and abs(val) <= _ABSURD_MAGNITUDE else None
+                            )
                         except (ValueError, OverflowError):
                             out[col].append(None)
+        if valid_ranges is None:
+            from analytics.thresholds import load_valid_ranges
+
+            valid_ranges = load_valid_ranges()
+        for col, values in out.items():
+            if col == time_column:
+                continue
+            rng = valid_ranges.get(col) or {}
+            finite = [value for value in values if isinstance(value, (int, float))]
+            if not finite or not rng:
+                continue
+            rejected = [
+                value for value in finite
+                if ((rng.get("min_val") is not None and value < rng["min_val"])
+                    or (rng.get("max_val") is not None and value > rng["max_val"]))
+            ]
+            if len(rejected) / len(finite) <= _MAX_PROFILE_REJECT_FRACTION:
+                out[col] = [
+                    None if isinstance(value, (int, float)) and (
+                        (rng.get("min_val") is not None and value < rng["min_val"])
+                        or (rng.get("max_val") is not None and value > rng["max_val"])
+                    ) else value
+                    for value in values
+                ]
         return out
     except Exception as exc:
         logger.warning("downsample_full_series failed for %s: %s", path, exc)

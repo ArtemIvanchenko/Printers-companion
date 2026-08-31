@@ -12,7 +12,8 @@ Two modes, chosen automatically:
 * **Gradient boosting**: with a larger labelled history (≥ MIN_LABELS_GBM)
   a LightGBM classifier replaces the logistic regression — it captures
   non-linear interactions tabular data is famous for. Stored as the booster's
-  text dump (JSON-serialisable); explanations via per-feature importance.
+  text dump (JSON-serialisable); explanations use local per-session SHAP
+  contributions rather than global training-set importance.
 
 Inputs are the ``group`` payloads already stored per session
 (``features`` + ``health`` + ``signal_stats`` + ``data_quality``), so no
@@ -176,36 +177,47 @@ def _train_lightgbm(X: list[list[float]], y: list[int], usable: list[str]) -> di
     }
 
 
-def _cross_val_auc(X: list[list[float]], y: list[int], kind: str, usable: list[str]) -> float | None:
-    """Stratified K-fold ROC AUC — an out-of-sample estimate of model quality.
+def _cross_val_auc(
+    X: list[list[float]], y: list[int], kind: str, usable: list[str],
+) -> tuple[float, int] | None:
+    """Forward-chaining ROC AUC — an out-of-time quality estimate.
 
-    Every fold refits from scratch on the other folds, so the score is never
-    computed on data the model has seen. Returns None when it cannot be
-    estimated (too few of either class, sklearn unavailable).
+    Input rows are chronological. Every fold trains only on earlier sessions
+    and scores a later block, preventing future process state from leaking into
+    the past through a shuffled split. Folds without both classes on either
+    side cannot define ROC AUC and are skipped.
     """
     try:
         import numpy as np
         from sklearn.metrics import roc_auc_score
-        from sklearn.model_selection import StratifiedKFold
+        from sklearn.model_selection import TimeSeriesSplit
     except Exception:
         return None
 
     Xa, ya = np.asarray(X, dtype=float), np.asarray(y)
-    n_folds = min(CV_FOLDS, int(min(ya.sum(), len(ya) - ya.sum())))
-    if n_folds < 2:
+    n_splits = min(CV_FOLDS, max(2, len(ya) // 4))
+    if len(ya) <= n_splits:
         return None
 
-    oof = np.zeros(len(ya), dtype=float)
+    observed: list[int] = []
+    predicted: list[float] = []
+    valid_folds = 0
     try:
-        for train_idx, test_idx in StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=0).split(Xa, ya):
+        for train_idx, test_idx in TimeSeriesSplit(n_splits=n_splits).split(Xa):
+            if len(set(ya[train_idx])) < 2 or len(set(ya[test_idx])) < 2:
+                continue
             fitted = _fit(Xa[train_idx].tolist(), ya[train_idx].tolist(), kind, usable)
             if fitted is None:
-                return None
+                continue
             scores = [_raw_score(fitted, row) for row in Xa[test_idx].tolist()]
             if any(s is None for s in scores):
-                return None
-            oof[test_idx] = scores
-        return float(roc_auc_score(ya, oof))
+                continue
+            observed.extend(int(value) for value in ya[test_idx])
+            predicted.extend(float(score) for score in scores if score is not None)
+            valid_folds += 1
+        if valid_folds < 2 or len(set(observed)) < 2:
+            return None
+        return float(roc_auc_score(observed, predicted)), valid_folds
     except Exception:
         return None
 
@@ -274,8 +286,11 @@ def train_defect_model(
         kinds.insert(0, "lightgbm")
 
     for kind in kinds:
-        auc = _cross_val_auc(X, y, kind, usable)
-        if auc is None or auc < MIN_CV_AUC:
+        cv_result = _cross_val_auc(X, y, kind, usable)
+        if cv_result is None:
+            continue
+        auc, valid_folds = cv_result
+        if auc < MIN_CV_AUC:
             continue
         model = _fit(X, y, kind, usable)
         if model is None:
@@ -284,7 +299,7 @@ def train_defect_model(
             "n_train": len(y),
             "n_defects": int(sum(y)),
             "cv_auc": round(auc, 3),
-            "cv_folds": min(CV_FOLDS, minority),
+            "cv_folds": valid_folds,
         })
         return model
     return None
@@ -317,23 +332,28 @@ def _lightgbm_risk(row: dict[str, float | None], model: dict[str, Any]) -> dict[
         import numpy as np
 
         booster = lgb.Booster(model_str=model["model_str"])
-        risk = float(booster.predict(np.asarray([[float(row[f]) for f in feats]]))[0])
+        matrix = np.asarray([[float(row[f]) for f in feats]])
+        risk = float(booster.predict(matrix)[0])
+        local = booster.predict(matrix, pred_contrib=True)[0][:-1]
     except Exception:
         return None
-    total_gain = sum(model.get("importance") or []) or 1.0
     top = sorted(
         (
-            {"factor": _LABEL.get(f, f), "contribution": round(g / total_gain, 4)}
-            for f, g in zip(feats, model.get("importance") or [])
+            {
+                "factor": _LABEL.get(feature, feature),
+                "contribution": round(float(contribution), 4),
+                "direction": "raises_risk" if contribution > 0 else "lowers_risk",
+            }
+            for feature, contribution in zip(feats, local)
         ),
-        key=lambda d: -d["contribution"],
+        key=lambda item: -abs(item["contribution"]),
     )
     risk = round(risk, 4)
     return {
         "risk": risk,
         "grade": _grade(risk),
         "method": "lightgbm",
-        "top_factors": [t for t in top if t["contribution"] > 0][:4],
+        "top_factors": [item for item in top if item["contribution"] != 0][:4],
         "model_info": _model_info(model),
         "prediction": _model_prediction(risk, model, "LightGBM"),
     }

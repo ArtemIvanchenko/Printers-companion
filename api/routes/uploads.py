@@ -445,7 +445,10 @@ async def _geometry_prediction(
         try:
             from analytics.prediction.accuracy import calibration_interval_hours
             with SessionLocal() as db2:
-                interval = calibration_interval_hours(db2, material, time_est.raw_print_hours)
+                interval = calibration_interval_hours(
+                    db2, material, slices.layer_thickness_mm,
+                    time_est.raw_scan_hours, time_est.raw_recoat_hours,
+                )
             if interval is not None:
                 prediction["interval"] = list(interval)
         except Exception:
@@ -462,6 +465,8 @@ async def _geometry_prediction(
         "recoat_hours": round(time_est.recoat_hours, 2),
         "print_hours": round(time_est.print_hours, 2),
         "raw_print_hours": round(time_est.raw_print_hours, 3),
+        "raw_scan_hours": round(time_est.raw_scan_hours, 3),
+        "raw_recoat_hours": round(time_est.raw_recoat_hours, 3),
         "correction_factor": round(time_est.correction_factor, 3),
         "total_days": round(time_est.total_days, 2),
         "time_breakdown": time_est.breakdown,

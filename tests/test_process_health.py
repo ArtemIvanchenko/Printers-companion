@@ -7,7 +7,7 @@ from analytics.process_health import (
 
 
 def test_oxygen_spike_is_flagged():
-    telemetry = {"oxygen": {"SO1": [9, 9, 9, 9, 9, 9, 9, 30]}}
+    telemetry = {"oxygen": {"SO1": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 10]}}
     anomalies = detect_process_anomalies(telemetry)
     assert any(a["signal"] == "SO1" and a["kind"] == "spike" for a in anomalies)
     assert anomalies[0]["semantic"] == "кислород"
@@ -15,7 +15,7 @@ def test_oxygen_spike_is_flagged():
 
 
 def test_stable_series_has_no_anomalies():
-    telemetry = {"oxygen": {"SO1": [9.0] * 10}, "humidity": {"Flow H": [0.1] * 10}}
+    telemetry = {"oxygen": {"SO1": [0.5] * 10}, "humidity": {"Flow H": [0.1] * 10}}
     assert detect_process_anomalies(telemetry) == []
 
 
@@ -25,6 +25,16 @@ def test_burn_drift_detects_rising_trend():
     assert result["trend"] == "rising"
     assert result["slope_sec_per_layer"] > 0
     assert result["mean_sec"] is not None
+
+
+def test_burn_drift_is_span_normalized_for_long_prints():
+    burns = [
+        {"layer": layer, "duration_sec": 10 + 10 * (layer - 1) / 6999}
+        for layer in range(1, 7001)
+    ]
+    result = analyze_layer_burn_drift(burns)
+    assert result["trend"] == "rising"
+    assert result["relative_change_pct"] > 50
 
 
 def test_burn_drift_flags_outlier_layer():
@@ -40,7 +50,7 @@ def test_burn_drift_insufficient_data():
 
 def test_readiness_high_for_stable_atmosphere():
     telemetry = {
-        "oxygen": {"SO1": [9.0] * 10},
+        "oxygen": {"SO1": [0.5] * 10},
         "pressure": {"SP4": [1.0] * 10},
         "humidity": {"Flow H": [0.1] * 10},
     }
@@ -55,13 +65,22 @@ def test_readiness_lower_for_unstable_atmosphere():
     assert r["score"] < 75
 
 
+def test_stable_but_unsafe_oxygen_is_poor_and_flagged():
+    telemetry = {"oxygen": {"SO1": [21.0] * 10}}
+    readiness = atmosphere_readiness_score(telemetry)
+    anomalies = detect_process_anomalies(telemetry)
+    assert readiness["score"] < 50
+    assert readiness["grade"] == "poor"
+    assert any(item["kind"] == "threshold" for item in anomalies)
+
+
 def test_build_process_health_bundle_and_empty():
     empty = build_process_health({})
     assert empty["anomalies"] == []
     assert empty["readiness"]["score"] is None
 
     full = build_process_health({
-        "oxygen": {"SO1": [9.0] * 10},
+        "oxygen": {"SO1": [0.5] * 10},
         "pressure": {"SP4": [1.0] * 10},
         "layer_burn_times": [{"layer": i, "duration_sec": 10 + i} for i in range(1, 12)],
     })

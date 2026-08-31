@@ -11,10 +11,12 @@ import pytest
 from analytics.prediction.accuracy import (
     CORRECTION_MAX,
     MIN_PAIRS_FOR_CALIBRATION,
+    calibration_is_excluded,
     calibration_interval_hours,
     prediction_accuracy,
     recalibrate_and_apply,
 )
+from domain.models.events import LayerSnapshot
 from domain.models.prints import MachineParams, PrintRecord
 from domain.models.sessions import BuildSession
 from storage.db.session import SessionLocal
@@ -42,12 +44,24 @@ def _session(
             context={"runtime_payload": {"group": {"classification": classification}}},
         )
     )
+    total_ms = hours * 3600 * 1000
+    pour_ms = 500.0
+    burn_ms = total_ms / 100 - pour_ms
+    db.add_all([
+        LayerSnapshot(
+            session_id=session_id, layer=layer,
+            features={"burn_ms": burn_ms, "pour_ms": pour_ms},
+        )
+        for layer in range(1, 101)
+    ])
 
 
 def _record(
     db, record_id: str, session_id: str, raw_hours: float,
     material: str = "steel", factor: float = 1.0, printed_at: datetime | None = None,
 ) -> None:
+    raw_recoat = 100 * 0.5 / 3600
+    raw_scan = raw_hours - raw_recoat
     db.add(
         PrintRecord(
             record_id=record_id,
@@ -58,9 +72,16 @@ def _record(
             metadata_json={
                 "prediction": {
                     "raw_print_hours": raw_hours,
+                    "raw_scan_hours": raw_scan,
+                    "raw_recoat_hours": raw_recoat,
                     "print_hours": raw_hours * factor,
+                    "scan_hours": raw_scan * factor,
+                    "recoat_hours": raw_recoat,
                     "correction_factor": factor,
                     "material": material,
+                    "layer_thickness_mm": 0.06,
+                    "layer_count": 100,
+                    "scan_source": "physics",
                     "estimated_at": "2027-01-01T00:00:00+00:00",
                 }
             },
@@ -69,6 +90,15 @@ def _record(
 
 
 class TestPredictionAccuracy:
+    def test_scoped_calibration_exclusions_preserve_unrelated_measurements(self):
+        record = PrintRecord(
+            record_id="pr_scoped", name="scoped", material="steel",
+            metadata_json={"calibration_exclusions": ["scan", "time"]},
+        )
+        assert calibration_is_excluded(record, "scan") is True
+        assert calibration_is_excluded(record, "time") is True
+        assert calibration_is_excluded(record, "recoat") is False
+
     def test_error_pct_is_measured_against_the_figure_the_operator_saw(self, db):
         # Raw estimate 10 h, correction ×1.2 → the operator was quoted 12 h.
         # Actual came out at 12 h, so the quote was spot on even though the
@@ -131,7 +161,7 @@ class TestPredictionAccuracy:
 
         report = prediction_accuracy(db)
         assert report["n_usable_pairs"] == 0
-        assert report["by_material"] == {}
+        assert report["by_material"]["steel"]["n_pairs"] == 0
         assert all(e["reason"] == "not_a_print" for e in report["excluded"])
         assert all(r["used_for_calibration"] is False for r in report["pairs"])
 
@@ -160,7 +190,7 @@ class TestRatioInterval:
         info = prediction_accuracy(db)["by_material"]["steel"]
         assert info["suggested_factor"] is None
         assert info["ratio_interval"] is None
-        assert calibration_interval_hours(db, "steel", 10.0) is None
+        assert calibration_interval_hours(db, "steel", 0.06, 9.0, 1.0) is None
 
     def test_present_and_brackets_the_point_factor(self, db):
         start = datetime(2027, 3, 1, 8, 0, tzinfo=timezone.utc)
@@ -176,7 +206,7 @@ class TestRatioInterval:
         # 80% band over a symmetric spread stays inside the observed range.
         assert 0.8 <= low < high <= 1.2
 
-    def test_calibration_interval_hours_scales_by_raw_hours(self, db):
+    def test_calibration_interval_scales_scan_only_and_keeps_recoat(self, db):
         start = datetime(2027, 3, 1, 8, 0, tzinfo=timezone.utc)
         for i, actual in enumerate((8.0, 9.0, 10.0, 11.0, 12.0)):
             _session(db, f"s_scale{i}", start.replace(day=i + 1), hours=actual)
@@ -184,12 +214,12 @@ class TestRatioInterval:
         db.flush()
 
         ratio_low, ratio_high = prediction_accuracy(db)["by_material"]["steel"]["ratio_interval"]
-        hours_low, hours_high = calibration_interval_hours(db, "steel", 20.0)
-        assert hours_low == pytest.approx(ratio_low * 20.0, abs=0.01)
-        assert hours_high == pytest.approx(ratio_high * 20.0, abs=0.01)
+        hours_low, hours_high = calibration_interval_hours(db, "steel", 0.06, 18.0, 2.0)
+        assert hours_low == pytest.approx(ratio_low * 18.0 + 2.0, abs=0.01)
+        assert hours_high == pytest.approx(ratio_high * 18.0 + 2.0, abs=0.01)
 
     def test_none_for_material_with_no_history(self, db):
-        assert calibration_interval_hours(db, "titanium", 10.0) is None
+        assert calibration_interval_hours(db, "titanium", 0.06, 9.0, 1.0) is None
 
 
 class TestRecalibration:
@@ -202,8 +232,8 @@ class TestRecalibration:
         db.flush()
 
         result = recalibrate_and_apply(db)
-        assert result["applied"]["steel"] == pytest.approx(1.2, abs=0.001)
-        assert db.get(MachineParams, 1).time_correction_by_mat["steel"] == pytest.approx(1.2, abs=0.001)
+        assert result["applied"]["steel@0.060"] == pytest.approx(1.2, abs=0.001)
+        assert db.get(MachineParams, 1).time_correction_by_mat["steel@0.060"] == pytest.approx(1.2, abs=0.001)
 
     def test_out_of_range_factor_is_surfaced_not_applied(self, db):
         db.add(MachineParams(id=1, hatch_speed_mm_s=800, laser_count=1))
@@ -287,12 +317,19 @@ class TestMachineTimeActuals:
         row.classification = "REAL_PRINT"
         row.start_ts = datetime(2027, 6, 1, 8, tzinfo=timezone.utc)
         row.end_ts = row.start_ts + timedelta(hours=span_hours)
+        pour_ms = 9_250
         db.add(PrintRecord(
             record_id=record_id, name=record_id, material="steel", session_id=session_id,
             metadata_json={"prediction": {
                 "raw_print_hours": raw_hours, "print_hours": raw_hours,
+                "raw_scan_hours": raw_hours - (snapshot_layers or log_layers) * pour_ms / 3_600_000,
+                "raw_recoat_hours": (snapshot_layers or log_layers) * pour_ms / 3_600_000,
+                "scan_hours": raw_hours - (snapshot_layers or log_layers) * pour_ms / 3_600_000,
+                "recoat_hours": (snapshot_layers or log_layers) * pour_ms / 3_600_000,
                 "correction_factor": 1.0, "material": "steel",
                 "layer_count": snapshot_layers,
+                "layer_thickness_mm": 0.06,
+                "scan_source": "physics",
                 "estimated_at": "2027-06-01T00:00:00+00:00",
             }},
         ))
@@ -318,6 +355,8 @@ class TestMachineTimeActuals:
         row = next(r for r in prediction_accuracy(db)["pairs"] if r["record_id"] == "pr_part")
         assert row["actual_source"] == "wall_span"
         assert row["actual_hours"] == pytest.approx(12.0, abs=0.01)
+        assert row["used_for_calibration"] is False
+        assert row["excluded_reason"] == "machine_time_unavailable"
 
     def test_missing_expected_layers_still_requires_a_floor(self, db, tmp_path):
         # snapshot without layer_count -> expected_layers is None -> coverage
@@ -330,3 +369,16 @@ class TestMachineTimeActuals:
         row = next(r for r in prediction_accuracy(db)["pairs"] if r["record_id"] == "pr_nolayers")
         assert row["actual_source"] == "wall_span"
         assert row["actual_hours"] == pytest.approx(6.0, abs=0.01)
+
+    def test_high_numbered_partial_log_cannot_masquerade_as_complete(self, db, tmp_path):
+        self._pair(db, tmp_path, "pr_tail", log_layers=1000, snapshot_layers=1000,
+                   span_hours=20.0)
+        path = tmp_path / "s_pr_tail_time.log"
+        lines = [f"OLD_STATS: {layer} | 9250 | 30000 | 39250 |"
+                 for layer in range(6001, 7001)]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        db.flush()
+
+        row = next(r for r in prediction_accuracy(db)["pairs"] if r["record_id"] == "pr_tail")
+        assert row["actual_source"] == "wall_span"
+        assert row["excluded_reason"] == "machine_time_unavailable"

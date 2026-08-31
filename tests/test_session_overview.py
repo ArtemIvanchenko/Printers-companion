@@ -152,3 +152,10 @@ def test_overview_idle_none_without_time_log():
     assert feats["machine_seconds"] is None
     assert feats["idle_seconds"] is None
     assert feats["idle_pct"] is None
+
+
+def test_all_layer_burn_times_reach_health_analysis():
+    timings = {layer: (10_000 + layer, 9_000) for layer in range(1, 1501)}
+    overview = build_group_overview("g_long", [_time_log_file(timings)])
+    assert len(overview["telemetry"]["layer_burn_times"]) == 1500
+    assert overview["health"]["burn_drift"]["n_layers"] == 1500

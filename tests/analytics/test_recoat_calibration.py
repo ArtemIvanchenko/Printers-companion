@@ -145,8 +145,32 @@ class TestRecoatAccuracy:
 
         report = recoat_accuracy(db)
         assert report["n_usable_sessions"] == 0
-        assert report["by_material"] == {}
+        assert report["by_material"]["steel"]["n_sessions"] == 0
         assert report["excluded"][0]["reason"] == "not_a_print"
+
+    def test_duplicate_card_links_do_not_count_as_independent_sessions(self, db, tmp_path):
+        _session_with_time_log(db, "s_dup", tmp_path, {1: 9500, 2: 9500})
+        for idx in range(3):
+            _record(db, f"pr_dup{idx}", "s_dup")
+        db.flush()
+
+        report = recoat_accuracy(db)
+        assert report["n_usable_sessions"] == 0
+        assert all(row["excluded_reason"] == "duplicate_session_link"
+                   for row in report["sessions"])
+
+    def test_scan_only_exclusion_keeps_valid_recoat_measurement(self, db, tmp_path):
+        _session_with_time_log(db, "s_scoped", tmp_path, {1: 9500, 2: 9500})
+        db.add(PrintRecord(
+            record_id="pr_scoped", name="pr_scoped", material="steel",
+            session_id="s_scoped",
+            metadata_json={"calibration_exclusions": ["scan", "time"]},
+        ))
+        db.flush()
+
+        row = recoat_accuracy(db)["sessions"][0]
+        assert row["used_for_calibration"] is True
+        assert row["excluded_reason"] is None
 
     def test_session_without_time_log_is_silently_skipped(self, db):
         # No files at all -> get_session_files returns None -> no crash, no row.
@@ -207,6 +231,14 @@ class TestRecalibrateRecoatAndApply:
         db.flush()
 
         assert recalibrate_recoat_and_apply(db)["applied"] == {}
+
+    def test_stale_value_is_removed_when_no_history_supports_it(self, db):
+        db.add(MachineParams(id=1, recoat_time_by_mat={"steel": 9500.0}))
+        db.flush()
+
+        result = recalibrate_recoat_and_apply(db)
+        assert result["removed"] == ["steel"]
+        assert db.get(MachineParams, 1).recoat_time_by_mat == {}
 
     def test_bounds_sanity(self):
         assert RECOAT_MIN_MS < RECOAT_MAX_MS

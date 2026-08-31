@@ -2,9 +2,11 @@
 import io
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routes.prints import _calibration_mismatch_warning
 
 client = TestClient(app)
 
@@ -54,6 +56,19 @@ def _create_record(name="Тестовая деталь", material="steel") -> di
     response = client.post("/prints", json={"name": name, "material": material})
     assert response.status_code == 200
     return response.json()
+
+
+class TestCalibrationMismatchWarning:
+    def test_warns_when_physics_point_is_outside_history(self):
+        warning = _calibration_mismatch_warning(4.714, (12.75, 29.45), "Steel", 0.06)
+
+        assert warning is not None
+        assert "steel@0.060" in warning
+        assert "4.71" in warning
+        assert "12.75–29.45" in warning
+
+    def test_silent_when_point_is_supported_by_history(self):
+        assert _calibration_mismatch_warning(20.0, (12.75, 29.45), "steel", 0.06) is None
 
 
 class TestPrintRecordCrud:
@@ -555,6 +570,26 @@ class TestMissingParamsAreNamed:
             assert "шаг штриховки" in response.json()["detail"]
 
 
+class TestGeometryQuality:
+    def test_known_incomplete_plate_is_blocked_before_estimation(self):
+        from api.routes.prints import _assert_geometry_usable
+
+        with pytest.raises(HTTPException) as exc:
+            _assert_geometry_usable({
+                "metadata_json": {"geometry_quality": {
+                    "status": "incomplete", "note": "нет части деталей",
+                }},
+            })
+        assert "геометрия карточки помечена как неполная" in str(exc.value)
+
+    def test_lower_bound_plate_remains_estimatable(self):
+        from api.routes.prints import _assert_geometry_usable
+
+        _assert_geometry_usable({
+            "metadata_json": {"geometry_quality": {"status": "lower_bound"}},
+        })
+
+
 class TestMachineSettings:
     def test_get_unconfigured_returns_nulls(self):
         response = client.get("/settings/machine")
@@ -598,6 +633,22 @@ class TestMachineSettings:
 
     def test_put_rejects_non_numeric(self):
         assert client.put("/settings/machine", json={"hatch_speed_mm_s": "fast"}).status_code == 422
+
+    def test_put_rejects_non_finite_and_non_positive_calibration_values(self):
+        response = client.put(
+            "/settings/machine",
+            content='{"hatch_speed_mm_s": NaN}',
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert client.put(
+            "/settings/machine", json={"time_correction_by_mat": {"steel@0.060": 0}},
+        ).status_code == 422
+
+    def test_put_rejects_string_boolean(self):
+        assert client.put(
+            "/settings/machine", json={"correction_locked": "false"},
+        ).status_code == 422
 
     def test_put_empty_body_is_422(self):
         assert client.put("/settings/machine", json={"unknown_field": 1}).status_code == 422

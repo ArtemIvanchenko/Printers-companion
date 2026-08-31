@@ -51,12 +51,16 @@ class TestParts:
         assert est.recoat_hours == pytest.approx(100 * 10 / 3600, rel=1e-6)
         assert any("НИЖНЕЙ границей" in w for w in est.warnings)
 
-    def test_correction_factor_scales_total_once(self):
+    def test_correction_factor_scales_scan_only(self):
         plain = estimate_plate([("box", _box_stl())], [], _params(), "steel")
         scaled = estimate_plate(
             [("box", _box_stl())], [], _params(time_correction_factor=1.5), "steel"
         )
-        assert scaled.print_hours == pytest.approx(plain.print_hours * 1.5, rel=1e-6)
+        assert scaled.scan_hours == pytest.approx(plain.scan_hours * 1.5, rel=1e-6)
+        assert scaled.recoat_hours == pytest.approx(plain.recoat_hours, rel=1e-6)
+        assert scaled.print_hours == pytest.approx(
+            plain.scan_hours * 1.5 + plain.recoat_hours, rel=1e-6,
+        )
         assert scaled.raw_print_hours == pytest.approx(plain.raw_print_hours, rel=1e-6)
 
 
@@ -283,6 +287,13 @@ class TestGeometryCache:
         estimate_plate(parts, [], _params(hatch_distance_mm=0.10), "steel", geometry_cache=cache)
         estimate_plate(parts, [], _params(hatch_distance_mm=0.12), "steel", geometry_cache=cache)
         assert cache.saves == 2, "different hatch_distance_mm must not collide"
+
+    def test_different_layer_thickness_misses(self):
+        cache = _FakeGeometryCache()
+        parts = [("box", _box_stl())]
+        estimate_plate(parts, [], _params(layer_thickness_mm=0.10), "steel", geometry_cache=cache)
+        estimate_plate(parts, [], _params(layer_thickness_mm=0.05), "steel", geometry_cache=cache)
+        assert cache.saves == 2, "different layer_thickness_mm must not collide"
 
     def test_different_body_misses(self):
         cache = _FakeGeometryCache()

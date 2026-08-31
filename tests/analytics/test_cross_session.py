@@ -1,5 +1,6 @@
 """Tests for analytics.cross_session — pattern detection across sessions."""
 from analytics.cross_session import (
+    detect_signal_shifts,
     detect_signal_trends,
     detect_session_anomalies,
     correlate_events_with_signals,
@@ -123,3 +124,24 @@ def test_run_cross_session_with_no_sessions():
     result = run_cross_session_analysis([])
     assert result["n_sessions_analyzed"] == 0
     assert "отклонений не обнаружено" in result["summary"]
+
+
+def test_shift_session_id_stays_aligned_when_signal_has_nulls():
+    sessions = [_make_session(f"s{i}", f"2026-01-{i + 1:02d}", so1=1.0) for i in range(12)]
+    sessions[0]["signal_stats"]["SO1"]["mean"] = None
+    for session in sessions[7:]:
+        session["signal_stats"]["SO1"]["mean"] = 2.0
+
+    shifts = detect_signal_shifts(sessions)
+    assert shifts
+    assert shifts[0]["at_session"] == "s7"
+    assert shifts[0]["session_index"] == 7
+
+
+def test_each_shift_compares_adjacent_segments_not_the_entire_tail():
+    values = [1.0] * 6 + [2.0] * 6 + [1.0] * 6
+    sessions = [_make_session(f"s{i}", f"2026-01-{i + 1:02d}", so1=value)
+                for i, value in enumerate(values)]
+    shifts = detect_signal_shifts(sessions)
+    directions = {shift["direction"] for shift in shifts if shift["signal"] == "SO1"}
+    assert directions == {"up", "down"}

@@ -158,9 +158,13 @@ def refresh_patterns() -> dict[str, Any]:
 def _load_session_groups(db) -> list[dict[str, Any]]:
     """Full stored ``group`` payload per session (features+health+signal_stats+
     data_quality), newest first — the input shape defect-risk expects."""
+    from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS, session_classification
+
     rows = db.execute(select(BuildSession).order_by(BuildSession.start_ts.desc())).scalars().all()
     out = []
     for row in rows:
+        if session_classification(row) not in PRINT_CLASSIFICATIONS:
+            continue
         group = ((row.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
         if not group:
             continue
@@ -177,12 +181,15 @@ def _load_quality_labels(db) -> dict[str, int]:
     from analytics.prediction.defect_risk import outcome_to_label
     from domain.models.quality import QualityOutcome
     labels: dict[str, int] = {}
-    for row in db.execute(select(QualityOutcome)).scalars().all():
+    rows = db.execute(
+        select(QualityOutcome).order_by(QualityOutcome.timestamp, QualityOutcome.outcome_id)
+    ).scalars().all()
+    for row in rows:
         if not row.session_id:
             continue
         lbl = outcome_to_label(row.result)
         if lbl is not None:
-            labels[row.session_id] = lbl  # latest wins (no ordering guarantee needed)
+            labels[row.session_id] = lbl  # deterministic latest timestamp wins
     return labels
 
 
@@ -193,32 +200,46 @@ _MODEL_CACHE: dict[str, Any] = {}
 _MODEL_LOCK = threading.Lock()
 
 
-def _labels_fingerprint(labelled: list[tuple[str, int]]) -> str:
+def _training_fingerprint(labelled: list[tuple[dict[str, Any], int]]) -> str:
     import hashlib
 
-    joined = "|".join(f"{sid}:{lbl}" for sid, lbl in sorted(labelled))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    from analytics.prediction.defect_risk import build_feature_row
+
+    payload = [
+        {
+            "session_id": session["session_id"],
+            "start_ts": session.get("start_ts"),
+            "label": label,
+            "features": build_feature_row(session["group"]),
+        }
+        for session, label in labelled
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _get_model(sessions: list[dict[str, Any]], labels: dict[str, int]) -> tuple[Any, int]:
     """Trained model (or None) for the current label set, plus the label count."""
     from analytics.prediction.defect_risk import train_defect_model
 
-    labelled_ids = [(s["session_id"], labels[s["session_id"]])
-                    for s in sessions if s["session_id"] in labels]
-    key = _labels_fingerprint(labelled_ids)
+    labelled = sorted(
+        [(session, labels[session["session_id"]])
+         for session in sessions if session["session_id"] in labels],
+        key=lambda item: item[0].get("start_ts") or "",
+    )
+    key = _training_fingerprint(labelled)
 
     with _MODEL_LOCK:
         if _MODEL_CACHE.get("key") == key:
-            return _MODEL_CACHE.get("model"), len(labelled_ids)
+            return _MODEL_CACHE.get("model"), len(labelled)
 
     model = train_defect_model(
-        [(s["group"], labels[s["session_id"]]) for s in sessions if s["session_id"] in labels]
+        [(session["group"], label) for session, label in labelled]
     )
     with _MODEL_LOCK:
         _MODEL_CACHE["key"] = key
         _MODEL_CACHE["model"] = model
-    return model, len(labelled_ids)
+    return model, len(labelled)
 
 
 def _risk_row(session: dict[str, Any], labels: dict[str, int], model: Any) -> dict[str, Any]:

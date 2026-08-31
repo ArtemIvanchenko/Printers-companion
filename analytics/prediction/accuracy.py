@@ -6,9 +6,9 @@ when the operator runs the estimate for the record's STLs. It carries the
 Once the record is linked to a log session the actual duration is known and the
 pair feeds calibration.
 
-Calibration is per material: the factor for a material is the median of
-``actual / raw_predicted`` over its pairs. Calibrating against the *raw* estimate
-keeps the factor absolute, so it never compounds on a previously-corrected value.
+Calibration is per material+layer-thickness mode and applies to **scan only**:
+the factor is the median of ``actual_burn / raw_scan`` over trusted pairs.
+Recoat has its own calibration from ``pour_ms`` and is never scaled here.
 
 ``recalibrate_and_apply`` writes the learned factors into
 ``machine_params.time_correction_by_mat`` automatically (unless the operator has
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from domain.models.prints import MachineParams, PrintRecord
 from domain.models.sessions import BuildSession
+from analytics.prediction.layer_engine import scan_model_key
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,26 @@ def session_classification(session: BuildSession) -> str:
     return group.get("classification") or session.classification or ""
 
 
+def calibration_is_excluded(record: PrintRecord, scope: str) -> bool:
+    """Whether an operator excluded this card from one calibration scope.
+
+    ``calibration_excluded`` is the legacy all-or-nothing switch. New records
+    may use ``calibration_exclusions`` as either a list (``["scan", "time"]``)
+    or a mapping (``{"scan": true}``). This matters for plates whose geometry
+    is incomplete: they must not train scan/time models, while their printer
+    log still contains perfectly valid recoat measurements.
+    """
+    meta = record.metadata_json or {}
+    if meta.get("calibration_excluded"):
+        return True
+    exclusions = meta.get("calibration_exclusions") or []
+    if isinstance(exclusions, dict):
+        return bool(exclusions.get(scope) or exclusions.get("all"))
+    if isinstance(exclusions, (list, tuple, set)):
+        return scope in exclusions or "all" in exclusions
+    return False
+
+
 # Machine-time actuals are only trusted when the time_log covers (almost) the
 # whole print: a partial log (multi-day rotation, truncated file) sums LESS
 # machine time than the print really took and would drag the factor down.
@@ -77,6 +98,41 @@ _MACHINE_TIME_MIN_COVERAGE = 0.95
 # whole print". Require this many logged layers as a weak floor in that case;
 # it does not replace the coverage check, only covers its absence.
 _MACHINE_TIME_MIN_LAYERS_NO_EXPECTED = 100
+_MACHINE_TIME_MAX_LAYER_RATIO = 1.05
+
+
+def _has_full_layer_coverage(per_layer: dict[int, object], expected_layers: int | None) -> bool:
+    """Whether timing rows plausibly cover the print from its first to last layer.
+
+    Count alone is insufficient: a rotated log containing layers 6843..7016 can
+    have enough rows for a short, wrongly-linked 174-layer prediction. We also
+    require an anchored start and an end compatible with the expected count.
+    """
+    if not per_layer:
+        return False
+    layers = sorted(per_layer)
+    if expected_layers:
+        return (
+            len(layers) >= _MACHINE_TIME_MIN_COVERAGE * expected_layers
+            and layers[0] <= 2
+            and layers[-1] >= _MACHINE_TIME_MIN_COVERAGE * expected_layers
+            and layers[-1] <= _MACHINE_TIME_MAX_LAYER_RATIO * expected_layers
+        )
+    return len(layers) >= _MACHINE_TIME_MIN_LAYERS_NO_EXPECTED and layers[0] <= 2
+
+
+def _machine_components_from_logs(
+    session_id: str, expected_layers: int | None, db: Session,
+) -> tuple[float, float] | None:
+    """Return trusted ``(burn_hours, pour_hours)`` or None for partial logs."""
+    from analytics.prediction.recoat_calibration import session_layer_seconds_by_layer
+
+    per_layer = session_layer_seconds_by_layer(session_id, db)
+    if not per_layer or not _has_full_layer_coverage(per_layer, expected_layers):
+        return None
+    burn = sum(values[0] for values in per_layer.values()) / 3600.0
+    pour = sum(values[1] for values in per_layer.values()) / 3600.0
+    return burn, pour
 
 
 def _machine_hours_from_logs(
@@ -94,17 +150,8 @@ def _machine_hours_from_logs(
     whole print (see the two floors above — ``expected_layers`` is normally
     present, ``_MACHINE_TIME_MIN_LAYERS_NO_EXPECTED`` only guards its absence).
     """
-    from analytics.prediction.recoat_calibration import session_machine_seconds_by_layer
-
-    per_layer = session_machine_seconds_by_layer(session_id, db)
-    if not per_layer:
-        return None
-    if expected_layers:
-        if len(per_layer) < _MACHINE_TIME_MIN_COVERAGE * expected_layers:
-            return None
-    elif len(per_layer) < _MACHINE_TIME_MIN_LAYERS_NO_EXPECTED:
-        return None
-    return sum(per_layer.values()) / 3600.0
+    components = _machine_components_from_logs(session_id, expected_layers, db)
+    return sum(components) if components is not None else None
 
 
 def iter_linked_prints(db: Session) -> "Iterator[tuple[PrintRecord, BuildSession]]":
@@ -121,7 +168,9 @@ def iter_linked_prints(db: Session) -> "Iterator[tuple[PrintRecord, BuildSession
     link, not a calibration input.
     """
     records = db.scalars(
-        select(PrintRecord).where(PrintRecord.session_id.is_not(None))
+        select(PrintRecord)
+        .where(PrintRecord.session_id.is_not(None))
+        .order_by(PrintRecord.created_at, PrintRecord.record_id)
     ).all()
     session_ids = [r.session_id for r in records if r.session_id]
     if not session_ids:
@@ -180,6 +229,14 @@ def _raw_predicted(snapshot: dict) -> float | None:
     return raw if (raw and raw > 0) else None
 
 
+def _positive_number(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _quantile_bounds(sample: list[float], low: float, high: float) -> tuple[float, float]:
     """Linear-interpolated [low, high] percentile bounds of ``sample``.
 
@@ -200,44 +257,79 @@ def _quantile_bounds(sample: list[float], low: float, high: float) -> tuple[floa
 def prediction_accuracy(db: Session) -> dict:
     """Compare stored prediction snapshots with actual session durations.
 
-    Returns per-pair rows and per-material suggested factors plus an overall
-    suggested factor (median across all pairs) for display.
+    Every linked pair remains visible for diagnosis, including a wall-clock
+    fallback when machine timings are unavailable. Only complete machine logs,
+    physics predictions with a scan/recoat breakdown, unique links and an
+    explicit material+thickness mode can train a correction factor.
     """
     rows: list[dict] = []
     # (sort key, ratio) so the calibration window can be taken by recency.
-    usable_by_mat: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
+    usable_by_mode: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
+    observed_modes: dict[str, tuple[str, float]] = {}
+    observed_materials: set[str] = set()
     all_usable: list[tuple[datetime, float]] = []
     excluded: list[dict] = []
 
-    for record, session in iter_linked_prints(db):
+    linked = list(iter_linked_prints(db))
+    link_counts = Counter(record.session_id for record, _ in linked)
+
+    for record, session in linked:
         snapshot = (record.metadata_json or {}).get("prediction")
         if not snapshot:
             continue
-        # Pause-free machine time from the printer's own logs is the ONLY
-        # actual consistent with what the model predicts; the wall-clock
-        # span is a legacy fallback and carries operator pauses.
-        actual = _machine_hours_from_logs(
+        components = _machine_components_from_logs(
             record.session_id, snapshot.get("layer_count"), db,
         )
-        actual_source = "machine_log" if actual is not None else None
-        if actual is None:
+        if components is not None:
+            actual_scan, actual_recoat = components
+            actual = actual_scan + actual_recoat
+            actual_source = "machine_log"
+        else:
+            actual_scan = actual_recoat = None
             actual = _actual_hours(session)
             actual_source = "wall_span" if actual is not None else None
-        raw = _raw_predicted(snapshot)
-        if actual is None or raw is None:
+
+        raw_total = _raw_predicted(snapshot)
+        if actual is None or raw_total is None:
             continue
 
         material = (snapshot.get("material") or record.material or "—")
+        observed_materials.add(material)
+        thickness = _positive_number(snapshot.get("layer_thickness_mm"))
+        mode = scan_model_key(material, thickness) if thickness is not None else None
+        if mode is not None:
+            observed_modes[mode] = (material, thickness)
+
         factor = float(snapshot.get("correction_factor") or 1.0) or 1.0
-        # What the operator was actually shown for this record.
-        shown = raw * factor
-        ratio = actual / raw
+        # Preserve exactly what was quoted historically. For old snapshots
+        # without print_hours, reproduce their old blanket-factor behaviour.
+        shown = _positive_number(snapshot.get("print_hours")) or raw_total * factor
+        raw_scan = _positive_number(snapshot.get("raw_scan_hours"))
+        raw_recoat = _positive_number(snapshot.get("raw_recoat_hours"))
+        shown_scan = _positive_number(snapshot.get("scan_hours"))
+        shown_recoat = _positive_number(snapshot.get("recoat_hours"))
+        ratio = actual_scan / raw_scan if actual_scan is not None and raw_scan else None
         skip_reason = _usable_for_calibration(session, actual)
+
+        if skip_reason is None and calibration_is_excluded(record, "time"):
+            skip_reason = "manually_excluded"
+        if skip_reason is None and link_counts[record.session_id] > 1:
+            skip_reason = "duplicate_session_link"
+        if skip_reason is None and actual_source != "machine_log":
+            skip_reason = "machine_time_unavailable"
+        if skip_reason is None and snapshot.get("scan_source", "physics") != "physics":
+            skip_reason = "already_fitted"
+        if skip_reason is None and (raw_scan is None or raw_recoat is None):
+            skip_reason = "missing_scan_breakdown"
+        if skip_reason is None and mode is None:
+            skip_reason = "missing_print_mode"
+        if skip_reason is None and ratio is None:
+            skip_reason = "missing_scan_actual"
 
         # Order pairs by when the print happened, so "most recent N" is real.
         when = printed_at(record, session)
         if skip_reason is None:
-            usable_by_mat[material].append((when, ratio))
+            usable_by_mode[mode].append((when, ratio))
             all_usable.append((when, ratio))
         else:
             excluded.append({
@@ -250,15 +342,23 @@ def prediction_accuracy(db: Session) -> dict:
             "name": record.name,
             "session_id": record.session_id,
             "material": material,
+            "mode": mode,
             "actual_hours": round(actual, 2),
+            "actual_scan_hours": round(actual_scan, 3) if actual_scan is not None else None,
+            "actual_recoat_hours": round(actual_recoat, 3) if actual_recoat is not None else None,
             # The corrected figure the operator saw — this is what "error" must
             # be measured against. The raw geometric hours are kept alongside it
             # because that is what the calibration ratio is computed from.
             "predicted_hours": round(shown, 2),
-            "raw_predicted_hours": round(raw, 2),
+            "predicted_scan_hours": round(shown_scan, 3) if shown_scan is not None else None,
+            "predicted_recoat_hours": round(shown_recoat, 3) if shown_recoat is not None else None,
+            "raw_predicted_hours": round(raw_total, 2),
+            "raw_scan_hours": round(raw_scan, 3) if raw_scan is not None else None,
+            "raw_recoat_hours": round(raw_recoat, 3) if raw_recoat is not None else None,
             "correction_factor": round(factor, 3),
             "error_pct": round((shown - actual) / actual * 100, 1),
-            "raw_error_pct": round((raw - actual) / actual * 100, 1),
+            "raw_error_pct": round((raw_total - actual) / actual * 100, 1),
+            "scan_ratio": round(ratio, 3) if ratio is not None else None,
             "used_for_calibration": skip_reason is None,
             "excluded_reason": skip_reason,
             "actual_source": actual_source,
@@ -293,20 +393,38 @@ def prediction_accuracy(db: Session) -> dict:
             return None
         return _quantile_bounds(sample, RATIO_INTERVAL_LOW, RATIO_INTERVAL_HIGH)
 
-    by_material = {
-        mat: {
+    by_mode = {}
+    for mode, (material, thickness) in observed_modes.items():
+        pairs = usable_by_mode.get(mode, [])
+        by_mode[mode] = {
+            "material": material,
+            "layer_thickness_mm": thickness,
             "n_pairs": len(pairs),
             "suggested_factor": _median(pairs),
             "ratio_interval": _ratio_interval(pairs),
         }
-        for mat, pairs in usable_by_mat.items()
-    }
+
+    # Material rows are display summaries only. Never pool ratios from distinct
+    # thicknesses into an applicable factor: when more than one mode is present
+    # the factor and interval intentionally remain None.
+    by_material = {}
+    for material in sorted(observed_materials):
+        modes = [key for key, info in by_mode.items() if info["material"] == material]
+        mode_pairs = [pair for key in modes for pair in usable_by_mode.get(key, [])]
+        single_mode = len(modes) == 1
+        by_material[material] = {
+            "n_pairs": len(mode_pairs),
+            "modes": modes,
+            "suggested_factor": _median(mode_pairs) if single_mode else None,
+            "ratio_interval": _ratio_interval(mode_pairs) if single_mode else None,
+        }
 
     return {
         "pairs": rows,
         "n_pairs": len(rows),
         "n_usable_pairs": len(all_usable),
         "excluded": excluded,
+        "by_mode": by_mode,
         "by_material": by_material,
         # Overall median across materials — for the headline display only.
         "suggested_correction_factor": _median(all_usable),
@@ -316,9 +434,10 @@ def prediction_accuracy(db: Session) -> dict:
 
 
 def calibration_interval_hours(
-    db: Session, material: str, raw_hours: float,
+    db: Session, material: str, layer_thickness_mm: float,
+    raw_scan_hours: float, raw_recoat_hours: float,
 ) -> tuple[float, float] | None:
-    """Print-time interval in hours for ``material``, from calibration history.
+    """Print-time interval for one mode, scaling scan while keeping recoat fixed.
 
     Scales the material's actual/raw ratio interval (``_ratio_interval`` inside
     ``prediction_accuracy``) by ``raw_hours`` — the same raw geometric estimate
@@ -330,11 +449,14 @@ def calibration_interval_hours(
     point correction factor.
     """
     report = prediction_accuracy(db)
-    info = report["by_material"].get(material)
+    info = report["by_mode"].get(scan_model_key(material, layer_thickness_mm))
     if not info or info["ratio_interval"] is None:
         return None
     low, high = info["ratio_interval"]
-    return round(low * raw_hours, 3), round(high * raw_hours, 3)
+    return (
+        round(low * raw_scan_hours + raw_recoat_hours, 3),
+        round(high * raw_scan_hours + raw_recoat_hours, 3),
+    )
 
 
 def recalibrate_and_apply(db: Session) -> dict:
@@ -345,7 +467,7 @@ def recalibrate_and_apply(db: Session) -> dict:
     commits — this only mutates the row.
     """
     report = prediction_accuracy(db)
-    by_material = report["by_material"]
+    by_mode = report["by_mode"]
 
     row = db.get(MachineParams, 1)
     if row is None:
@@ -356,29 +478,43 @@ def recalibrate_and_apply(db: Session) -> dict:
     current = dict(row.time_correction_by_mat or {})
     applied: dict[str, float] = {}
     skipped: list[dict] = []
-    for material, info in by_material.items():
+    for mode, info in by_mode.items():
         factor = info["suggested_factor"]
         if factor is None:
             continue  # not enough pairs yet
         if not (CORRECTION_MIN <= factor <= CORRECTION_MAX):
-            skipped.append({"material": material, "factor": factor, "reason": "out_of_range"})
+            skipped.append({"mode": mode, "factor": factor, "reason": "out_of_range"})
             logger.warning(
                 "calibration: %s factor %.3f out of [%.1f, %.1f] — not applied "
                 "(check machine params / orientation)",
-                material, factor, CORRECTION_MIN, CORRECTION_MAX,
+                mode, factor, CORRECTION_MIN, CORRECTION_MAX,
             )
             continue
-        if current.get(material) != factor:
+        if current.get(mode) != factor:
             logger.info("calibration: %s ×%s → ×%.3f (%d pairs)",
-                        material, current.get(material), factor, info["n_pairs"])
-            applied[material] = factor
+                        mode, current.get(mode), factor, info["n_pairs"])
+            applied[mode] = factor
 
-    if applied:
-        current.update(applied)
+    # Unlocked factors are fully managed. Remove obsolete mode entries and the
+    # old pooled-per-material entries so they cannot silently leak across modes.
+    active_modes = {
+        mode for mode, info in by_mode.items()
+        if info["suggested_factor"] is not None
+        and CORRECTION_MIN <= info["suggested_factor"] <= CORRECTION_MAX
+    }
+    observed_materials = set(report["by_material"])
+    removed = sorted(
+        key for key in current
+        if ("@" in key and key not in active_modes) or key in observed_materials
+    )
+    for key in removed:
+        current.pop(key, None)
+    current.update(applied)
+    if applied or removed:
         row.time_correction_by_mat = current
         row.updated_at = datetime.now(timezone.utc)
 
-    return {"applied": applied, "skipped": skipped, "locked": False}
+    return {"applied": applied, "removed": removed, "skipped": skipped, "locked": False}
 
 
 __all__ = [

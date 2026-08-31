@@ -138,7 +138,7 @@ class TestDefectRiskPrediction:
         good = [(_group(readiness=92 + i % 6, anomalies=0, dq=98 + i % 3), 0) for i in range(12)]
         bad = [(_group(readiness=22 + i % 6, anomalies=5, burn_slope=0.7, dq=48 + i % 3), 1)
                for i in range(12)]
-        model = train_defect_model(good + bad)
+        model = train_defect_model([item for pair in zip(good, bad) for item in pair])
         assert model is not None
         res = predict_defect_risk(_group(readiness=20, anomalies=6, burn_slope=0.9, dq=45), model)
         assert res["prediction"]["source"] == "model"

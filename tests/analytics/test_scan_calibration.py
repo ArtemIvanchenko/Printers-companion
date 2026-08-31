@@ -20,6 +20,7 @@ from analytics.prediction.layer_engine import (  # noqa: E402
 from analytics.prediction.scan_calibration import (  # noqa: E402
     MIN_FIT_R2,
     MIN_LAYERS_FOR_FIT,
+    MIN_PRINTS_FOR_FIT,
     _burn_seconds_by_layer,
     recalibrate_scan_and_apply,
     scan_calibration_report,
@@ -130,7 +131,8 @@ class TestFitAndApply:
         series = _series()
         burn = {L: _burn_seconds(series, L) * 1000 for L in range(1, N_LAYERS + 1)}
         db.add(MachineParams(id=1, hatch_speed_mm_s=1000, laser_count=LASERS))
-        _linked_pair(db, tmp_path, "pr_fit", series, burn)
+        _linked_pair(db, tmp_path, "pr_fit_a", series, burn)
+        _linked_pair(db, tmp_path, "pr_fit_b", series, burn)
         db.flush()
 
         result = recalibrate_scan_and_apply(db)
@@ -138,6 +140,8 @@ class TestFitAndApply:
         assert key in result["applied"], result
         model = result["applied"][key]
         assert model["r2"] > 0.99
+        assert model["n_prints"] == 2
+        assert model["cv_worst_abs_total_err_pct"] < 1.0
         assert abs(model["total_err_pct"]) < 1.0
         assert model["features"] == list(GEOMETRY_FEATURES)
 
@@ -155,7 +159,8 @@ class TestFitAndApply:
         series = _series()
         burn = {L: _burn_seconds(series, L) * 1000 for L in range(1, N_LAYERS + 1)}
         db.add(MachineParams(id=1))
-        _linked_pair(db, tmp_path, "pr_mode", series, burn)
+        _linked_pair(db, tmp_path, "pr_mode_a", series, burn)
+        _linked_pair(db, tmp_path, "pr_mode_b", series, burn)
         db.flush()
         recalibrate_scan_and_apply(db)
 
@@ -171,21 +176,38 @@ class TestFitAndApply:
 
         rng = random.Random(0)
         series = _series()
-        burn = {L: rng.uniform(5_000, 50_000) for L in range(1, N_LAYERS + 1)}
+        burn_a = {L: rng.uniform(5_000, 50_000) for L in range(1, N_LAYERS + 1)}
+        burn_b = {L: rng.uniform(5_000, 50_000) for L in range(1, N_LAYERS + 1)}
         db.add(MachineParams(id=1))
-        _linked_pair(db, tmp_path, "pr_noise", series, burn)
+        _linked_pair(db, tmp_path, "pr_noise_a", series, burn_a)
+        _linked_pair(db, tmp_path, "pr_noise_b", series, burn_b)
         db.flush()
 
         result = recalibrate_scan_and_apply(db)
         assert result["applied"] == {}
-        assert any("low_r2" in s["reason"] for s in result["skipped"])
+        assert result["skipped"]
         assert MIN_FIT_R2 > 0
+
+    def test_single_print_is_rejected_even_with_perfect_in_sample_fit(self, db, tmp_path):
+        series = _series()
+        burn = {layer: _burn_seconds(series, layer) * 1000
+                for layer in range(1, N_LAYERS + 1)}
+        db.add(MachineParams(id=1))
+        _linked_pair(db, tmp_path, "pr_single", series, burn)
+        db.flush()
+
+        result = recalibrate_scan_and_apply(db)
+        assert result["applied"] == {}
+        assert any("too_few_prints" in item["reason"] for item in result["skipped"])
+        assert MIN_PRINTS_FOR_FIT == 2
 
     def test_too_few_layers_rejected(self, db, tmp_path):
         series = _series()
-        burn = {L: _burn_seconds(series, L) * 1000 for L in range(1, MIN_LAYERS_FOR_FIT - 10)}
+        per_print_layers = MIN_LAYERS_FOR_FIT // 2 - 5
+        burn = {L: _burn_seconds(series, L) * 1000 for L in range(1, per_print_layers + 1)}
         db.add(MachineParams(id=1))
-        _linked_pair(db, tmp_path, "pr_few", series, burn)
+        _linked_pair(db, tmp_path, "pr_few_a", series, burn)
+        _linked_pair(db, tmp_path, "pr_few_b", series, burn)
         db.flush()
 
         result = recalibrate_scan_and_apply(db)
@@ -196,7 +218,8 @@ class TestFitAndApply:
         series = _series()
         burn = {L: _burn_seconds(series, L) * 1000 for L in range(1, N_LAYERS + 1)}
         db.add(MachineParams(id=1, correction_locked=True))
-        _linked_pair(db, tmp_path, "pr_lock", series, burn)
+        _linked_pair(db, tmp_path, "pr_lock_a", series, burn)
+        _linked_pair(db, tmp_path, "pr_lock_b", series, burn)
         db.flush()
 
         result = recalibrate_scan_and_apply(db)
@@ -214,14 +237,49 @@ class TestFitAndApply:
         assert report["candidates"] == {}
         assert any(r.get("reason") == "not_a_print" for r in report["records"])
 
+    def test_duplicate_session_links_are_excluded(self, db, tmp_path):
+        series = _series()
+        burn = {layer: _burn_seconds(series, layer) * 1000
+                for layer in range(1, N_LAYERS + 1)}
+        db.add(MachineParams(id=1))
+        _linked_pair(db, tmp_path, "pr_dup_a", series, burn)
+        db.add(PrintRecord(
+            record_id="pr_dup_b", name="pr_dup_b", material="steel",
+            session_id="s_pr_dup_a",
+            metadata_json={"prediction": {
+                "material": "steel", "scan_geometry": _snapshot_geometry(series),
+            }},
+        ))
+        db.flush()
+
+        report = scan_calibration_report(db)
+        assert report["candidates"] == {}
+        assert all(row["reason"] == "duplicate_session_link" for row in report["records"])
+
     def test_partial_layer_coverage_still_fits(self, db, tmp_path):
         """The multi-day log-splitting bug leaves a session with only part of a
         print's layers — that narrows the sample but must not break the fit."""
         series = _series()
-        burn = {L: _burn_seconds(series, L) * 1000 for L in range(1, 181)}  # 180 of 200
+        burn_a = {L: _burn_seconds(series, L) * 1000 for L in range(1, 181)}
+        burn_b = {L: _burn_seconds(series, L) * 1000 for L in range(21, 201)}
         db.add(MachineParams(id=1))
-        _linked_pair(db, tmp_path, "pr_part", series, burn)
+        _linked_pair(db, tmp_path, "pr_part_a", series, burn_a)
+        _linked_pair(db, tmp_path, "pr_part_b", series, burn_b)
         db.flush()
 
         result = recalibrate_scan_and_apply(db)
         assert scan_model_key("steel", THICKNESS) in result["applied"]
+
+    def test_stale_models_without_candidates_are_removed(self, db):
+        db.add(MachineParams(
+            id=1,
+            scan_model_by_mat={
+                "steel@0.100": {"beta": [1.0]},
+                "aluminum@0.060": {"beta": [2.0]},
+            },
+        ))
+        db.flush()
+
+        result = recalibrate_scan_and_apply(db)
+        assert set(result["removed"]) == {"steel@0.100", "aluminum@0.060"}
+        assert db.get(MachineParams, 1).scan_model_by_mat == {}
