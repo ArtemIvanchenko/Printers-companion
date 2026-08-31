@@ -11,6 +11,8 @@ raw-log access.
 """
 from __future__ import annotations
 
+from datetime import datetime
+from statistics import median
 from typing import Any
 
 from analytics.prediction.contract import PredictionResult, PredictionSource
@@ -23,6 +25,7 @@ MIN_SESSIONS = 4
 MIN_REL_SLOPE = 0.005
 # Don't report forecasts further out than this (too speculative to action).
 MAX_HORIZON_SESSIONS = 200
+MAX_TREND_HISTORY = 30
 
 
 def _signal_series(sessions: list[dict[str, Any]], signal: str) -> list[float]:
@@ -33,7 +36,25 @@ def _signal_series(sessions: list[dict[str, Any]], signal: str) -> list[float]:
         mean = st.get("mean")
         if isinstance(mean, (int, float)) and not isinstance(mean, bool):
             series.append(float(mean))
-    return series
+    return series[-MAX_TREND_HISTORY:]
+
+
+def _session_cadence_days(sessions: list[dict[str, Any]]) -> float | None:
+    timestamps = []
+    for session in sessions:
+        raw = session.get("start_ts")
+        if not isinstance(raw, str):
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    gaps = [
+        (later - earlier).total_seconds() / 86400
+        for earlier, later in zip(timestamps, timestamps[1:])
+        if later > earlier
+    ]
+    return median(gaps[-20:]) if gaps else None
 
 
 def _group_for(sessions: list[dict[str, Any]], signal: str) -> str:
@@ -103,6 +124,7 @@ def forecast_maintenance(
         all_signals.update((s.get("signal_stats") or {}).keys())
 
     forecasts: list[dict[str, Any]] = []
+    cadence_days = _session_cadence_days(sessions)
     for signal in sorted(all_signals):
         thr = alarm_thresholds.get(signal)
         if not thr:
@@ -183,6 +205,26 @@ def forecast_maintenance(
             "threshold_kind": kind,
             "sessions_to_threshold": sessions_to,
             "sessions_to_threshold_interval": list(interval) if interval is not None else None,
+            # Threshold-based RUL: valid only if the observed trend continues.
+            "remaining_useful_life": {
+                "method": "threshold_projection",
+                "sessions": sessions_to,
+                "sessions_interval": list(interval) if interval is not None else None,
+                "calendar_days": (
+                    round(sessions_to * cadence_days, 1) if cadence_days is not None else None
+                ),
+                "calendar_days_interval": (
+                    [round(value * cadence_days, 1) for value in interval]
+                    if cadence_days is not None and interval is not None else None
+                ),
+                "average_days_between_prints": round(cadence_days, 2) if cadence_days is not None else None,
+                "reliability": (
+                    "high" if len(series) >= 10 and not interval_warnings
+                    else "medium" if len(series) >= 6 and interval is not None
+                    else "low"
+                ),
+                "assumption_ru": "Текущий тренд сохраняется, а режим эксплуатации не меняется",
+            },
             "n_sessions": len(series),
             "recommendation": rec,
             "prediction": PredictionResult(

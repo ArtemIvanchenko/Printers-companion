@@ -9,12 +9,12 @@ Database-agnostic: it uses whatever DATABASE_URL is configured (PostgreSQL insid
 Docker, or local SQLite). Schema is ensured via create_all() (idempotent).
 
 Usage:
-    python import_logs.py <folder>
-    python import_logs.py "C:\\PrinterLogs\\incoming"
-    RAW_LOGS_DIR=/mnt/raw_logs python import_logs.py        # folder from env
+    python scripts/maintenance/import_logs.py <folder>
+    python scripts/maintenance/import_logs.py "C:\\PrinterLogs\\incoming"
+    RAW_LOGS_DIR=/mnt/raw_logs python scripts/maintenance/import_logs.py
 
 Examples (local SQLite):
-    DATABASE_URL=sqlite:///./printer_logs.db python import_logs.py ./logs
+    DATABASE_URL=sqlite:///./printer_logs.db python scripts/maintenance/import_logs.py ./logs
 """
 import argparse
 import os
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 # Ensure the project root is importable when run as a bare script.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from domain.services.ingestion import IngestionService
 from domain.services.session_grouping import group_files_into_sessions

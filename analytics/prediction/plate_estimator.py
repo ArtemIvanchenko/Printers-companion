@@ -132,6 +132,7 @@ import hashlib
 import io
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from analytics.prediction.layer_engine import (
@@ -153,6 +154,7 @@ from analytics.prediction.stl_slicer import EstimationError
 logger = logging.getLogger(__name__)
 
 _DEFAULT_JUMP_SPEED_MM_S = 5000.0
+MeshSource = bytes | Path
 
 
 @dataclass
@@ -208,14 +210,29 @@ class PlateEstimate:
         )
 
 
-def _load_raw_mesh(blob: bytes):
-    """Load STL bytes verbatim — no merging, no repair (sheets must survive)."""
+def _load_raw_mesh(source: MeshSource):
+    """Load an STL verbatim from bytes or disk (sheets must survive)."""
     import trimesh
 
-    mesh = trimesh.load(io.BytesIO(blob), file_type="stl", process=False)
+    if isinstance(source, Path):
+        mesh = trimesh.load(str(source), file_type="stl", process=False)
+    else:
+        mesh = trimesh.load(io.BytesIO(source), file_type="stl", process=False)
     if mesh.is_empty or len(mesh.faces) == 0:
         raise EstimationError("STL не содержит геометрии")
     return mesh
+
+
+def _source_sha256(source: MeshSource) -> str:
+    """Hash a mesh source with bounded memory for content-addressed caching."""
+    digest = hashlib.sha256()
+    if isinstance(source, Path):
+        with source.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    else:
+        digest.update(source)
+    return digest.hexdigest()
 
 
 def _physics_scan_seconds(
@@ -250,7 +267,7 @@ _GEOMETRY_CACHE_VERSION = 2
 
 
 def _geometry_cache_key(
-    named: list[tuple[str, bytes, str]], hatch_distance_mm: float,
+    named: list[tuple[str, MeshSource, str]], hatch_distance_mm: float,
     layer_thickness_mm: float,
 ) -> str:
     """Content-addressed key for a plate's LayerGeometrySeries.
@@ -265,7 +282,7 @@ def _geometry_cache_key(
     body_boundary_mm is positional over the mesh list. That only costs a
     missed optimization, never a wrong answer — a miss just recomputes.
     """
-    tokens = [f"{kind}:{hashlib.sha256(blob).hexdigest()}" for _, blob, kind in named]
+    tokens = [f"{kind}:{_source_sha256(source)}" for _, source, kind in named]
     raw = (
         "|".join(tokens)
         + f"|hatch={hatch_distance_mm:.6f}|layer={layer_thickness_mm:.6f}"
@@ -275,17 +292,18 @@ def _geometry_cache_key(
 
 
 def estimate_plate(
-    parts: list[tuple[str, bytes]],
-    supports: list[tuple[str, bytes]],
+    parts: list[tuple[str, MeshSource]],
+    supports: list[tuple[str, MeshSource]],
     params: dict,
     material: str,
     geometry_cache: Any | None = None,
 ) -> PlateEstimate:
     """Estimate machine time for the whole plate.
 
-    ``parts``/``supports`` are ``(display_name, stl_bytes)`` pairs in shared
-    plate coordinates (Magics exports satisfy this). Raises ``EstimationError``
-    when required machine parameters are missing or no body can be estimated.
+    ``parts``/``supports`` are ``(display_name, source)`` pairs in shared plate
+    coordinates, where ``source`` is either STL ``bytes`` or a local ``Path``
+    (Magics exports satisfy this). Raises ``EstimationError`` when required
+    machine parameters are missing or no body can be estimated.
 
     ``geometry_cache``, if given, needs ``get_geometry_cache(key) -> dict | None``
     and ``save_geometry_cache(key, series_json, body_count) -> None`` —
@@ -316,14 +334,14 @@ def estimate_plate(
         raise EstimationError("Не задано количество лазеров (параметры машины)")
 
     warnings: list[str] = []
-    named = [(name, blob, "part") for name, blob in parts] + [
-        (name, blob, "support") for name, blob in supports
+    named = [(name, source, "part") for name, source in parts] + [
+        (name, source, "support") for name, source in supports
     ]
     meshes = []
     metas = []
     parts_volume_mm3 = 0.0
-    for name, blob, kind in named:
-        mesh = _load_raw_mesh(blob)
+    for name, source, kind in named:
+        mesh = _load_raw_mesh(source)
         meshes.append(mesh)
         volume = None
         if kind == "part":
@@ -430,6 +448,6 @@ def estimate_plate(
 
 
 __all__ = [
-    "PlateEstimate", "BodyEstimate", "estimate_plate",
+    "PlateEstimate", "BodyEstimate", "MeshSource", "estimate_plate",
     "resolve_scan_model", "scan_model_key", "scan_seconds_from_model",
 ]

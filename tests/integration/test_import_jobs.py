@@ -153,4 +153,3 @@ def test_persist_parse_results_stores_event_provenance(tmp_path: Path) -> None:
     assert stored[0].source_line == 42
     assert stored[0].source_offset == 128
     assert stored[0].raw_excerpt == "2026-04-27 10:00:00 Старт печати"
-

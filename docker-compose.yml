@@ -13,7 +13,14 @@ x-app-env: &app-env
   environment:
     APP_ENV:                             ${APP_ENV:-local}
     LOG_LEVEL:                           ${LOG_LEVEL:-INFO}
+    COMPUTE_NODE_ID:                     ${COMPUTE_NODE_ID:-local-operator}
+    OPERATOR_INSTANCE_FILE:              ${OPERATOR_INSTANCE_FILE:-/var/lib/printer-companion/instance-id}
     DATABASE_URL:                        ${DATABASE_URL:-postgresql+psycopg://printer_logs:change-me@postgres:5432/printer_logs}
+    DB_POOL_SIZE:                        ${DB_POOL_SIZE:-2}
+    DB_MAX_OVERFLOW:                     ${DB_MAX_OVERFLOW:-2}
+    DB_POOL_TIMEOUT:                     ${DB_POOL_TIMEOUT:-30}
+    JOB_LEASE_SECONDS:                   ${JOB_LEASE_SECONDS:-900}
+    JOB_HEARTBEAT_SECONDS:               ${JOB_HEARTBEAT_SECONDS:-60}
     REDIS_URL:                           ${REDIS_URL:-redis://redis:6379/0}
     MINIO_ENDPOINT:                      ${MINIO_ENDPOINT:-minio:9000}
     MINIO_ROOT_USER:                     ${MINIO_ROOT_USER:-minioadmin}
@@ -27,6 +34,7 @@ x-app-env: &app-env
     MINIO_SECURE:                        ${MINIO_SECURE:-false}
     RAW_LOGS_CONTAINER_PATH:             ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
     INCOMING_PATH:                       ${INCOMING_PATH:-/mnt/raw_logs}
+    STARTUP_IMPORT_ENABLED:               ${STARTUP_IMPORT_ENABLED:-true}
     WATCH_MODE:                          ${WATCH_MODE:-filesystem_events}
     REQUIRE_OPERATOR_IMPORT_CONFIRMATION: ${REQUIRE_OPERATOR_IMPORT_CONFIRMATION:-true}
     FILE_STABILITY_SECONDS:              ${FILE_STABILITY_SECONDS:-60}
@@ -74,13 +82,14 @@ services:
       dockerfile: Dockerfile.api
       args:
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
-    # 2 workers for steady-state traffic, unrelated to the CPU limit below.
-    # Each worker holds its own DB pool, rate-limiter state and analysis cache,
-    # so extra workers cost connections and cache hit-rate, not throughput,
-    # at this deployment's scale (a handful of concurrent operators).
-    command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers 2"
+    # One worker is deliberate: every additional process owns another DB pool
+    # and cache. Operator deployments point several PCs at a low-power NAS, so
+    # horizontal request capacity belongs on those PCs, not in extra processes.
+    command: sh -c "alembic upgrade head && uvicorn api.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --workers ${API_WORKERS:-1}"
     ports:
-      - "127.0.0.1:8000:8000"
+      # API работает только на этом операторском ПК. Общие данные хранятся на NAS,
+      # но задания других операторских ПК этот экземпляр не принимает.
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,6 +110,9 @@ services:
       - type: volume
         source: app_logs
         target: /app/logs
+      - type: volume
+        source: operator_state
+        target: /var/lib/printer-companion
     tmpfs:
       - /tmp:size=4g,mode=1777
     security_opt:
@@ -139,6 +151,9 @@ services:
         source: ${RAW_LOGS_HOST_PATH:-./raw_logs}
         target: ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
         read_only: true
+      - type: volume
+        source: operator_state
+        target: /var/lib/printer-companion
     depends_on:
       postgres:
         condition: service_healthy
@@ -161,6 +176,39 @@ services:
         limits:
           cpus: "4.0"
           memory: 8g
+
+  estimator:
+    <<: *app-env
+    image: ghcr.io/artemivanchenko/printers-companion:api
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    command: python -m worker.estimate_tasks
+    volumes:
+      - type: volume
+        source: operator_state
+        target: /var/lib/printer-companion
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend_net
+      - storage_net
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=4g,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
 
   watcher:
     <<: *app-env
@@ -347,3 +395,4 @@ volumes:
   redis_data:
   minio_data:
   app_logs:
+  operator_state:

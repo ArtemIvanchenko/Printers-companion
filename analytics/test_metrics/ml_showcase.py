@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 
 from analytics.telemetry_parser import load_aligned_signals
+from profiles.signal_catalog import signal_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +39,18 @@ def run_ruptures(values: np.ndarray, times: np.ndarray) -> dict[str, Any]:
         "library": "ruptures",
         "title": "Точки смены поведения сигнала (change-point detection)",
         "message": (
-            f"Найдено {len(rows)} точек изменения поведения температуры ST5 "
+            f"Найдено {len(rows)} точек изменения поведения сигнала "
+            f"«{signal_display_name('ST5')}» "
             f"— вероятные фазы процесса (нагрев / стабилизация / остывание)."
         ),
         "chart": {
             "type": "line",
             "labels": [str(t) for t in times[::step][: len(x)]],
-            "series": [{"label": "ST5", "data": [round(float(v), 3) for v in x]}],
+            "series": [{"label": signal_display_name("ST5"), "data": [round(float(v), 3) for v in x]}],
             "marker_indices": [int(i) for i in bkps_ds],
         },
         "table": {
-            "columns": ["Строка", "Время", "ST5"],
+            "columns": ["Строка", "Время", signal_display_name("ST5")],
             "rows": [[int(i), str(times[i]), round(float(values[i]), 3)] for i in rows[:20]],
         },
     }
@@ -258,9 +260,11 @@ def compute_test_metrics(sensors_log_path: str | Path) -> dict[str, Any]:
     jobs: list[tuple[str, Any]] = [
         ("ruptures", lambda: run_ruptures(aligned["ST5"], aligned["Time"])),
         ("PyOD", lambda: run_pyod(aligned, ["SO1", "ST5", "SP4"])),
-        ("tsfresh", lambda: run_tsfresh(aligned["SO1"], "SO1 (кислород)")),
-        ("LightGBM + SHAP", lambda: run_lightgbm_shap(aligned["SO1"], "SO1 (кислород)")),
-        ("River", lambda: run_river(aligned["Flow T"], aligned["Time"], "Flow T (температура газа)")),
+        ("tsfresh", lambda: run_tsfresh(aligned["SO1"], signal_display_name("SO1"))),
+        ("LightGBM + SHAP", lambda: run_lightgbm_shap(aligned["SO1"], signal_display_name("SO1"))),
+        ("River", lambda: run_river(
+            aligned["Flow T"], aligned["Time"], signal_display_name("Flow T")
+        )),
     ]
 
     sections: list[dict[str, Any]] = []

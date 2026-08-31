@@ -2,7 +2,18 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from storage.db.base import Base
@@ -11,12 +22,33 @@ from storage.db.session import _json_default_dict
 from domain.models.sessions import _new_id, utcnow
 
 
+def _current_compute_node_id() -> str:
+    # Lazy import keeps model import independent from Settings construction.
+    from core.config.settings import get_settings
+
+    return get_settings().compute_node_id
+
+
 class PrintRecord(Base):
     """One physical print: links STL/Magics/photos with the log session."""
 
     __tablename__ = "print_records"
+    __table_args__ = (
+        Index(
+            "ux_print_records_session_id",
+            "session_id",
+            unique=True,
+            postgresql_where=text("session_id IS NOT NULL"),
+            sqlite_where=text("session_id IS NOT NULL"),
+        ),
+    )
 
     record_id: Mapped[str] = mapped_column(String(80), primary_key=True, default=lambda: _new_id("pr"))
+    # Immutable workstation that created the card and therefore owns all
+    # geometry calculations for it. Other PCs may read the shared card/result.
+    origin_compute_node_id: Mapped[str] = mapped_column(
+        String(80), nullable=False, default=lambda: _current_compute_node_id(), index=True
+    )
     name: Mapped[str] = mapped_column(String(240), nullable=False)
     material: Mapped[str] = mapped_column(String(120), default="steel")
     # Thickness this print was run at. NULL = not specified, fall back to the
@@ -40,14 +72,34 @@ class PrintRecord(Base):
     # cost history survives later rate changes in machine_params.
     powder_cost_rub_per_kg: Mapped[float | None] = mapped_column(Float)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
+    # Optimistic concurrency token.  Operator workstations may keep the same
+    # card open at once; SQLAlchemy includes this value in UPDATE's WHERE
+    # clause, so an older browser cannot silently overwrite a newer edit.
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Human-readable workstation identity supplied by the UI.  This is not an
+    # authentication mechanism; it is lightweight operational provenance for
+    # resolving conflicts on a shared NAS-backed database.
+    updated_by: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __mapper_args__ = {"version_id_col": revision}
 
 
 class PrintRecordFile(Base):
     """A file attached to a print record, stored in MinIO."""
 
     __tablename__ = "print_record_files"
+    __table_args__ = (
+        Index(
+            "ux_print_record_files_record_checksum",
+            "record_id",
+            "checksum",
+            unique=True,
+            postgresql_where=text("checksum <> ''"),
+            sqlite_where=text("checksum <> ''"),
+        ),
+    )
 
     file_id: Mapped[str] = mapped_column(String(80), primary_key=True, default=lambda: _new_id("prf"))
     record_id: Mapped[str] = mapped_column(ForeignKey("print_records.record_id"), index=True)

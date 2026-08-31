@@ -4,9 +4,21 @@ from api.deps.repositories import get_runtime_repository
 from background_reanalysis.job_planner import plan_historical_reanalysis
 from background_reanalysis.scheduler import run_bounded_historical_reanalysis
 from storage.repositories.runtime import RuntimeRepository
+from storage.repositories.jobs_repo import JobsRepository
+from storage.db.session import get_db
+from sqlalchemy.orm import Session
+from core.config.settings import get_settings
 
 
 router = APIRouter(prefix="/background-analysis", tags=["background-analysis"])
+
+
+@router.get("/jobs/{job_id}")
+def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    job = JobsRepository(db).get(job_id)
+    if not job or job["owner_node_id"] != get_settings().compute_node_id:
+        raise HTTPException(status_code=404, detail="Background job not found")
+    return job
 
 
 @router.post("/run")

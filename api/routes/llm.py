@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
 from core.config.settings import get_settings
+from domain.services.compute_affinity import ComputeAffinityError
 from reporting.llm.discovery import discover_lmstudio
 from reporting.llm.evidence_package import build_evidence_package
 from reporting.llm.providers.factory import get_llm_provider
@@ -75,6 +76,23 @@ async def llm_enhance_report(
     report = repo.get_report(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    session_id = report.get("session_id")
+    if session_id:
+        try:
+            session = repo.require_session_compute_owner(
+                str(session_id),
+                requested_compute_node_id=get_settings().compute_node_id,
+            )
+        except ComputeAffinityError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "LLM-дополнение отчёта выполняется только на ПК-владельце "
+                    f"сессии. {exc}"
+                ),
+            ) from exc
+        if session is None:
+            raise HTTPException(status_code=409, detail="Report session no longer exists")
     evidence = build_evidence_package(report).model_dump(mode="json")
     result = await get_llm_provider().generate_markdown(evidence)
     if result.success:

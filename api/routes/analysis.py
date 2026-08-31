@@ -81,6 +81,11 @@ def _load_sessions(db) -> list[dict[str, Any]]:
             "end_ts":         row.end_ts.isoformat() if row.end_ts else None,
             "classification": classification,
             "signal_stats":   signal_stats,
+            "layer_burn_values": [
+                point.get("duration_sec")
+                for point in ((group.get("telemetry") or {}).get("layer_burn_times") or [])
+                if isinstance(point, dict) and isinstance(point.get("duration_sec"), (int, float))
+            ],
             # Include health data already computed at ingest time.
             "health": {
                 "readiness_score": (group.get("health") or {}).get("readiness", {}).get("score"),
@@ -120,8 +125,26 @@ def _compute() -> dict[str, Any]:
         events   = _load_operator_events(db)
 
     from analytics.cross_session import run_cross_session_analysis
+    from analytics.process_monitoring.sequence_alignment import compare_similar_layer_sequences
+    from profiles.signal_catalog import signal_labels_ru
     result = run_cross_session_analysis(sessions, events)
-    result["sessions_detail"] = sessions   # include per-session stats for the dashboard
+    result["sequence_alignment"] = {
+        "mode": "shadow",
+        "comparisons": compare_similar_layer_sequences(sessions),
+        "operator_action_allowed": False,
+    }
+    # Per-layer sequences can contain thousands of points. Keep them out of the
+    # response after using them for DTW; the dashboard only needs aggregate rows.
+    result["sessions_detail"] = [
+        {key: value for key, value in session.items() if key != "layer_burn_values"}
+        for session in sessions
+    ]
+    result["signal_labels"] = signal_labels_ru()
+    for collection in ("trends", "before_after", "anomalies", "shifts"):
+        for finding in result.get(collection, []):
+            signal = finding.get("signal")
+            if signal:
+                finding["signal_name_ru"] = result["signal_labels"].get(signal, signal)
     # NOTE: computed_at is set by the caller (get_patterns) as a real datetime so
     # the cache only ever holds a datetime; it is serialised to ISO on output.
     return result
@@ -299,10 +322,35 @@ def maintenance_forecast() -> dict[str, Any]:
     """Project per-signal drift toward alarm thresholds (predictive maintenance)."""
     from analytics.prediction.maintenance import forecast_maintenance
     from analytics.thresholds import load_alarm_thresholds
+    from profiles.signal_catalog import signal_metadata
     with session_scope() as db:
         sessions = _load_sessions(db)  # already chronological, carries signal_stats
     forecasts = forecast_maintenance(sessions, load_alarm_thresholds())
+    for forecast in forecasts:
+        meta = signal_metadata(forecast["signal"])
+        forecast["signal_name_ru"] = meta["display_name_ru"]
+        forecast["unit_ru"] = meta["unit_display_ru"]
     return {"n_sessions": len(sessions), "forecasts": forecasts}
+
+
+@router.get("/deviation-forecast")
+def deviation_forecast() -> dict[str, Any]:
+    """Forecast next-print signal means with empirical out-of-time intervals."""
+    from analytics.prediction.deviation_forecast import forecast_signal_deviations
+    from analytics.thresholds import load_alarm_thresholds
+    from profiles.signal_catalog import signal_metadata
+    with session_scope() as db:
+        sessions = _load_sessions(db)
+    forecasts = forecast_signal_deviations(sessions, load_alarm_thresholds())
+    for forecast in forecasts:
+        meta = signal_metadata(forecast["signal"])
+        forecast["signal_name_ru"] = meta["display_name_ru"]
+        forecast["unit_ru"] = meta["unit_display_ru"]
+    return {
+        "n_sessions": len(sessions),
+        "forecast_horizon": "next_print",
+        "forecasts": forecasts,
+    }
 
 
 @router.get("/patterns/narrate")

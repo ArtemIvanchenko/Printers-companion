@@ -23,7 +23,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from domain.models.prints import MachineParams, PrintRecord
@@ -40,6 +40,22 @@ CALIBRATION_WINDOW = 20
 # parameters / orientation rather than a real systematic offset — don't apply
 # it silently; surface it instead.
 CORRECTION_MIN, CORRECTION_MAX = 0.5, 2.0
+_CALIBRATION_ADVISORY_LOCK = 0x50524341  # stable PostgreSQL bigint key: "PRCA"
+
+
+def try_acquire_calibration_lock(db: Session) -> bool:
+    """Serialize shared MachineParams calibration across operator PCs.
+
+    The lock is transaction-scoped and PostgreSQL performs no calculation; it
+    merely ensures the last finishing workstation cannot overwrite a newer
+    calibration from another one. SQLite tests/single-PC installs need no lock.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return True
+    return bool(db.scalar(
+        text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _CALIBRATION_ADVISORY_LOCK},
+    ))
 
 # Percentile band for the print-time uncertainty interval, taken from the same
 # actual/raw ratio history the point factor uses. 0.1/0.9 (an 80% band) rather

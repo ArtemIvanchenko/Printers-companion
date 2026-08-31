@@ -1,5 +1,6 @@
 from domain.enums.common import SourceFileFamily
 from profiles.m350.profile import build_registry, get_profile
+from profiles.signal_catalog import signal_display_name, signal_metadata
 
 
 def test_m350_profile_loads_with_legacy_name_and_parsers() -> None:
@@ -37,3 +38,12 @@ def test_m350_signal_alarm_thresholds() -> None:
 
     lir = profile.signal_mappings.get("LIR", {})
     assert lir.get("min_val") == -420000
+
+
+def test_signal_catalog_exposes_readable_russian_names_without_renaming_raw_keys() -> None:
+    profile = get_profile()
+    assert "Flow T" in profile.signal_mappings
+    assert signal_display_name("Flow T") == "Температура продувочного газа"
+    assert signal_display_name("SO1") == "Кислород в рабочей камере — датчик 1"
+    assert signal_metadata("SP4")["unit_display_ru"] == "бар"
+    assert signal_metadata("SP99")["display_name_ru"] == "Канал давления SP99"

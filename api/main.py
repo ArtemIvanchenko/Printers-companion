@@ -36,10 +36,11 @@ from api.routes import (
     web,
 )
 from core.config.settings import get_settings
+from core.compute_identity import register_compute_node
 from core.logging.config import RequestIDMiddleware, configure_logging
 from core.preflight import run_preflight, exit_on_failure
 from core.versioning.version import APP_VERSION
-from storage.db.migrate import upgrade_to_head
+from storage.db.migrate import assert_schema_at_head, upgrade_to_head
 
 logger = logging.getLogger(__name__)
 
@@ -48,76 +49,27 @@ _BG_TASKS: set[asyncio.Task] = set()
 
 
 def _startup_import(raw_logs_path: str) -> None:
-    """On startup: scan the raw-logs folder and import any unprocessed sessions.
-
-    The watcher only reacts to NEW files arriving while it's running.
-    This task makes sure sessions that were on disk before the containers
-    started (or while they were down) are picked up automatically.
-
-    Idempotent: already-imported sessions are detected by group_id and skipped.
-
-    Deliberately synchronous: parsing a folder of logs is heavy CPU + file I/O
-    and must not run on the event loop (it would stall every request for the
-    length of the scan). ``_startup_import_once`` hands it to a worker thread.
-    """
+    """On startup, durably enqueue raw-log candidates through the normal path."""
     path = Path(raw_logs_path)
     if not path.exists() or not path.is_dir():
         logger.warning("startup_import: raw-logs path not found: %s", path)
         return
 
-    logger.info("startup_import: scanning %s for unimported sessions …", path)
+    logger.info("startup_import: scanning %s for import candidates …", path)
     try:
-        # Lazy imports — avoid loading heavy ML deps at module level.
-        from domain.services.ingestion import IngestionService
-        from domain.services.session_grouping import group_files_into_sessions
-        from domain.services.session_overview import build_group_overview
-        from profiles.m350.profile import build_registry, get_profile
-        from storage.db.session import session_scope
-        from storage.repositories.runtime import RuntimeRepository
+        from api.routes.uploads import _trigger_rescan
 
-        registry = build_registry()
-        profile = get_profile()
-        result = IngestionService(registry, profile).parse(path)
-        groups = group_files_into_sessions(result.files)
-
-        if not groups:
-            logger.info("startup_import: no log groups found in %s", path)
-            return
-
-        logger.info("startup_import: found %d session group(s)", len(groups))
-
-        with session_scope() as db:
-            repo = RuntimeRepository(db)
-            # IDs only: list_session_payloads() would pull every session's full
-            # JSON payload into memory just to read its key.
-            existing = repo.list_session_ids()
-            imported = 0
-            for group in groups:
-                session_id = group.group_id
-                if session_id in existing:
-                    continue
-                overview = build_group_overview(
-                    group.group_id,
-                    group.files,
-                    start_ts=group.start_ts,
-                    end_ts=group.end_ts,
-                    grouping_confidence=group.confidence,
-                )
-                repo.save_session_payload(
-                    session_id,
-                    # Strip parse_result (events): keeps the payload tiny; events
-                    # are re-read from disk on demand. Avoids ~96 MB/session.
-                    {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
-                )
-                imported += 1
-            # save_session_payload already commits each row; no extra commit needed
-
-            from domain.services.print_linking import auto_link_print_records
-
-            links = auto_link_print_records(db)  # session_scope commits at the boundary
-
-        logger.info("startup_import: done — %d new session(s) imported, %d already existed, %d linked to print records",
-                    imported, len(groups) - imported, len(links))
+        # Existing flat log folders must be one import batch. Enumerating every
+        # child here produced hundreds of confirmations and prevented files
+        # from the same dated print from reaching the grouping algorithm
+        # together.
+        jobs = _trigger_rescan(raw_logs_path, candidates=[path])
+        waiting = sum(job["status"] == "awaiting_operator_confirmation" for job in jobs)
+        logger.info(
+            "startup_import: %d durable job(s), %d awaiting confirmation",
+            len(jobs),
+            waiting,
+        )
     except Exception:
         logger.exception("startup_import: failed (non-fatal)")
 
@@ -168,8 +120,8 @@ async def _startup_llm_discovery() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    # Local dev (single process) auto-migrates here; prod runs `alembic upgrade
-    # head` once in the container entrypoint before workers spawn (race-free).
+    # Local dev (single process) auto-migrates here. NAS/operator production
+    # uses the explicit one-shot migrator; API performs a read-only head check.
     if settings.app_env == "local":
         upgrade_to_head()
     report = run_preflight(settings, component="api")
@@ -177,6 +129,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logging.getLogger("preflight").warning(warn)
     # Refuse to start in production with default credentials / failed checks.
     exit_on_failure(report)
+    if settings.app_env not in ("local", "test"):
+        assert_schema_at_head()
+        instance_id = register_compute_node(settings)
+        logger.info(
+            "compute node %s registered to workstation %s",
+            settings.compute_node_id,
+            instance_id[:12],
+        )
 
     # Best-effort: create all MinIO buckets so file uploads work immediately.
     try:
@@ -190,10 +150,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("startup: ensure_all_buckets failed (non-fatal)")
 
-    # Kick off background import of existing log files (one worker only).
-    task = asyncio.create_task(_startup_import_once(settings.raw_logs_container_path))
-    _BG_TASKS.add(task)
-    task.add_done_callback(_BG_TASKS.discard)
+    # Optional legacy-root scan. NAS/operator deployments disable it: each
+    # upload batch is already enqueued explicitly, and rescanning the whole
+    # historical mount after every restart would overlap those jobs.
+    if settings.startup_import_enabled:
+        task = asyncio.create_task(_startup_import_once(settings.raw_logs_container_path))
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
 
     # Non-blocking LM Studio auto-discovery (was a blocking probe at import time).
     llm_task = asyncio.create_task(_startup_llm_discovery())
@@ -324,5 +287,5 @@ app.include_router(test_metrics.router)
 @app.get("/alarm-demo", response_class=__import__("fastapi.responses", fromlist=["HTMLResponse"]).HTMLResponse)
 async def alarm_demo():
     from pathlib import Path
-    html = (Path(__file__).parent.parent / "alarm_demo.html").read_text(encoding="utf-8")
+    html = (Path(__file__).parent.parent / "web_templates" / "alarm_demo.html").read_text(encoding="utf-8")
     return html

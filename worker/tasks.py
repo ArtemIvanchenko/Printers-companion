@@ -1,22 +1,69 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import signal
 import time
 
+from core.compute_identity import process_lease_owner, register_compute_node
 from core.config.settings import get_settings
 from core.logging.config import configure_logging
 from core.preflight import run_preflight, exit_on_failure
 from domain.enums.common import ImportJobStatus
-from domain.services.import_jobs import retry_import_job
+from domain.models.prints import PrintRecord
+from domain.models.sessions import BuildSession
+from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
+from domain.services.import_jobs import (
+    LeaseCheckUnavailableError,
+    StaleImportLeaseError,
+    retry_import_job,
+)
 from domain.services.ingestion import IngestionService
 from profiles.m350.profile import build_registry, get_profile
 from reporting.json_report.generator import generate_session_json_report
 from storage.db.session import SessionLocal
 from storage.repositories.runtime import RuntimeRepository
+from worker.lease_heartbeat import LeaseHeartbeat
 
 
 logger = logging.getLogger(__name__)
+
+
+def _require_import_entity_owners(
+    db,
+    *,
+    owner_node_id: str,
+    print_record_id: str | None = None,
+    session_ids: list[str] | None = None,
+) -> None:
+    """Fence a claimed job against domain ownership, not only job ownership."""
+    if print_record_id:
+        record = db.get(PrintRecord, print_record_id)
+        if record is None:
+            raise RuntimeError(f"print record '{print_record_id}' no longer exists")
+        require_compute_owner(
+            entity_type="print_record",
+            entity_id=record.record_id,
+            origin_compute_node_id=record.origin_compute_node_id,
+            requested_compute_node_id=owner_node_id,
+        )
+    for session_id in session_ids or []:
+        session = db.get(BuildSession, session_id)
+        if session is None:
+            raise RuntimeError(f"session '{session_id}' was not persisted")
+        require_compute_owner(
+            entity_type="session",
+            entity_id=session.session_id,
+            origin_compute_node_id=session.origin_compute_node_id,
+            requested_compute_node_id=owner_node_id,
+        )
+
+
+def _lease_expired(lease_until: datetime | None) -> bool:
+    if lease_until is None:
+        return True
+    if lease_until.tzinfo is None:
+        lease_until = lease_until.replace(tzinfo=timezone.utc)
+    return lease_until <= datetime.now(timezone.utc)
 
 
 class ExponentialBackoff:
@@ -55,91 +102,253 @@ def analyze_folder(folder: str, session_id: str = "local_session") -> dict:
     return generate_session_json_report(session_id, result.files)
 
 
-def process_due_import_jobs() -> int:
-    now = datetime.now(timezone.utc)
+def process_due_import_jobs(lease_owner: str | None = None) -> int:
     processed = 0
     failed = 0
     registry = build_registry()
     profile = get_profile()
     settings = get_settings()
+    lease_owner = lease_owner or process_lease_owner(settings.compute_node_id)
 
-    # Read pending job IDs first in a short-lived session.
-    # Each job then gets its OWN session so a DB error in one job
-    # (e.g. PostgreSQL 1 GB jsonb limit) cannot roll back all others.
-    pending_ids: list[str] = []
-    with SessionLocal() as db:
-        repo = RuntimeRepository(db)
-        for job in repo.list_import_jobs():
-            due_postponed = (
-                job.status == ImportJobStatus.postponed
-                and job.confirmed_by is not None
-                and job.postponed_until is not None
-                and job.postponed_until <= now
+    while True:
+        # Claim under a row lock, then commit the short transaction before the
+        # long local parse.  The WHERE clause includes owner_node_id, so a PC
+        # never downloads or executes another operator PC's work.
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as claim_db:
+            claimed = RuntimeRepository(claim_db).claim_next_import_job(
+                owner_node_id=settings.compute_node_id,
+                lease_owner=lease_owner,
+                now=now,
+                lease_seconds=settings.job_lease_seconds,
             )
-            if job.status == ImportJobStatus.checking_stability or due_postponed:
-                pending_ids.append(job.import_job_id)
+            claim_db.commit()
+        if claimed is None:
+            break
+        job_id = claimed.import_job_id
+        lease_generation = claimed.lease_generation
 
-    for job_id in pending_ids:
-        # Fresh session per job — a failed commit here cannot poison other jobs.
-        with SessionLocal() as db:
-            repo = RuntimeRepository(db)
-            job = repo.get_import_job(job_id)
-            if job is None:
-                continue
+        logger.info(
+            "Processing import job %s from %s on node %s",
+            claimed.import_job_id,
+            claimed.source_path,
+            settings.compute_node_id,
+        )
+        try:
+            # Recheck the referenced card before touching local files or MinIO.
+            # Job affinity alone is insufficient if a malformed/stale job row
+            # points at a card created by another operator PC.
+            with SessionLocal() as affinity_db:
+                _require_import_entity_owners(
+                    affinity_db,
+                    owner_node_id=claimed.owner_node_id,
+                    print_record_id=claimed.print_record_id,
+                )
 
-            logger.info("Processing import job %s from %s", job.import_job_id, job.source_path)
-            try:
+            def renew_lease() -> bool:
+                with SessionLocal() as heartbeat_db:
+                    renewed = RuntimeRepository(heartbeat_db).renew_import_job_lease(
+                        job_id,
+                        lease_owner=lease_owner,
+                        lease_generation=lease_generation,
+                        lease_seconds=settings.job_lease_seconds,
+                    )
+                    heartbeat_db.commit()
+                    return renewed
+
+            # All file IO, parsing and analytics happen with no remote database
+            # transaction held open. A tiny configurable heartbeat keeps very
+            # large log batches from looking abandoned.
+            with LeaseHeartbeat(
+                renew_lease,
+                description=f"import:{job_id}",
+                interval_seconds=settings.job_heartbeat_seconds,
+            ) as heartbeat:
+                last_guard_check = 0.0
+
+                def current_lease() -> bool:
+                    nonlocal last_guard_check
+                    if heartbeat.lost:
+                        return False
+                    checked_at = time.monotonic()
+                    # Persistence checkpoints can occur every 500 events. One
+                    # fenced DB check per 30 seconds is enough; checking every
+                    # batch would add thousands of writes to a weak NAS.
+                    if checked_at - last_guard_check < 30.0:
+                        return True
+                    try:
+                        current = renew_lease()
+                    except Exception as exc:
+                        raise LeaseCheckUnavailableError(
+                            f"Could not verify import lease: {exc}"
+                        ) from exc
+                    last_guard_check = checked_at
+                    return current
+
                 result = retry_import_job(
-                    job,
+                    claimed,
                     registry=registry,
                     profile=profile,
                     actor="worker",
                     settings=settings,
                     now=now,
+                    lease_guard=current_lease,
+                )
+            if heartbeat.lost:
+                logger.warning("Discarding import result after lost lease: %s", job_id)
+                continue
+            result.job.lease_owner = None
+            result.job.lease_until = None
+
+            with SessionLocal() as db:
+                repo = RuntimeRepository(db)
+                # Serialize finalization with lease reclaim and operator
+                # Retry/Ignore/Postpone. The fence must be checked while the
+                # row lock is held; a plain read followed by an upsert lets a
+                # stale process overwrite a newly claimed generation.
+                current = repo.get_import_job_for_update(job_id)
+                # Fencing check: ignore a late result if an operator retried,
+                # ignored or otherwise replaced this exact lease meanwhile.
+                if (
+                    current is None
+                    or current.owner_node_id != settings.compute_node_id
+                    or current.lease_owner != lease_owner
+                    or current.lease_generation != lease_generation
+                    or _lease_expired(current.lease_until)
+                ):
+                    logger.warning("Discarding stale result for import job %s", job_id)
+                    continue
+                # Browser upload can attach an explicit card while this batch
+                # is already being parsed after the watcher discovered it.
+                # Keep that stronger identity from the locked current row;
+                # the claimed Pydantic snapshot predates the attachment.
+                if current.print_record_id and not result.job.print_record_id:
+                    result.job.print_record_id = current.print_record_id
+                _require_import_entity_owners(
+                    db,
+                    owner_node_id=current.owner_node_id,
+                    print_record_id=result.job.print_record_id,
+                    session_ids=result.job.session_ids,
                 )
                 repo.save_import_job(result.job)
                 repo.save_notifications(result.notifications)
-                repo.save_sessions(result.sessions)
+                repo.save_sessions(
+                    result.sessions,
+                    origin_compute_node_id=current.owner_node_id,
+                )
                 repo.save_reports(result.reports)
                 from domain.services.print_linking import auto_link_print_records
 
-                links = auto_link_print_records(db)
+                links: list[dict] = []
+                if result.job.print_record_id and len(result.job.session_ids) == 1:
+                    from domain.models.sessions import BuildSession
+                    from storage.repositories.prints_repo import PrintsRepository
+
+                    session_id = result.job.session_ids[0]
+                    session = db.get(BuildSession, session_id)
+                    if PrintsRepository(db).link_session(
+                        result.job.print_record_id,
+                        session_id,
+                        session.start_ts if session else None,
+                        compute_node_id=current.owner_node_id,
+                    ):
+                        links.append({
+                            "record_id": result.job.print_record_id,
+                            "session_id": session_id,
+                        })
+                links.extend(
+                    auto_link_print_records(
+                        db,
+                        origin_compute_node_id=current.owner_node_id,
+                    )
+                )
                 if links:
                     # New predicted/actual pairs appeared → refresh per-material
                     # time-correction factors automatically.
-                    from analytics.prediction.accuracy import recalibrate_and_apply
+                    from analytics.prediction.accuracy import (
+                        recalibrate_and_apply,
+                        try_acquire_calibration_lock,
+                    )
+                    from analytics.prediction.recoat_calibration import (
+                        recalibrate_recoat_and_apply,
+                    )
+                    from analytics.prediction.scan_calibration import (
+                        recalibrate_scan_and_apply,
+                    )
                     try:
-                        recalibrate_and_apply(db)
+                        if try_acquire_calibration_lock(db):
+                            recalibrate_and_apply(db)
+                            recalibrate_recoat_and_apply(db)
+                            recalibrate_scan_and_apply(db)
+                        else:
+                            logger.info(
+                                "Auto-calibration already runs on another operator PC; skipped"
+                            )
                     except Exception:
                         logger.exception("auto-calibration after linking failed")
                 db.commit()
                 processed += 1
-                logger.info("Successfully processed import job %s", job.import_job_id)
-            except Exception as exc:
-                failed += 1
-                logger.error(
-                    "Failed to process import job %s: %s",
-                    job.import_job_id,
-                    exc,
-                    exc_info=True,
-                )
-                # Save failed status in a brand-new session (the current one
-                # is in a rolled-back state and cannot be used).
-                try:
-                    with SessionLocal() as db2:
-                        repo2 = RuntimeRepository(db2)
-                        job2 = repo2.get_import_job(job_id)
-                        if job2:
+                logger.info("Successfully processed import job %s", claimed.import_job_id)
+        except Exception as exc:
+            failed += 1
+            logger.error(
+                "Failed to process import job %s: %s",
+                claimed.import_job_id,
+                exc,
+                exc_info=True,
+            )
+            # Save failed status in a brand-new session (the current one
+            # is in a rolled-back state and cannot be used).
+            try:
+                with SessionLocal() as db2:
+                    repo2 = RuntimeRepository(db2)
+                    job2 = repo2.get_import_job_for_update(job_id)
+                    if (
+                        job2
+                        and job2.owner_node_id == settings.compute_node_id
+                        and job2.lease_owner == lease_owner
+                        and job2.lease_generation == lease_generation
+                        and not _lease_expired(job2.lease_until)
+                    ):
+                        failure_now = datetime.now(timezone.utc)
+                        job2.error = str(exc)[:4000]
+                        if isinstance(exc, StaleImportLeaseError):
+                            # A valid fence normally cannot reach this branch;
+                            # leave the row reclaimable rather than publishing
+                            # a terminal state from a stale worker.
+                            continue
+                        # Any exception escaping confirm_import_job is either
+                        # infrastructure/finalization failure or an unexpected
+                        # worker bug. Retry deterministically up to the bounded
+                        # budget; parser/data errors are converted to a terminal
+                        # result inside confirm_import_job and do not get here.
+                        job2.stability_check_attempts += 1
+                        if isinstance(exc, ComputeAffinityError):
+                            # Ownership conflicts require an operator/admin to
+                            # fix the entity, not another automatic raw parse.
                             job2.status = ImportJobStatus.failed
-                            job2.updated_at = now
-                            repo2.save_import_job(job2)
-                            db2.commit()
-                except Exception as db_exc:
-                    logger.error(
-                        "Failed to persist error state for job %s: %s",
-                        job_id,
-                        db_exc,
-                    )
+                            job2.postponed_until = None
+                        elif (
+                            job2.stability_check_attempts
+                            < settings.file_stability_max_retries
+                        ):
+                            job2.status = ImportJobStatus.postponed
+                            job2.postponed_until = failure_now + timedelta(
+                                seconds=settings.file_stability_retry_seconds
+                            )
+                        else:
+                            job2.status = ImportJobStatus.failed
+                        job2.updated_at = failure_now
+                        job2.lease_owner = None
+                        job2.lease_until = None
+                        repo2.save_import_job(job2)
+                        db2.commit()
+            except Exception as db_exc:
+                logger.error(
+                    "Failed to persist error state for job %s: %s",
+                    job_id,
+                    db_exc,
+                )
 
     if failed > 0:
         logger.warning("Processed %s job(s) successfully, %s failed", processed, failed)
@@ -152,6 +361,11 @@ def main() -> None:
     configure_logging(settings.log_level)
     report = run_preflight(settings, component="worker")
     exit_on_failure(report)
+    if settings.app_env not in ("local", "test"):
+        from storage.db.migrate import assert_schema_at_head
+
+        assert_schema_at_head()
+        register_compute_node(settings)
     for warn in report.warnings:
         logger.warning("PREFLIGHT: %s", warn)
     stop = False
@@ -163,11 +377,15 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
-    logger.info("Worker started. Waiting for ingestion and analysis jobs.")
+    lease_owner = process_lease_owner(settings.compute_node_id)
+    logger.info(
+        "Worker started on compute node %s. Waiting for its local ingestion jobs.",
+        settings.compute_node_id,
+    )
     
     while not stop:
         try:
-            processed = process_due_import_jobs()
+            processed = process_due_import_jobs(lease_owner)
             if processed:
                 logger.info("Processed %s import job(s)", processed)
                 backoff.reset()  # Reset backoff on successful processing

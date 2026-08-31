@@ -147,8 +147,18 @@ class Segment(Base):
 
 class NotificationOutbox(Base):
     __tablename__ = "notification_outbox"
+    __table_args__ = (
+        Index(
+            "ix_notification_outbox_owner_pending",
+            "owner_node_id",
+            "channel",
+            "status",
+            "created_at",
+        ),
+    )
 
     notification_id: Mapped[str] = mapped_column(String(80), primary_key=True, default=lambda: _new_id("notification"))
+    owner_node_id: Mapped[str] = mapped_column(String(80), nullable=False)
     channel: Mapped[str] = mapped_column(String(80), default="telegram", index=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     buttons: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=_json_default_list)

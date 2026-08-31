@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
 from api.pagination import LimitParam, PaginatedResponse, SkipParam
+from core.config.settings import get_settings
+from domain.services.compute_affinity import ComputeAffinityError
 from domain.services.ingestion import IngestionService
 from domain.services.session_grouping import group_files_into_sessions
 from domain.services.session_overview import build_group_overview
@@ -66,12 +68,22 @@ def ingest_session(payload: dict, repo: RuntimeRepository = Depends(get_runtime_
             end_ts=group.end_ts,
             grouping_confidence=group.confidence,
         )
-        repo.save_session_payload(
-            session_id,
-            # Strip parse_result (events): tiny payload; events re-read from disk
-            # on demand (avoids ~96 MB/session of monitor events in the DB).
-            {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
-        )
+        try:
+            repo.save_session_payload(
+                session_id,
+                # Strip parse_result (events): tiny payload; events re-read from disk
+                # on demand (avoids ~96 MB/session of monitor events in the DB).
+                {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
+                origin_compute_node_id=get_settings().compute_node_id,
+            )
+        except ComputeAffinityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Сессия с таким идентификатором уже принадлежит другому "
+                    f"ПК и не может быть перезаписана: {exc}"
+                ),
+            ) from exc
         # Store the per-layer conclusions the calibrations actually need, while
         # the parsed log is in hand. Rows in the database are visible to every
         # operator; the file on this disk is not. The raw log is mirrored as
@@ -82,7 +94,10 @@ def ingest_session(payload: dict, repo: RuntimeRepository = Depends(get_runtime_
 
     from domain.services.print_linking import auto_link_print_records
 
-    links = auto_link_print_records(repo.db)
+    links = auto_link_print_records(
+        repo.db,
+        origin_compute_node_id=get_settings().compute_node_id,
+    )
     repo.flush()
     return {"root": result.root, "groups": response_groups, "skipped": result.skipped,
             "diagnostics": result.diagnostics, "print_record_links": links}
@@ -151,6 +166,9 @@ def get_session_telemetry(
         "idle_pct": features.get("idle_pct"),
         "telemetry": tel,
         "health": group.get("health") or {},
+        "soft_sensors": group.get("soft_sensors") or {},
+        "phase_statistics": group.get("phase_statistics") or {},
+        "advanced_monitoring": group.get("advanced_monitoring") or {},
         "has_telemetry": bool(tel.get("time")),
     }
 
@@ -176,37 +194,37 @@ def reanalyze_session(session_id: str, repo: RuntimeRepository = Depends(get_run
 
 @router.get("/{session_id}/timeline")
 def get_timeline(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
-    report = _generate_report(session_id, include_markdown=False, repo=repo)
+    report = _report_for_read(session_id, repo=repo)
     return _timeline_preview(report["timeline"])
 
 
 @router.get("/{session_id}/segments")
 def get_segments(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
-    report = _generate_report(session_id, include_markdown=False, repo=repo)
+    report = _report_for_read(session_id, repo=repo)
     return report["phase_segments"]
 
 
 @router.get("/{session_id}/files")
 def get_files(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
-    report = _generate_report(session_id, include_markdown=False, repo=repo)
+    report = _report_for_read(session_id, repo=repo)
     return report["file_inventory"]
 
 
 @router.get("/{session_id}/parse-diagnostics")
 def get_parse_diagnostics(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
-    report = _generate_report(session_id, include_markdown=False, repo=repo)
+    report = _report_for_read(session_id, repo=repo)
     return report["data_quality"]["parse_diagnostics"]
 
 
 @router.get("/{session_id}/anomalies")
 def get_session_anomalies(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
-    report = _generate_report(session_id, include_markdown=False, repo=repo)
+    report = _report_for_read(session_id, repo=repo)
     return report.get("anomalies", [])
 
 
 @router.get("/{session_id}/hypotheses")
 def get_session_hypotheses(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
-    report = _generate_report(session_id, include_markdown=False, repo=repo)
+    report = _report_for_read(session_id, repo=repo)
     return report.get("hypotheses", [])
 
 
@@ -234,6 +252,7 @@ def approve_session(
     from core.tolerance import learn_from_session
     from storage.db.session import session_scope
 
+    _require_local_session(session_id, repo)
     files = repo.get_session_files(session_id)
     if files is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -255,7 +274,46 @@ def approve_session(
     }
 
 
+def _require_local_session(session_id: str, repo: RuntimeRepository) -> None:
+    try:
+        row = repo.require_session_compute_owner(
+            session_id,
+            requested_compute_node_id=get_settings().compute_node_id,
+        )
+    except ComputeAffinityError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Пересчёт этой сессии разрешён только на создавшем её ПК. "
+                f"{exc}"
+            ),
+        ) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _report_for_read(session_id: str, repo: RuntimeRepository) -> dict:
+    """Serve shared derived results without parsing another PC's raw files."""
+    owner = repo.get_session_origin_compute_node_id(session_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if owner == get_settings().compute_node_id:
+        return _generate_report(session_id, include_markdown=False, repo=repo)
+    report = repo.get_latest_report_for_session(session_id)
+    if report is not None:
+        return report
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Сохранённого отчёта для сессии нет. Пересчёт и чтение raw-логов "
+            "выполняются только на ПК-владельце; для legacy-unassigned сначала "
+            "нужно административно назначить владельца."
+        ),
+    )
+
+
 def _generate_report(session_id: str, include_markdown: bool, repo: RuntimeRepository) -> dict:
+    _require_local_session(session_id, repo)
     cache_key = (session_id, include_markdown)
     cached = _cache_get(cache_key)
     if cached is not None:

@@ -10,14 +10,14 @@ Raw log files must still exist on disk (the path stored in IngestedFile.relative
 is resolved relative to RAW_LOGS_CONTAINER_PATH from the environment).
 
 Usage (inside the api container, or locally with the right DATABASE_URL):
-    python backfill_session_overview.py --dry-run
-    python backfill_session_overview.py
+    python scripts/maintenance/backfill_session_overview.py --dry-run
+    python scripts/maintenance/backfill_session_overview.py
 """
 import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def _needs_backfill(group: dict) -> bool:

@@ -72,6 +72,7 @@ from domain.models.prints import (
     PrintRecord,
     PrintRecordFile,
 )
+from domain.models.jobs import BackgroundJob, ComputeNodeRegistration
 
 __all__ = [
     # Sessions
@@ -123,6 +124,8 @@ __all__ = [
     "PrintRecord",
     "PrintRecordFile",
     "MachineParams",
+    "BackgroundJob",
+    "ComputeNodeRegistration",
 ]
 
 

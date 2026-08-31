@@ -1,4 +1,7 @@
+import hashlib
 import io
+import os
+import tempfile
 from pathlib import Path
 
 from minio import Minio
@@ -33,9 +36,15 @@ class ObjectStore:
         ):
             self.ensure_bucket(bucket)
 
-    def put_file(self, bucket: str, object_name: str, path: Path) -> str:
+    def put_file(
+        self,
+        bucket: str,
+        object_name: str,
+        path: Path,
+        content_type: str = "application/octet-stream",
+    ) -> str:
         self.ensure_bucket(bucket)
-        self.client.fput_object(bucket, object_name, str(path))
+        self.client.fput_object(bucket, object_name, str(path), content_type=content_type)
         return f"s3://{bucket}/{object_name}"
 
     def put_bytes(
@@ -60,6 +69,57 @@ class ObjectStore:
                 response.release_conn()
         except Exception:
             return None
+
+    def download_file(
+        self,
+        bucket: str,
+        object_name: str,
+        destination: Path,
+        *,
+        expected_sha256: str | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Path | None:
+        """Stream an object into a local file without buffering it in memory.
+
+        The download is written to a sibling temporary file and atomically
+        moved into place only after the complete response (and, when supplied,
+        its SHA-256 checksum) has been validated. ``None`` means that the
+        transfer failed or the checksum did not match. Partial files are
+        always removed.
+        """
+        destination = Path(destination)
+        response = None
+        temporary_path: Path | None = None
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            response = self.client.get_object(bucket, object_name)
+            digest = hashlib.sha256()
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".part",
+                delete=False,
+            ) as sink:
+                temporary_path = Path(sink.name)
+                while chunk := response.read(chunk_size):
+                    sink.write(chunk)
+                    digest.update(chunk)
+
+            if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
+                temporary_path.unlink(missing_ok=True)
+                return None
+            os.replace(temporary_path, destination)
+            temporary_path = None
+            return destination
+        except Exception:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            return None
+        finally:
+            if response is not None:
+                response.close()
+                response.release_conn()
 
     def open_stream(self, bucket: str, object_name: str, chunk_size: int = 1024 * 1024):
         """Yield an object's bytes in chunks, or None if missing/unavailable.
@@ -99,4 +159,3 @@ class ObjectStore:
             return False
         except Exception:
             return False
-

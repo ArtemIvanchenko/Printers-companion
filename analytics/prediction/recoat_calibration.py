@@ -180,8 +180,13 @@ def session_recoat_seconds(session_id: str, db: Session) -> list[float] | None:
 def _time_log_files(session_id: str, db: Session) -> list:
     """This session's parsed time_log files, or [] when none can be read."""
     from storage.repositories.runtime import RuntimeRepository
+    from domain.services.compute_affinity import ComputeAffinityError
 
-    files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True) or []
+    try:
+        files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True) or []
+    except ComputeAffinityError:
+        # Stored per-layer facts are shared; raw fallback remains owner-local.
+        return []
     return [
         f for f in files
         if f.classification.family == SourceFileFamily.time_log and f.parse_result

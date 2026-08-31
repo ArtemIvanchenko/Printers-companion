@@ -48,6 +48,10 @@ def _load_session_features() -> list[dict[str, object]]:
 def main() -> None:
     scheduler = BlockingScheduler()
     settings = get_settings()
+    if settings.app_env not in ("local", "test"):
+        from storage.db.migrate import assert_schema_at_head
+
+        assert_schema_at_head()
     schedules = configured_schedules()
     print(f"Scheduler configured: {schedules}")
     # Honor the configured cron strings instead of hardcoding the hours, so
@@ -68,4 +72,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

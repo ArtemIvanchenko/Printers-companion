@@ -2,8 +2,8 @@
 # STL slicing, print-time estimation, defect-risk ML and cross-session change-point
 # detection inline in its route handlers. PythonSLM + pymeshfix compile C extensions
 # (build-essential + cmake are installed and purged in Dockerfile.api).
-# Requires requirements.analytics.txt (polars, scipy, networkx) to be installed first.
-scikit-learn==1.4.2
+# Requires requirements.analytics.txt (polars, scipy, networkx, scikit-learn)
+# to be installed first.
 lightgbm==4.6.0
 trimesh==4.12.2
 shapely==2.1.2

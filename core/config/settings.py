@@ -22,8 +22,30 @@ class Settings(BaseSettings):
     app_env: str = "local"
     log_level: str = "INFO"
 
+    # Stable identity of the operator PC that owns locally executed work.  It
+    # must be configured explicitly for every workstation that shares a NAS.
+    # Container hostnames are intentionally unsuitable: they change after a
+    # recreate and could strand (or steal) durable jobs.
+    compute_node_id: str = Field(
+        default="local-operator",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    operator_instance_file: str = "/var/lib/printer-companion/instance-id"
+
     database_url: str = "sqlite:///./printer_logs.db"
     redis_url: str = "redis://localhost:6379/0"
+    # These limits apply per OS process.  Small defaults are deliberate: an
+    # operator stack has API + import worker + estimator, all talking to the
+    # same low-power NAS PostgreSQL instance.
+    db_pool_size: int = Field(default=2, ge=1, le=20)
+    db_max_overflow: int = Field(default=2, ge=0, le=20)
+    db_pool_timeout: int = Field(default=30, ge=1, le=300)
+    # Durable work remains pinned to this PC. A short lease limits restart
+    # recovery time; the active local worker renews it with a low-rate heartbeat.
+    job_lease_seconds: int = Field(default=15 * 60, ge=120, le=24 * 60 * 60)
+    job_heartbeat_seconds: int = Field(default=60, ge=10, le=60 * 60)
 
     minio_endpoint: str = "localhost:9000"
     minio_root_user: str = "minioadmin"
@@ -39,6 +61,7 @@ class Settings(BaseSettings):
     raw_logs_host_path: str = r"C:\PrinterLogs"
     raw_logs_container_path: str = "/mnt/raw_logs"
     incoming_path: str = "/mnt/raw_logs"
+    startup_import_enabled: bool = True
     watch_mode: Literal["filesystem_events", "polling"] = "filesystem_events"
     require_operator_import_confirmation: bool = True
     file_stability_seconds: int = 60
@@ -86,6 +109,18 @@ class Settings(BaseSettings):
     rate_limit_chat_rpm: int = 20
     rate_limit_agent_rpm: int = 30
     log_retention_days: int = 90
+
+    @model_validator(mode="after")
+    def _reject_reserved_compute_identity(self):
+        if self.compute_node_id.casefold() == "legacy-unassigned":
+            raise ValueError("COMPUTE_NODE_ID 'legacy-unassigned' is reserved for migration")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_job_lease(self):
+        if self.job_heartbeat_seconds * 2 >= self.job_lease_seconds:
+            raise ValueError("JOB_HEARTBEAT_SECONDS must be less than half JOB_LEASE_SECONDS")
+        return self
 
     @model_validator(mode="after")
     def _warn_default_tokens(self):

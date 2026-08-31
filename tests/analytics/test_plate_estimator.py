@@ -305,3 +305,16 @@ class TestGeometryCache:
         """geometry_cache=None (the default) must reproduce the uncached path."""
         est = estimate_plate([("box", _box_stl())], [], _params(), "steel")
         assert est.print_hours > 0
+
+    def test_path_source_matches_bytes_and_reuses_same_cache_entry(self, tmp_path):
+        """Workers may pass disk-backed STLs without changing cache identity."""
+        blob = _box_stl()
+        path = tmp_path / "box.stl"
+        path.write_bytes(blob)
+        cache = _FakeGeometryCache()
+
+        from_bytes = estimate_plate([("box", blob)], [], _params(), "steel", cache)
+        from_path = estimate_plate([("box", path)], [], _params(), "steel", cache)
+
+        assert cache.saves == 1
+        assert from_path.print_hours == pytest.approx(from_bytes.print_hours, rel=1e-3)

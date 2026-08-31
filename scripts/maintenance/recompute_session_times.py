@@ -17,16 +17,16 @@ can't reproduce them (raw sensors.log not on disk at migration time).
 Idempotent and safe to re-run. Use --dry-run to preview without writing.
 
 Usage:
-    python recompute_session_times.py --dry-run
-    python recompute_session_times.py
-    DATABASE_URL=sqlite:///./printer_logs.db python recompute_session_times.py
+    python scripts/maintenance/recompute_session_times.py --dry-run
+    python scripts/maintenance/recompute_session_times.py
+    DATABASE_URL=sqlite:///./printer_logs.db python scripts/maintenance/recompute_session_times.py
 """
 import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from domain.services.ingestion import IngestedFile
 from domain.services.session_classification import classify_session

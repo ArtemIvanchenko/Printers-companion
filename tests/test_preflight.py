@@ -1,4 +1,6 @@
 """Preflight checks: credentials and database URL validation."""
+import pytest
+
 from core.config.settings import Settings
 from core.preflight import check_environ, check_database_url, PreflightReport
 
@@ -9,6 +11,7 @@ def _report_for(app_env: str) -> PreflightReport:
         agent_api_token="change-me-agent-token",
         api_service_token="change-me-service-token",
         minio_root_password="change-me-minio",
+        compute_node_id="operator-test",
         llm_provider="null",  # skip network discovery
     )
     report = PreflightReport()
@@ -38,6 +41,8 @@ def test_unique_tokens_pass_in_production() -> None:
         agent_api_token="a-real-unique-agent-token",
         api_service_token="a-real-unique-service-token",
         minio_root_password="a-real-unique-minio-password",
+        minio_root_user="operator-storage-user",
+        compute_node_id="operator-test",
         llm_provider="null",
     )
     report = PreflightReport()
@@ -69,6 +74,11 @@ def test_correct_psycopg3_url_passes() -> None:
     assert not report.errors
 
 
+def test_legacy_owner_id_is_reserved_for_migration_rows() -> None:
+    with pytest.raises(ValueError, match="legacy-unassigned"):
+        Settings(app_env="test", compute_node_id="legacy-unassigned")
+
+
 class TestRemoteBackendCredentials:
     """Default passwords are a local convenience only while the backend IS local.
 
@@ -85,6 +95,7 @@ class TestRemoteBackendCredentials:
             app_env="local",
             agent_api_token="unique-agent",
             api_service_token="unique-service",
+            compute_node_id="operator-test",
             llm_provider="null",
         )
         return Settings(**{**base, **overrides})
@@ -137,3 +148,16 @@ class TestRemoteBackendCredentials:
         ))
         assert report.passed, report.errors
         assert any("MINIO_SECURE=false" in w for w in report.warnings)
+
+    def test_uppercase_example_placeholders_are_rejected(self):
+        from core.preflight import run_preflight
+
+        report = run_preflight(self._settings(
+            app_env="production",
+            database_url="postgresql+psycopg://printer_logs:CHANGE_ME@nas:5433/printer_logs",
+            minio_endpoint="nas.example:9000",
+            minio_root_user="CHANGE_ME",
+            minio_root_password="CHANGE_ME",
+        ))
+        assert not report.passed
+        assert any("CHANGE_ME" in error for error in report.errors)

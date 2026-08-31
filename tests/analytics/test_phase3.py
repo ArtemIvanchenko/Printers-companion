@@ -1,6 +1,7 @@
 """Tests for Phase 3: predicted-vs-actual, calibration, shifts (ruptures), LightGBM."""
 import io
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 import trimesh
@@ -15,6 +16,23 @@ from storage.db.session import SessionLocal
 client = TestClient(app)
 
 CUBE_STL = trimesh.creation.box(extents=[10, 10, 10]).export(file_type="stl")
+
+
+class _DiskBackedStoreContract:
+    """Adapt the legacy byte fake to the production file-transfer contract."""
+
+    def put_file(self, bucket, object_name, path, content_type="application/octet-stream"):
+        return self.put_bytes(bucket, object_name, Path(path).read_bytes(), content_type)
+
+    def download_file(
+        self, bucket, object_name, destination, *, expected_sha256=None, chunk_size=1024 * 1024,
+    ):
+        data = self.get_bytes(bucket, object_name)
+        if data is None:
+            return None
+        destination = Path(destination)
+        destination.write_bytes(data)
+        return destination
 
 
 def _stored_snapshot(record_id: str) -> dict:
@@ -161,7 +179,7 @@ class TestCorrectionFactor:
 
 class TestEstimateRecordEndpoint:
     def test_estimate_stores_snapshot(self, monkeypatch):
-        class _Store:
+        class _Store(_DiskBackedStoreContract):
             data = {}
             def __init__(self, *a, **k): pass
             def is_available(self): return True
@@ -209,7 +227,7 @@ class TestEstimateRecordEndpoint:
         _tall.apply_translation([40.0, 0.0, 0.0])
         TALL_STL = _tall.export(file_type="stl")
 
-        class _Store:
+        class _Store(_DiskBackedStoreContract):
             data = {}
             def __init__(self, *a, **k): pass
             def is_available(self): return True
@@ -265,7 +283,7 @@ class TestEstimateRecordEndpoint:
 
     def test_auto_estimate_on_stl_upload(self, monkeypatch):
         """Загрузка STL в карточку сама создаёт снапшот прогноза (фоновая задача)."""
-        class _Store:
+        class _Store(_DiskBackedStoreContract):
             data = {}
             def __init__(self, *a, **k): pass
             def is_available(self): return True
@@ -296,7 +314,7 @@ class TestEstimateRecordEndpoint:
 
     def test_auto_estimate_skipped_without_params(self, monkeypatch):
         """Без параметров машины загрузка STL не падает — прогноз просто пропускается."""
-        class _Store:
+        class _Store(_DiskBackedStoreContract):
             data = {}
             def __init__(self, *a, **k): pass
             def is_available(self): return True
@@ -330,7 +348,7 @@ class TestGeometryCacheAcrossRecords:
     """
 
     def _store(self, monkeypatch):
-        class _Store:
+        class _Store(_DiskBackedStoreContract):
             data = {}
             def __init__(self, *a, **k): pass
             def is_available(self): return True

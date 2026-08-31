@@ -91,3 +91,39 @@ def test_dashboard_script_parses():
         assert result.returncode == 0, (
             f"inline <script> #{i} does not parse:\n{result.stderr}"
         )
+
+
+def test_dashboard_does_not_mislabel_platform_position_as_liquid_level():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    assert "Уровень жидкости" not in html
+
+
+def test_dashboard_protects_shared_print_cards_from_stale_edits():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    assert "expected_revision: _pcRecord.revision" in html
+    assert "new EventSource('/prints/events')" in html
+    assert "Карточка изменена на другом ПК" in html
+
+
+def _javascript_function(html: str, name: str, next_name: str) -> str:
+    start = html.index(f"async function {name}(")
+    end = html.index(f"async function {next_name}(", start)
+    return html[start:end]
+
+
+def test_general_log_selection_is_sent_as_one_multipart_batch():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    source = _javascript_function(html, "uploadFiles", "rescanFolder")
+
+    assert "files.forEach(file => fd.append('files', file))" in source
+    assert source.count("fetch('/upload/logs'") == 1
+    assert "for (" not in source
+
+
+def test_print_card_log_selection_is_sent_as_one_multipart_batch():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    source = _javascript_function(html, "uploadArchiveLogs", "_pollRecordLink")
+
+    assert "files.forEach(file => fd.append('files', file))" in source
+    assert source.count("fetch(`/prints/${recordId}/import-logs`") == 1
+    assert "for (" not in source

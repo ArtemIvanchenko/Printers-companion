@@ -3,25 +3,34 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import mimetypes
 import os
 import shutil
+import tempfile
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, time, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
-from sqlalchemy import select
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
 
 from api.deps.repositories import get_prints_repository
-from api.upload_limits import read_upload_capped
 from api.pagination import LimitParam, PaginatedResponse, SkipParam
+from api.workstations import workstation_id
 from core.config.settings import get_settings
+from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
 from parsers.common.timestamps import date_hint_from_filename
 from storage.object_store.minio_client import ObjectStore
-from storage.repositories.prints_repo import PrintsRepository
+from storage.repositories.prints_repo import (
+    PrintRecordConflict,
+    PrintSessionLinkConflict,
+    PrintsRepository,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/prints", tags=["prints"])
@@ -29,6 +38,7 @@ router = APIRouter(prefix="/prints", tags=["prints"])
 _STATUSES = {"draft", "active", "completed"}
 _FILE_TYPES = {"stl", "stl_supports", "magics", "photo", "doc"}
 _MAX_UPLOAD_MB = 600
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 # Materials offered when machine_params has no densities configured yet
 _DEFAULT_MATERIALS = ["steel", "aluminum", "titanium", "other"]
 # Scanning fields that a material preset overrides in machine_params
@@ -36,6 +46,23 @@ _PRESET_SCANNING_KEYS = (
     "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm",
     "layer_thickness_mm", "jump_speed_mm_s", "jump_delay_ms",
 )
+
+
+def _require_local_print(record: dict, *, compute_node_id: str | None = None) -> None:
+    node_id = compute_node_id or get_settings().compute_node_id
+    try:
+        require_compute_owner(
+            entity_type="print_record",
+            entity_id=str(record["record_id"]),
+            origin_compute_node_id=str(record["origin_compute_node_id"]),
+            requested_compute_node_id=node_id,
+        )
+    except ComputeAffinityError as exc:
+        raise HTTPException(
+            403,
+            "Расчёт и загрузка исходных файлов разрешены только на "
+            f"ПК-владельце карточки. {exc}",
+        ) from exc
 
 
 def _content_disposition(file_name: str) -> str:
@@ -136,7 +163,11 @@ def _date_from_text(text: str) -> datetime | None:
 
 
 @router.post("")
-def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
+def create_print(
+    payload: dict,
+    request: Request,
+    repo: PrintsRepository = Depends(get_prints_repository),
+) -> dict:
     """Create a print record.
 
     Body: {name, material?, layer_thickness_mm?, hatch_distance_mm?, notes?,
@@ -151,6 +182,7 @@ def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repo
     printed_at = _parse_iso_datetime(payload.get("printed_at"), "printed_at") or _date_from_text(name)
 
     record = repo.create_print_record({
+        "origin_compute_node_id": get_settings().compute_node_id,
         "name": name,
         "material": material,
         "layer_thickness_mm": _parse_layer_thickness(payload.get("layer_thickness_mm")),
@@ -158,6 +190,7 @@ def create_print(payload: dict, repo: PrintsRepository = Depends(get_prints_repo
         "notes": (payload.get("notes") or "").strip() or None,
         "printed_at": printed_at,
         "powder_cost_rub_per_kg": _parse_powder_cost(payload.get("powder_cost_rub_per_kg")),
+        "updated_by": workstation_id(request),
     })
     repo.flush()
     logger.info("prints: created %s (%s)", record["record_id"], name)
@@ -188,6 +221,96 @@ def list_prints(
     _attach_plan_vs_fact(repo, records)
     total = repo.count_print_records(**filters)
     return PaginatedResponse(items=records, total=total, skip=skip, limit=limit).to_dict()
+
+
+def _print_sync_state() -> dict[str, Any]:
+    """Small database fingerprint used by the cross-workstation event stream."""
+    from domain.models.prints import PrintRecord
+    from storage.db.session import session_scope
+
+    with session_scope() as db:
+        count, revision_sum, updated_at = db.execute(select(
+            func.count(PrintRecord.record_id),
+            func.coalesce(func.sum(PrintRecord.revision), 0),
+            func.max(PrintRecord.updated_at),
+        )).one()
+    return {
+        "count": int(count or 0),
+        "revision_sum": int(revision_sum or 0),
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
+_PRINT_SYNC_SUBSCRIBERS: set[asyncio.Queue[dict[str, Any] | None]] = set()
+_PRINT_SYNC_TASK: asyncio.Task | None = None
+
+
+async def _print_sync_monitor() -> None:
+    """One NAS poller per local API process, fanned out to every browser tab."""
+    global _PRINT_SYNC_TASK
+    previous: dict[str, Any] | None = None
+    idle_delay = 2.0
+    try:
+        while _PRINT_SYNC_SUBSCRIBERS:
+            try:
+                current = await asyncio.to_thread(_print_sync_state)
+                if current != previous:
+                    previous = current
+                    idle_delay = 2.0
+                    for queue in tuple(_PRINT_SYNC_SUBSCRIBERS):
+                        if queue.full():
+                            try:
+                                queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                        queue.put_nowait(current)
+                else:
+                    idle_delay = min(10.0, idle_delay * 1.5)
+            except Exception:
+                logger.exception("prints: cross-workstation sync monitor failed")
+                for queue in tuple(_PRINT_SYNC_SUBSCRIBERS):
+                    if not queue.full():
+                        queue.put_nowait(None)
+                idle_delay = min(30.0, idle_delay * 2)
+            await asyncio.sleep(idle_delay)
+    finally:
+        _PRINT_SYNC_TASK = None
+
+
+@router.get("/events")
+async def print_events(request: Request) -> StreamingResponse:
+    """Notify open operator screens when the shared print archive changes.
+
+    PostgreSQL remains the source of truth; this stream only invalidates local
+    browser views.  Polling a three-value aggregate also works during the NAS
+    migration before a dedicated message broker is exposed centrally.
+    """
+    queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1)
+
+    async def stream():
+        global _PRINT_SYNC_TASK
+        _PRINT_SYNC_SUBSCRIBERS.add(queue)
+        if _PRINT_SYNC_TASK is None or _PRINT_SYNC_TASK.done():
+            _PRINT_SYNC_TASK = asyncio.create_task(_print_sync_monitor())
+        try:
+            while not await request.is_disconnected():
+                try:
+                    current = await asyncio.wait_for(queue.get(), timeout=15)
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                if current is None:
+                    yield "event: sync-error\ndata: {}\n\n"
+                else:
+                    yield "event: print-records\ndata: " + json.dumps(current) + "\n\n"
+        finally:
+            _PRINT_SYNC_SUBSCRIBERS.discard(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _attach_plan_vs_fact(repo: PrintsRepository, records: list[dict]) -> None:
@@ -305,10 +428,18 @@ def recalibrate(repo: PrintsRepository = Depends(get_prints_repository)) -> dict
 
     No-op when pinned manually (correction_locked) — one lock for both.
     """
-    from analytics.prediction.accuracy import recalibrate_and_apply
+    from analytics.prediction.accuracy import (
+        recalibrate_and_apply,
+        try_acquire_calibration_lock,
+    )
     from analytics.prediction.recoat_calibration import recalibrate_recoat_and_apply
     from analytics.prediction.scan_calibration import recalibrate_scan_and_apply
 
+    if not try_acquire_calibration_lock(repo.db):
+        raise HTTPException(
+            409,
+            "Калибровка уже выполняется на другом операторском ПК; повторите позже",
+        )
     result = recalibrate_and_apply(repo.db)
     result["recoat"] = recalibrate_recoat_and_apply(repo.db)
     result["scan"] = recalibrate_scan_and_apply(repo.db)
@@ -317,8 +448,8 @@ def recalibrate(repo: PrintsRepository = Depends(get_prints_repository)) -> dict
 
 
 def _combined_prediction(
-    parts: list[tuple[str, bytes]],
-    supports: list[tuple[str, bytes]],
+    parts: list[tuple[str, bytes | Path]],
+    supports: list[tuple[str, bytes | Path]],
     material: str,
     params: dict,
     powder_cost: float | None,
@@ -495,18 +626,17 @@ def _assert_geometry_usable(record: dict) -> None:
     )
 
 
-def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict:
-    """Run the PySLM time/cost estimate over the whole platform and store the snapshot.
-
-    The platform = every attached part STL **plus its support STLs** (file types
-    "stl" and "stl_supports"), so supports are counted in the burn volume. This
-    is the path used for a full Magics layout exported to STL.
-
-    Raises HTTPException with the reason when the estimate cannot run.
-    """
+def _prepare_prediction_inputs(
+    repo: PrintsRepository,
+    record_id: str,
+    *,
+    compute_node_id: str | None = None,
+) -> dict[str, Any]:
+    """Read a compact immutable estimate input snapshot from the database."""
     record = repo.get_print_record(record_id)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
+    _require_local_print(record, compute_node_id=compute_node_id)
     _assert_geometry_usable(record)
 
     files = repo.list_print_files(record_id)
@@ -528,23 +658,88 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         )
     params = effective_params(params)
 
-    store = ObjectStore()
-    parts: list[tuple[str, bytes]] = []
-    supports: list[tuple[str, bytes]] = []
-    for f in platform_files:
-        bucket, _, object_name = f["object_uri"].removeprefix("s3://").partition("/")
-        data = store.get_bytes(bucket, object_name)
-        if data is None:
-            raise HTTPException(503, f"STL недоступен в хранилище: {f['file_name']}")
-        if f["file_type"] == "stl_supports":
-            supports.append((f["file_name"], data))
-        else:
-            parts.append((f["file_name"], data))
-    n_supports = len(supports)
+    return {
+        "record": record,
+        "platform_files": platform_files,
+        "material": material,
+        "params": params,
+        "powder_cost": record.get("powder_cost_rub_per_kg") or repo.last_powder_cost(),
+    }
 
-    powder_cost = record.get("powder_cost_rub_per_kg") or repo.last_powder_cost()
-    result = _combined_prediction(parts, supports, material, params, powder_cost,
-                                   geometry_cache=repo, db=repo.db)
+
+def _prediction_input_hash(prepared: dict[str, Any]) -> str:
+    payload = {
+        "record_id": prepared["record"]["record_id"],
+        "record_revision": prepared["record"]["revision"],
+        "material": prepared["material"],
+        "params": prepared["params"],
+        "powder_cost": prepared["powder_cost"],
+        "files": [
+            {
+                "type": f["file_type"],
+                "checksum": f["checksum"],
+                "uri": f["object_uri"],
+            }
+            for f in prepared["platform_files"]
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _calculate_prediction_snapshot(
+    prepared: dict[str, Any],
+    *,
+    geometry_cache: Any | None = None,
+    db: Any | None = None,
+    computed_by: str | None = None,
+) -> dict:
+    """Download models and calculate locally without requiring an open DB tx."""
+    from core.versioning.constants import ANALYSIS_VERSION, APP_VERSION
+
+    record = prepared["record"]
+    platform_files = prepared["platform_files"]
+    material = prepared["material"]
+    params = prepared["params"]
+
+    store = ObjectStore()
+    with tempfile.TemporaryDirectory(prefix="printer-estimator-") as temporary_dir:
+        temporary_root = Path(temporary_dir)
+        parts: list[tuple[str, Path]] = []
+        supports: list[tuple[str, Path]] = []
+        for index, f in enumerate(platform_files):
+            bucket, _, object_name = f["object_uri"].removeprefix("s3://").partition("/")
+            local_name = f"{index:04d}_{Path(f['file_name']).name}"
+            local_path = store.download_file(
+                bucket,
+                object_name,
+                temporary_root / local_name,
+                expected_sha256=f.get("checksum") or None,
+            )
+            if local_path is None:
+                raise HTTPException(
+                    503,
+                    "STL недоступен или повреждён в хранилище: "
+                    f"{f['file_name']}",
+                )
+            if f["file_type"] == "stl_supports":
+                supports.append((f["file_name"], local_path))
+            else:
+                parts.append((f["file_name"], local_path))
+        n_supports = len(supports)
+
+        # Keep the temporary files alive until trimesh has loaded every body
+        # and the joint plate calculation is complete. Only mesh arrays, not
+        # the original multi-hundred-megabyte blobs, remain in memory.
+        result = _combined_prediction(
+            parts,
+            supports,
+            material,
+            params,
+            prepared["powder_cost"],
+            geometry_cache=geometry_cache,
+            db=db,
+        )
     if not result.get("available"):
         raise HTTPException(422, f"Расчёт недоступен: {result.get('reason')}")
 
@@ -563,6 +758,11 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
 
     snapshot: dict = {
         "estimated_at": datetime.now(timezone.utc).isoformat(),
+        "input_revision": record["revision"],
+        "input_hash": _prediction_input_hash(prepared),
+        "computed_by": computed_by,
+        "app_version": APP_VERSION,
+        "analysis_version": ANALYSIS_VERSION,
         "n_parts": len(parts),
         "n_supports": n_supports,
         "material": material,
@@ -599,14 +799,99 @@ def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict
         "estimate_quality": quality_status,
         "geometry_quality": geometry_quality or None,
     }
+    return snapshot
+
+
+def _enrich_prediction_interval(snapshot: dict, db: Any) -> None:
+    """Attach the empirical interval in a short post-compute DB transaction."""
+    if snapshot.get("prediction_source") not in ("calculated", "calibrated"):
+        return
+    try:
+        from analytics.prediction.accuracy import calibration_interval_hours
+
+        interval = calibration_interval_hours(
+            db,
+            str(snapshot["material"]),
+            float(snapshot["layer_thickness_mm"]),
+            float(snapshot.get("raw_scan_hours") or 0.0),
+            float(snapshot.get("raw_recoat_hours") or 0.0),
+        )
+        if interval is None:
+            return
+        snapshot["prediction_interval"] = list(interval)
+        warning = _calibration_mismatch_warning(
+            float(snapshot["print_hours"]),
+            interval,
+            str(snapshot["material"]),
+            float(snapshot["layer_thickness_mm"]),
+        )
+        if warning:
+            warnings = list(snapshot.get("prediction_warnings") or [])
+            if warning not in warnings:
+                warnings.append(warning)
+            snapshot["prediction_warnings"] = warnings
+    except Exception:
+        logger.exception("prints: calibration interval lookup failed")
+
+
+def _store_prediction_snapshot(
+    repo: PrintsRepository,
+    record_id: str,
+    snapshot: dict,
+    *,
+    expected_revision: int | None = None,
+    compute_node_id: str | None = None,
+) -> None:
+    record = repo.get_print_record(record_id)
+    if not record:
+        raise HTTPException(404, "Карточка печати не найдена")
+    _require_local_print(record, compute_node_id=compute_node_id)
 
     meta = dict(record.get("metadata_json") or {})
     meta["prediction"] = snapshot
-    repo.update_print_record(record_id, {"metadata_json": meta})
+    try:
+        repo.update_print_record(
+            record_id,
+            {"metadata_json": meta},
+            expected_revision=expected_revision,
+        )
+    except PrintRecordConflict as conflict:
+        raise HTTPException(
+            409,
+            detail={
+                "message": "Карточка изменилась во время расчёта; устаревший результат отброшен",
+                "current": conflict.current,
+            },
+        ) from None
     repo.flush()
     logger.info(
         "prints: prediction stored for %s (%d parts + %d supports, %.1fh, ×%.3f)",
-        record_id, len(parts), n_supports, snapshot["print_hours"], snapshot["correction_factor"],
+        record_id,
+        int(snapshot.get("n_parts") or 0),
+        int(snapshot.get("n_supports") or 0),
+        snapshot["print_hours"],
+        snapshot["correction_factor"],
+    )
+
+
+def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict:
+    """Compatibility path: compute and store using the caller's transaction.
+
+    Production durable workers use the split prepare/calculate/store functions
+    so the long local geometry calculation holds no NAS transaction open.
+    """
+    prepared = _prepare_prediction_inputs(repo, record_id)
+    snapshot = _calculate_prediction_snapshot(
+        prepared,
+        geometry_cache=repo,
+        db=repo.db,
+        computed_by=get_settings().compute_node_id,
+    )
+    _store_prediction_snapshot(
+        repo,
+        record_id,
+        snapshot,
+        expected_revision=prepared["record"]["revision"],
     )
     return snapshot
 
@@ -620,6 +905,7 @@ def _assert_estimatable(repo: PrintsRepository, record: dict) -> None:
     """
     from api.routes.machine_settings import missing_for_estimation
 
+    _require_local_print(record)
     _assert_geometry_usable(record)
 
     files = repo.list_print_files(record["record_id"])
@@ -635,6 +921,52 @@ def _assert_estimatable(repo: PrintsRepository, record: dict) -> None:
             "Для расчёта не хватает параметров машины: " + ", ".join(missing)
             + ". Заполните их в Настройки → Параметры машины.",
         )
+
+
+def _enqueue_estimate(
+    repo: PrintsRepository,
+    record: dict,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Create a local estimate job for this exact geometry/revision.
+
+    Automatic triggers deduplicate the same inputs. A manual "recalculate"
+    always gets a fresh request id, even when the card revision is unchanged.
+    """
+    from storage.repositories.jobs_repo import JobsRepository
+
+    node_id = get_settings().compute_node_id
+    _require_local_print(record, compute_node_id=node_id)
+    geometry = sorted(
+        (f["file_type"], f["checksum"])
+        for f in repo.list_print_files(record["record_id"])
+        if f["file_type"] in ("stl", "stl_supports")
+    )
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"revision": record["revision"], "geometry": geometry},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    request_key = os.urandom(12).hex() if force else fingerprint
+    return JobsRepository(repo.db).enqueue(
+        job_type="print_estimate",
+        owner_node_id=node_id,
+        entity_type="print_record",
+        entity_id=record["record_id"],
+        idempotency_key=(
+            f"print_estimate:{node_id}:{record['record_id']}:{request_key}"
+        ),
+        payload={
+            "record_id": record["record_id"],
+            "record_revision": record["revision"],
+            "owner_node_id": node_id,
+            "input_fingerprint": fingerprint,
+            "manual_rerun": force,
+        },
+        max_attempts=3,
+    )
 
 
 # PLAN_ACCURACY.md 2.4. One worker: compute_layer_series already parallelises
@@ -724,10 +1056,18 @@ def estimate_print_record(
     # missing STL or an unfilled parameter now, not after a silent no-op.
     _assert_estimatable(repo, record)
 
-    background_tasks.add_task(_auto_estimate, record_id)
+    job = _enqueue_estimate(repo, record, force=True)
+    # TestClient historically observes the completed snapshot immediately and
+    # has no estimator service. Preserve that contract without weakening the
+    # production path, where only the durable worker performs the calculation.
+    if get_settings().app_env == "test":
+        repo.db.commit()
+        background_tasks.add_task(_auto_estimate, record_id)
     return {
         "record_id": record_id,
+        "job_id": job["job_id"],
         "status": "started",
+        "job_status": job["status"],
         "previous": (record.get("metadata_json") or {}).get("prediction"),
     }
 
@@ -746,6 +1086,7 @@ def get_print(record_id: str, repo: PrintsRepository = Depends(get_prints_reposi
 def update_print(
     record_id: str,
     payload: dict,
+    request: Request,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
     """Partial update: name, material, layer thickness, hatch distance, notes,
@@ -770,11 +1111,28 @@ def update_print(
     if "notes" in payload:
         values["notes"] = (payload["notes"] or "").strip() or None
     if "session_id" in payload:
+        current_record = repo.get_print_record(record_id)
+        if current_record is None:
+            raise HTTPException(404, "Карточка печати не найдена")
+        _require_local_print(current_record)
         new_session_id = payload["session_id"] or None
         values["session_id"] = new_session_id
         if new_session_id and "printed_at" not in payload:
             from domain.models.sessions import BuildSession
             session = repo.db.get(BuildSession, new_session_id)
+            if session is not None:
+                try:
+                    require_compute_owner(
+                        entity_type="session",
+                        entity_id=session.session_id,
+                        origin_compute_node_id=session.origin_compute_node_id,
+                        requested_compute_node_id=get_settings().compute_node_id,
+                    )
+                except ComputeAffinityError as exc:
+                    raise HTTPException(
+                        409,
+                        "Нельзя связать карточку с сессией другого ПК. " + str(exc),
+                    ) from exc
             if session and session.start_ts:
                 ts = session.start_ts
                 if ts.tzinfo is None:
@@ -786,22 +1144,63 @@ def update_print(
         values["powder_cost_rub_per_kg"] = _parse_powder_cost(payload["powder_cost_rub_per_kg"])
     if not values:
         raise HTTPException(422, "Нет полей для обновления")
+    actor = workstation_id(request)
+    if actor:
+        values["updated_by"] = actor
 
-    record = repo.update_print_record(record_id, values)
+    if "expected_revision" not in payload:
+        raise HTTPException(
+            428,
+            "Для изменения общей карточки обязателен expected_revision",
+        )
+    expected_revision = payload["expected_revision"]
+    if isinstance(expected_revision, bool):
+        raise HTTPException(422, "expected_revision должен быть целым положительным числом")
+    try:
+        expected_revision = int(expected_revision)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "expected_revision должен быть целым положительным числом") from None
+    if expected_revision < 1:
+        raise HTTPException(422, "expected_revision должен быть целым положительным числом")
+    try:
+        record = repo.update_print_record(
+            record_id,
+            values,
+            expected_revision=expected_revision,
+        )
+    except PrintRecordConflict as conflict:
+        raise HTTPException(
+            409,
+            detail={
+                "message": "Карточка уже изменена на другом рабочем месте",
+                "current": conflict.current,
+            },
+        ) from None
+    except PrintSessionLinkConflict as conflict:
+        raise HTTPException(
+            409,
+            f"Сессия не может быть привязана к карточке: {conflict}",
+        ) from None
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
     repo.flush()
     # Manually linking a record to a session creates a new predicted/actual pair
     # (and, if the session has a time_log, a new recoat measurement) → refresh both.
     if values.get("session_id"):
-        from analytics.prediction.accuracy import recalibrate_and_apply
+        from analytics.prediction.accuracy import (
+            recalibrate_and_apply,
+            try_acquire_calibration_lock,
+        )
         from analytics.prediction.recoat_calibration import recalibrate_recoat_and_apply
         from analytics.prediction.scan_calibration import recalibrate_scan_and_apply
         try:
-            recalibrate_and_apply(repo.db)
-            recalibrate_recoat_and_apply(repo.db)
-            recalibrate_scan_and_apply(repo.db)
-            repo.flush()
+            if try_acquire_calibration_lock(repo.db):
+                recalibrate_and_apply(repo.db)
+                recalibrate_recoat_and_apply(repo.db)
+                recalibrate_scan_and_apply(repo.db)
+                repo.flush()
+            else:
+                logger.info("calibration already runs on another operator PC; skipped")
         except Exception:
             logger.exception("auto-calibration after manual link failed")
     return record
@@ -835,6 +1234,24 @@ def _remove_objects(uris: list[str]) -> None:
             logger.warning("prints: could not remove %s from storage", uri)
 
 
+def _stage_upload_to_file(
+    source: BinaryIO,
+    destination: Path,
+    max_bytes: int,
+) -> tuple[int, str]:
+    """Copy an upload to disk while hashing it and enforcing the size cap."""
+    total = 0
+    digest = hashlib.sha256()
+    with destination.open("wb") as sink:
+        while chunk := source.read(_UPLOAD_CHUNK_BYTES):
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(413, f"Файл > {max_bytes // (1024 * 1024)} МБ")
+            digest.update(chunk)
+            sink.write(chunk)
+    return total, digest.hexdigest()
+
+
 @router.post("/{record_id}/files")
 async def upload_print_file(
     record_id: str,
@@ -857,55 +1274,120 @@ async def upload_print_file(
     record = repo.get_print_record(record_id)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
-
-    data = await read_upload_capped(file, _MAX_UPLOAD_MB * 1024 * 1024)
-    if not data:
-        raise HTTPException(422, "Пустой файл")
-
     file_name = (file.filename or "unknown").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if len(file_name) > 300:
+        raise HTTPException(422, "Имя файла слишком длинное (макс. 300 символов)")
     # MagicsX support exports use the s_ prefix — classify them automatically
     if file_type == "stl" and file_name.lower().startswith("s_"):
         file_type = "stl_supports"
-
-    checksum = hashlib.sha256(data).hexdigest()
-    existing = repo.find_file_by_checksum(record_id, checksum)
-    if existing:
-        return {"duplicate": True, **existing}
-
-    store = ObjectStore()
-    if not store.is_available():
-        raise HTTPException(503, "Хранилище файлов (MinIO) недоступно")
-    content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-    object_uri = store.put_bytes(
-        _bucket_for(file_type), f"{record_id}/{checksum[:8]}_{file_name}", data,
-        content_type=content_type,
-    )
-
-    saved = repo.add_print_file({
-        "record_id": record_id,
-        "object_uri": object_uri,
-        "file_name": file_name,
-        "file_type": file_type,
-        "size_bytes": len(data),
-        "checksum": checksum,
-    })
-    # A dated file name pins down the print date when the record has none yet
-    if not record.get("printed_at"):
-        from_file = _date_from_text(file_name)
-        if from_file:
-            repo.update_print_record(record_id, {"printed_at": from_file})
-    # Commit now (not at the request boundary): the background auto-estimate
-    # runs in its own session and must see the just-attached file committed.
-    repo.db.commit()
-    # Деталь или поддержка → автоматический прогноз времени/стоимости в фоне,
-    # чтобы пара «прогноз/факт» образовалась без ручного нажатия. Обе ветки —
-    # если бы триггерилось только на "stl", загрузка поддержек уже после
-    # деталей (обычный порядок ручного и массового прикрепления) молча
-    # оставляла бы прогноз без них: последний срабатывавший пересчёт не видел
-    # ни одной поддержки.
     if file_type in ("stl", "stl_supports"):
+        _require_local_print(record)
+    # Do not hold a PostgreSQL snapshot/connection while up to 600 MB is read,
+    # hashed and sent to MinIO. No writes have occurred in this request yet.
+    repo.db.rollback()
+
+    with tempfile.TemporaryDirectory(prefix="printer-upload-") as temporary_dir:
+        staged_path = Path(temporary_dir) / "payload"
+        await file.seek(0)
+        size_bytes, checksum = await asyncio.to_thread(
+            _stage_upload_to_file,
+            file.file,
+            staged_path,
+            _MAX_UPLOAD_MB * 1024 * 1024,
+        )
+        if not size_bytes:
+            raise HTTPException(422, "Пустой файл")
+
+        existing = repo.find_file_by_checksum(record_id, checksum)
+        if existing:
+            repo.db.rollback()
+            return {"duplicate": True, **existing}
+        # The pre-check is complete; release its read transaction before the
+        # network upload. DB uniqueness handles a concurrent winner later.
+        repo.db.rollback()
+
+        store = ObjectStore()
+        if not await asyncio.to_thread(store.is_available):
+            raise HTTPException(503, "Хранилище файлов (MinIO) недоступно")
+        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        # Immutable per-upload key: full SHA prevents content collisions and
+        # file_id prevents a delayed cleanup from deleting a later re-upload.
+        # The original name remains in PostgreSQL/download headers; excluding
+        # it here also keeps UTF-8 object keys safely below S3's byte limit.
+        file_id = f"prf_{uuid.uuid4().hex}"
+        object_name = f"{record_id}/{file_id}_{checksum}"
+        object_bucket = _bucket_for(file_type)
+        object_uri = await asyncio.to_thread(
+            store.put_file,
+            object_bucket,
+            object_name,
+            staged_path,
+            content_type=content_type,
+        )
+
+    try:
+        saved = repo.add_print_file({
+            "file_id": file_id,
+            "record_id": record_id,
+            "object_uri": object_uri,
+            "file_name": file_name,
+            "file_type": file_type,
+            "size_bytes": size_bytes,
+            "checksum": checksum,
+        })
+        if saved.get("duplicate"):
+            # A different workstation won the uniqueness race. Its row points
+            # at another immutable URI, so this request's object is disposable.
+            repo.db.rollback()
+            if saved["object_uri"] != object_uri:
+                removed = await asyncio.to_thread(
+                    store.remove_object,
+                    object_bucket,
+                    object_name,
+                )
+                if not removed:
+                    logger.warning("prints: duplicate cleanup failed for %s", object_uri)
+            return saved
+
+        # A dated file name pins down the print date when the record has none yet
+        if not record.get("printed_at"):
+            from_file = _date_from_text(file_name)
+            if from_file:
+                repo.update_print_record(record_id, {"printed_at": from_file})
+        # Деталь или поддержка → автоматический прогноз времени/стоимости в фоне,
+        # чтобы пара «прогноз/факт» образовалась без ручного нажатия. Обе ветки —
+        # если бы триггерилось только на "stl", загрузка поддержек уже после
+        # деталей (обычный порядок ручного и массового прикрепления) молча
+        # оставляла бы прогноз без них: последний срабатывавший пересчёт не видел
+        # ни одной поддержки.
+        should_auto_estimate = file_type in ("stl", "stl_supports")
+        if should_auto_estimate:
+            updated_record = repo.get_print_record(record_id)
+            _enqueue_estimate(repo, updated_record)
+        # Commit here, rather than after the response dependency unwinds, so a
+        # failed DB publication can still remove this request's unique object.
+        repo.db.commit()
+    except Exception:
+        repo.db.rollback()
+        # This URI is unique to the request, so cleanup cannot remove another
+        # upload. Durable mark-and-sweep remains the fallback for MinIO outage.
+        removed = await asyncio.to_thread(
+            store.remove_object,
+            object_bucket,
+            object_name,
+        )
+        if not removed:
+            logger.warning("prints: orphan cleanup failed for %s", object_uri)
+        raise
+    if should_auto_estimate and get_settings().app_env == "test":
         background_tasks.add_task(_auto_estimate, record_id)
-    logger.info("prints: attached %s (%s, %d bytes) to %s", file_name, file_type, len(data), record_id)
+    logger.info(
+        "prints: attached %s (%s, %d bytes) to %s",
+        file_name,
+        file_type,
+        size_bytes,
+        record_id,
+    )
     return saved
 
 
@@ -939,6 +1421,10 @@ async def import_logs_for_print(
     record = repo.get_print_record(record_id)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
+    _require_local_print(record)
+    # The record is now a plain dict. Release the NAS read transaction before
+    # copying a potentially multi-gigabyte local log batch.
+    repo.db.rollback()
 
     settings = get_settings()
     dest = Path(settings.raw_logs_container_path)
@@ -946,15 +1432,23 @@ async def import_logs_for_print(
         raise HTTPException(500, f"Папка логов не найдена: {dest}")
 
     saved, skipped = [], []
+    batch_dir: Path | None = None
     printed_at_hint = None
     for f in files:
         name = Path(f.filename or "unknown").name
         if Path(name).suffix.lower() not in _ALLOWED_SUFFIXES:
             skipped.append({"name": name, "reason": "неподдерживаемый тип файла"})
             continue
+        if batch_dir is None:
+            batch_dir = dest / "incoming" / (
+                f"print_{record_id}_"
+                + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            )
+            batch_dir.mkdir(parents=True, exist_ok=False)
         total = 0
-        target = dest / name
+        target = batch_dir / name
         too_big = False
+        digest = hashlib.sha256()
         tmp_path = f"/tmp/{os.urandom(8).hex()}.upload"
         try:
             with open(tmp_path, "wb") as buf:
@@ -963,14 +1457,32 @@ async def import_logs_for_print(
                     if total > _MAX_FILE_MB * 1024 * 1024:
                         too_big = True
                         break
+                    digest.update(chunk)
                     buf.write(chunk)
             if too_big:
                 os.unlink(tmp_path)
                 skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
             else:
+                checksum = digest.hexdigest()
+                duplicate = False
+                if target.exists():
+                    from core.utils.files import sha256_file
+
+                    if await asyncio.to_thread(sha256_file, target) == checksum:
+                        duplicate = True
+                        os.unlink(tmp_path)
+                    else:
+                        target = batch_dir / f"{Path(name).stem}__{checksum[:12]}{Path(name).suffix}"
                 # Cross-device copy (tmpfs -> bind mount) of up to 2 GB.
-                await asyncio.to_thread(shutil.move, tmp_path, target)
-                saved.append({"name": name, "size_bytes": total})
+                if not duplicate:
+                    await asyncio.to_thread(shutil.move, tmp_path, target)
+                saved.append({
+                    "name": name,
+                    "stored_name": target.name,
+                    "size_bytes": total,
+                    "checksum": checksum,
+                    "duplicate": duplicate,
+                })
                 printed_at_hint = printed_at_hint or _date_from_text(name)
         except BaseException:
             if os.path.exists(tmp_path):
@@ -986,16 +1498,21 @@ async def import_logs_for_print(
         meta = dict(record.get("metadata_json") or {})
         meta["log_import_hint"] = {"date": printed_at_hint.date().isoformat()}
         updates["metadata_json"] = meta
+    jobs = _trigger_rescan(
+        settings.raw_logs_container_path,
+        candidates=[batch_dir] if batch_dir is not None else [],
+        db=repo.db,
+        print_record_id=record_id,
+    ) if saved else []
     if updates:
         repo.update_print_record(record_id, updates)
-        # Durable now: the background rescan/auto-link reads this in its own session.
-        repo.db.commit()
-
-    if saved:
-        _trigger_rescan(settings.raw_logs_container_path)
     logger.info("prints: %d log file(s) uploaded for %s", len(saved), record_id)
-    return {"saved": saved, "skipped": skipped,
-            "note": "Логи импортируются в фоне; сессия привяжется к карточке по дате печати."}
+    return {
+        "saved": saved,
+        "skipped": skipped,
+        "jobs": jobs,
+        "note": "Подтвердите импорт в верхней панели; затем сессия привяжется к карточке по дате.",
+    }
 
 
 @router.delete("/{record_id}/files/{file_id}")

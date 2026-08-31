@@ -72,6 +72,8 @@ def compute_signal_stats(telemetry: dict[str, Any]) -> dict[str, dict[str, Any]]
         "temperatures": "temperature",
         "humidity":     "humidity",
         "pressure":     "pressure",
+        "gas_temperature": "temp_gas",
+        "diagnostic_pressure": "pressure",
     }
     for telem_key, group_label in group_map.items():
         group_data = telemetry.get(telem_key) or {}

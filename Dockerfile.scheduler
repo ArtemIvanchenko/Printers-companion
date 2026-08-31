@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # scheduler image — cron jobs + bounded historical re-analysis. Needs the light
-# analytics tier (polars, scipy, networkx for the causal graph) but none of the
-# heavy ML / SLM / 3D packages. Carries: base + analytics (identical tier to worker).
+# analytics tier (polars, scipy, networkx and small scikit-learn models) but none
+# of the heavy SLM / 3D packages. Carries: base + analytics (same tier as worker).
 FROM ghcr.io/artemivanchenko/printers-companion:base
 
 COPY requirements.analytics.txt /app/

@@ -1,0 +1,130 @@
+# Local compute stack for EVERY operator workstation.
+#
+# PostgreSQL and MinIO live on the NAS.  API, import worker, estimator, watcher
+# and Redis stay on this workstation, so uploaded data is calculated where it
+# originated. The global scheduler is disabled in NAS mode because its
+# historical aggregate jobs are not tied to the PC that created each session.
+#
+# Requires Docker Compose >= 2.24.4 for the !override/!reset merge tags.
+#
+# Normal operator PC:
+#   docker compose --env-file deploy/nas/.env.operator \
+#     -f docker-compose.yml -f deploy/nas/docker-compose.operator.yml \
+#     up -d api worker estimator watcher redis
+#
+x-operator-runtime: &operator-runtime
+  environment:
+    # Never inherit APP_ENV=local from the root .env: physical node
+    # registration and read-only schema checks are mandatory in NAS mode.
+    APP_ENV: production
+    COMPUTE_NODE_ID: ${COMPUTE_NODE_ID:?Set a unique COMPUTE_NODE_ID in .env.operator}
+    DATABASE_URL: ${DATABASE_URL:?Set the NAS DATABASE_URL in .env.operator}
+    MINIO_ENDPOINT: ${MINIO_ENDPOINT:?Set the NAS MINIO_ENDPOINT in .env.operator}
+    MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set the NAS object-store access key in .env.operator}
+    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set the NAS object-store secret in .env.operator}
+    AGENT_API_TOKEN: ${AGENT_API_TOKEN:?Set a local AGENT_API_TOKEN in .env.operator}
+    API_SERVICE_TOKEN: ${API_SERVICE_TOKEN:?Set a local API_SERVICE_TOKEN in .env.operator}
+    DB_POOL_SIZE: ${DB_POOL_SIZE:-2}
+    DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-2}
+    DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+    STARTUP_IMPORT_ENABLED: ${STARTUP_IMPORT_ENABLED:-false}
+    OPERATOR_INSTANCE_FILE: /var/lib/printer-companion/instance-id
+
+x-operator-state: &operator-state
+  type: bind
+  source: ${OPERATOR_STATE_HOST_PATH:-./.operator-state}
+  target: /var/lib/printer-companion
+
+services:
+  base:
+    profiles: ["build-only"]
+
+  # These services are defined in the base compose for a standalone install,
+  # but must never start on an operator PC in NAS mode.
+  postgres:
+    env_file: !reset []
+    profiles: ["disabled-local-storage"]
+    deploy:
+      replicas: 0
+
+  minio:
+    env_file: !reset []
+    profiles: ["disabled-local-storage"]
+    deploy:
+      replicas: 0
+
+  api:
+    <<: *operator-runtime
+    # ``--env-file deploy/nas/.env.operator`` is the interpolation source.
+    # Never also inject the base compose's optional root .env at runtime.
+    env_file: !reset []
+    volumes:
+      - *operator-state
+    command: >-
+      uvicorn api.main:app
+      --host ${API_HOST:-0.0.0.0}
+      --port ${API_PORT:-8000}
+      --workers ${API_WORKERS:-1}
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *operator-runtime
+    env_file: !reset []
+    volumes:
+      - *operator-state
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  estimator:
+    <<: *operator-runtime
+    env_file: !reset []
+    volumes:
+      - *operator-state
+    depends_on: !override
+      api:
+        condition: service_healthy
+
+  watcher:
+    <<: *operator-runtime
+    env_file: !reset []
+    depends_on: !override
+      api:
+        condition: service_healthy
+
+  # The standalone scheduler scans all sessions and therefore cannot preserve
+  # strict originating-PC affinity. Keep it impossible to start in NAS mode.
+  scheduler:
+    <<: *operator-runtime
+    env_file: !reset []
+    profiles: ["disabled-in-nas-mode"]
+    deploy:
+      replicas: 0
+
+  # Optional developer integration.  If enabled, it uses the local API and
+  # shared NAS database; it does not require a local PostgreSQL container.
+  mcp:
+    <<: *operator-runtime
+    env_file: !reset []
+    depends_on: !override
+      api:
+        condition: service_healthy
+
+  # Explicit one-shot schema migration. Run this once, from one workstation,
+  # before starting/updating any operator stacks. APIs only verify the head and
+  # never race each other to mutate the shared NAS schema.
+  migrate:
+    <<: *operator-runtime
+    env_file: !reset []
+    image: ghcr.io/artemivanchenko/printers-companion:api
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: alembic upgrade head
+    profiles: ["migration"]
+    networks:
+      - backend_net
+      - storage_net
+    restart: "no"

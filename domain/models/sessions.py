@@ -18,6 +18,13 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _current_compute_node_id() -> str:
+    # Lazy import keeps model import independent from Settings construction.
+    from core.config.settings import get_settings
+
+    return get_settings().compute_node_id
+
+
 class PrinterProfile(Base):
     __tablename__ = "printer_profiles"
 
@@ -59,6 +66,11 @@ class BuildSession(Base):
     __tablename__ = "sessions"
 
     session_id: Mapped[str] = mapped_column(String(80), primary_key=True, default=lambda: _new_id("session"))
+    # Immutable workstation that parsed this session. Shared consumers may
+    # read its stored payload/reports, but only this node may rehydrate/re-run.
+    origin_compute_node_id: Mapped[str] = mapped_column(
+        String(80), nullable=False, default=lambda: _current_compute_node_id(), index=True
+    )
     printer_id: Mapped[str | None] = mapped_column(ForeignKey("printers.printer_id"), index=True)
     profile_id: Mapped[str | None] = mapped_column(ForeignKey("printer_profiles.profile_id"), index=True)
     start_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -149,9 +161,26 @@ class SourceFile(Base):
 
 class ImportJob(Base):
     __tablename__ = "import_jobs"
-    __table_args__ = (Index("ix_import_jobs_status_updated", "status", "updated_at"),)
+    __table_args__ = (
+        Index("ix_import_jobs_status_updated", "status", "updated_at"),
+        Index(
+            "ix_import_jobs_owner_claim",
+            "owner_node_id",
+            "status",
+            "postponed_until",
+            "lease_until",
+        ),
+        Index(
+            "ix_import_jobs_owner_source_name_status",
+            "owner_node_id",
+            "source_name",
+            "status",
+        ),
+    )
 
     import_job_id: Mapped[str] = mapped_column(String(80), primary_key=True, default=lambda: _new_id("import"))
+    owner_node_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    print_record_id: Mapped[str | None] = mapped_column(String(80), index=True)
     source_path: Mapped[str] = mapped_column(String(1000), nullable=False, index=True)
     source_name: Mapped[str] = mapped_column(String(300), nullable=False)
     source_kind: Mapped[str] = mapped_column(String(40), default="folder")
@@ -162,11 +191,16 @@ class ImportJob(Base):
     confirmed_by: Mapped[str | None] = mapped_column(String(120))
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     postponed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(160))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ignored_by: Mapped[str | None] = mapped_column(String(120))
     ignored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_stability_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stability_check_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     file_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
     checksum_manifest: Mapped[dict[str, str]] = mapped_column(JSON, default=_json_default_dict)
+    source_objects: Mapped[dict[str, str]] = mapped_column(JSON, default=_json_default_dict)
     session_ids: Mapped[list[str]] = mapped_column(JSON, default=_json_default_list)
     report_ids: Mapped[list[str]] = mapped_column(JSON, default=_json_default_list)
     missing_context_questions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=_json_default_list)

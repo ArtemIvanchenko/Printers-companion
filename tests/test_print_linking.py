@@ -159,7 +159,11 @@ class TestImportLogsEndpoint:
         assert r.status_code == 200
         body = r.json()
         assert body["saved"][0]["name"] == "23.05.2027.log"
-        assert (tmp_path / "23.05.2027.log").read_bytes() == b"log data"
+        batches = list((tmp_path / "incoming").iterdir())
+        assert len(batches) == 1
+        stored_name = body["saved"][0]["stored_name"]
+        assert (batches[0] / stored_name).read_bytes() == b"log data"
+        assert body["jobs"]
 
         updated = client.get(f"/prints/{record['record_id']}").json()
         assert updated["printed_at"].startswith("2027-05-23")

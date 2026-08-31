@@ -28,8 +28,10 @@ logger = logging.getLogger(__name__)
 # Raw column -> chart series, grouped by physical meaning (see profiles/m350/signals.yaml).
 _OXYGEN_COLUMNS = ["SO1", "SO2"]
 _TEMPERATURE_COLUMNS = ["ST3", "ST4", "ST5"]
+_GAS_TEMPERATURE_COLUMNS = ["ST1 (flow T)", "Flow T"]
 _HUMIDITY_COLUMNS = ["ST1 (flow H)", "Flow H"]
 _PRESSURE_COLUMNS = ["SP4"]
+_DIAGNOSTIC_PRESSURE_COLUMNS = ["SP2", "SP11", "SP12"]
 _LAYER_COLUMN = "N"
 _TIME_COLUMN = "Time"
 
@@ -71,7 +73,10 @@ def _downsample(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
 
 def _best_telemetry_table(files: list[IngestedFile]):
     """Pick the parsed table richest in known sensor columns (burn/sensors logs)."""
-    wanted = set(_OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _PRESSURE_COLUMNS + _HUMIDITY_COLUMNS)
+    wanted = set(
+        _OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _GAS_TEMPERATURE_COLUMNS
+        + _PRESSURE_COLUMNS + _DIAGNOSTIC_PRESSURE_COLUMNS + _HUMIDITY_COLUMNS
+    )
     best = None
     best_score = 0
     for file in files:
@@ -129,10 +134,14 @@ def _assemble_groups(time_axis: list, col_series: dict[str, list]) -> dict[str, 
         telemetry["oxygen"] = oxygen
     if (temps := grp(_TEMPERATURE_COLUMNS)):
         telemetry["temperatures"] = temps
+    if (gas_temps := grp(_GAS_TEMPERATURE_COLUMNS)):
+        telemetry["gas_temperature"] = gas_temps
     if (humidity := grp(_HUMIDITY_COLUMNS)):
         telemetry["humidity"] = humidity
     if (pressure := grp(_PRESSURE_COLUMNS)):
         telemetry["pressure"] = pressure
+    if (diagnostic_pressure := grp(_DIAGNOSTIC_PRESSURE_COLUMNS)):
+        telemetry["diagnostic_pressure"] = diagnostic_pressure
     return telemetry
 
 
@@ -165,7 +174,10 @@ def _full_range_sensor_telemetry(
     if not sensor_files:
         return {}
     rows: list[dict[str, Any]] = []
-    cols = _OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _HUMIDITY_COLUMNS + _PRESSURE_COLUMNS
+    cols = (
+        _OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _GAS_TEMPERATURE_COLUMNS
+        + _HUMIDITY_COLUMNS + _PRESSURE_COLUMNS + _DIAGNOSTIC_PRESSURE_COLUMNS
+    )
     for file in sorted(sensor_files, key=lambda item: (_sensor_file_date(item) or item.mtime.date(), item.path)):
         path = Path(file.path)
         file_date = _sensor_file_date(file)
@@ -223,7 +235,14 @@ def _sample_telemetry(files: list[IngestedFile]) -> dict[str, Any]:
     has_time = any(_TIME_COLUMN in r for r in rows[:20])
     time_axis = [r.get(_TIME_COLUMN) for r in rows] if has_time else list(range(len(rows)))
     col_series: dict[str, list] = {}
-    for col_list in (_OXYGEN_COLUMNS, _TEMPERATURE_COLUMNS, _HUMIDITY_COLUMNS, _PRESSURE_COLUMNS):
+    for col_list in (
+        _OXYGEN_COLUMNS,
+        _TEMPERATURE_COLUMNS,
+        _GAS_TEMPERATURE_COLUMNS,
+        _HUMIDITY_COLUMNS,
+        _PRESSURE_COLUMNS,
+        _DIAGNOSTIC_PRESSURE_COLUMNS,
+    ):
         col_series.update(_series(rows, col_list))
     return _assemble_groups(time_axis, col_series)
 
@@ -477,6 +496,17 @@ def build_group_overview(
 
     # Full-resolution signal stats from the complete sensors.log (all rows, not just 150).
     signal_stats = _compute_full_signal_stats(files)
+    from analytics.phase_statistics import compute_layer_phase_statistics
+    from analytics.soft_sensors import compute_soft_sensors
+
+    soft_sensors = compute_soft_sensors(telemetry, signal_stats)
+    phase_statistics = compute_layer_phase_statistics(events)
+    from analytics.process_monitoring import build_advanced_monitoring
+
+    advanced_monitoring = build_advanced_monitoring(telemetry, events)
+    features["soft_sensor_count"] = soft_sensors["available"]
+    features["phase_statistics_available"] = phase_statistics["available"]
+    features["shadow_algorithm_count"] = advanced_monitoring["successful_algorithms"]
 
     # Data-reliability assessment: trust the inputs before analysing them.
     data_quality = assess_session_quality(files, events, telemetry, signal_stats)
@@ -492,6 +522,9 @@ def build_group_overview(
         "telemetry": telemetry,
         "health": health,
         "signal_stats": signal_stats,
+        "soft_sensors": soft_sensors,
+        "phase_statistics": phase_statistics,
+        "advanced_monitoring": advanced_monitoring,
         "data_quality": data_quality,
         # Timestamps preserved in payload so save_session_payload can populate
         # BuildSession.start_ts / end_ts (dashboard ordering + charts). Use the

@@ -1,16 +1,35 @@
 services:
   postgres:
     image: postgres:16-alpine
-    env_file: .env
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-printer_logs}
       POSTGRES_USER: ${POSTGRES_USER:-printer_logs}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.nas}
     volumes:
       - /volume1/docker/printer-companion/postgres:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    # PostgreSQL stores shared state, but never runs print analytics.  Keep its
+    # memory profile conservative for entry-level NAS hardware.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=512MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=100
     restart: unless-stopped
+    shm_size: 256mb
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-printer_logs} -d ${POSTGRES_DB:-printer_logs}"]
       interval: 10s
@@ -20,16 +39,21 @@ services:
   minio:
     image: minio/minio:RELEASE.2024-05-10T01-41-38Z
     command: server /data --console-address ":9001"
-    env_file: .env
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.nas}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.nas}
     volumes:
       - /volume1/docker/printer-companion/minio:/data
     ports:
       - "9000:9000"
-      - "9001:9001"
+      # The administration console is intentionally not published. Add
+      # "9001:9001" temporarily during maintenance if it is really needed.
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 15s

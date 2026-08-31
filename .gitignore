@@ -13,6 +13,7 @@ test_demo.db
 backups/
 .streamlit/
 .env.secrets
+.operator-state/
 
 # Generated / temp files (use explicit paths, not wildcards)
 import.sql

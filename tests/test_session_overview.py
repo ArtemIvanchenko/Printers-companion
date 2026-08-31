@@ -82,6 +82,8 @@ def test_overview_has_classification_and_dashboard_features():
     assert feats["layers"] == 2
     assert feats["file_count"] == 2
     assert feats["first_time"] == "13:00"
+    assert ov["advanced_monitoring"]["mode"] == "shadow"
+    assert ov["advanced_monitoring"]["operator_action_allowed"] is False
 
 
 def test_overview_telemetry_decodes_signals():

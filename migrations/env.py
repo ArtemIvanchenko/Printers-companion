@@ -82,10 +82,16 @@ def run_migrations_online() -> None:
         )
         with context.begin_transaction():
             context.run_migrations()
+        # SQLite's Alembic implementation reports non-transactional DDL. A
+        # migration that mixes ALTER TABLE with legacy-row backfills can leave
+        # its DML and even the alembic_version bump in an implicit transaction;
+        # closing the connection then rolls them back while the DDL remains.
+        # An explicit commit is harmless after PostgreSQL's transactional block
+        # and makes local upgrade tests genuinely atomic from Alembic's view.
+        connection.commit()
 
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

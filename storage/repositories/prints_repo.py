@@ -2,18 +2,23 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func, select
+from sqlalchemy import delete as sql_delete, func, select, update as sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from domain.models.prints import (
     MachineParams, MachinePreset, PlateGeometryCache, PrintRecord, PrintRecordFile,
 )
+from domain.models.sessions import BuildSession
+from domain.services.compute_affinity import require_compute_owner
 
 _RECORD_FIELDS = (
     "name", "material", "layer_thickness_mm", "hatch_distance_mm", "session_id",
     "status", "notes", "metadata_json", "printed_at", "powder_cost_rub_per_kg",
+    "updated_by",
 )
+_CREATE_RECORD_FIELDS = (*_RECORD_FIELDS, "origin_compute_node_id")
 _PRESET_FIELDS = (
     "name", "material", "layer_thickness_mm", "hatch_speed_mm_s",
     "contour_speed_mm_s", "hatch_distance_mm", "jump_speed_mm_s", "jump_delay_ms",
@@ -34,6 +39,7 @@ _PARAM_FIELDS = (
 def _record_to_dict(row: PrintRecord) -> dict[str, Any]:
     return {
         "record_id": row.record_id,
+        "origin_compute_node_id": row.origin_compute_node_id,
         "name": row.name,
         "material": row.material,
         "layer_thickness_mm": row.layer_thickness_mm,
@@ -44,9 +50,27 @@ def _record_to_dict(row: PrintRecord) -> dict[str, Any]:
         "metadata_json": row.metadata_json or {},
         "printed_at": row.printed_at.isoformat() if row.printed_at else None,
         "powder_cost_rub_per_kg": row.powder_cost_rub_per_kg,
+        "revision": row.revision,
+        "updated_by": row.updated_by,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+
+
+class PrintRecordConflict(RuntimeError):
+    """A workstation tried to save a stale version of a print card."""
+
+    def __init__(self, current: dict[str, Any] | None) -> None:
+        super().__init__("print record was modified by another workstation")
+        self.current = current
+
+
+class PrintSessionLinkConflict(RuntimeError):
+    """A session is missing, foreign-owned, or already linked to another card."""
+
+    def __init__(self, session_id: str, message: str) -> None:
+        super().__init__(message)
+        self.session_id = session_id
 
 
 def _file_to_dict(row: PrintRecordFile) -> dict[str, Any]:
@@ -98,20 +122,81 @@ class PrintsRepository:
     # ── Print records ──────────────────────────────────────────────────────
 
     def create_print_record(self, values: dict[str, Any]) -> dict[str, Any]:
-        row = PrintRecord(**{k: v for k, v in values.items() if k in _RECORD_FIELDS})
+        row_values = {k: v for k, v in values.items() if k in _CREATE_RECORD_FIELDS}
+        if not row_values.get("origin_compute_node_id"):
+            from core.config.settings import get_settings
+
+            row_values["origin_compute_node_id"] = get_settings().compute_node_id
+        row = PrintRecord(**row_values)
         self.db.add(row)
         self.db.flush()
         return _record_to_dict(row)
 
-    def update_print_record(self, record_id: str, values: dict[str, Any]) -> dict[str, Any] | None:
+    def update_print_record(
+        self,
+        record_id: str,
+        values: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any] | None:
         row = self.db.get(PrintRecord, record_id)
         if not row:
             return None
+        if expected_revision is not None and row.revision != expected_revision:
+            raise PrintRecordConflict(_record_to_dict(row))
+        target_session_id = values.get("session_id") if "session_id" in values else None
+        if target_session_id:
+            target_session = self.db.scalar(
+                select(BuildSession)
+                .where(BuildSession.session_id == target_session_id)
+                .with_for_update()
+            )
+            if target_session is None:
+                raise PrintSessionLinkConflict(
+                    target_session_id,
+                    f"session '{target_session_id}' does not exist",
+                )
+            if target_session.origin_compute_node_id != row.origin_compute_node_id:
+                raise PrintSessionLinkConflict(
+                    target_session_id,
+                    "print card and log session have different compute owners",
+                )
+            existing_link = self.db.scalar(
+                select(PrintRecord.record_id)
+                .where(
+                    PrintRecord.session_id == target_session_id,
+                    PrintRecord.record_id != record_id,
+                )
+                .limit(1)
+            )
+            if existing_link is not None:
+                raise PrintSessionLinkConflict(
+                    target_session_id,
+                    f"session '{target_session_id}' is already linked to print '{existing_link}'",
+                )
         for key in _RECORD_FIELDS:
             if key in values:
                 setattr(row, key, values[key])
         row.updated_at = datetime.now(timezone.utc)
-        self.db.flush()
+        try:
+            self.db.flush()
+        except StaleDataError:
+            # SQLAlchemy's version_id_col protects the race between the check
+            # above and the flush.  Reset the failed transaction before
+            # loading the version that won on the other workstation.
+            self.db.rollback()
+            current = self.db.get(PrintRecord, record_id)
+            raise PrintRecordConflict(_record_to_dict(current) if current else None) from None
+        except IntegrityError as exc:
+            # The partial unique index is the final guard against two requests
+            # attaching the same session after both passed the fast pre-check.
+            self.db.rollback()
+            if target_session_id:
+                raise PrintSessionLinkConflict(
+                    target_session_id,
+                    f"session '{target_session_id}' was linked concurrently",
+                ) from None
+            raise exc
         return _record_to_dict(row)
 
     def get_print_record(self, record_id: str) -> dict[str, Any] | None:
@@ -200,48 +285,178 @@ class PrintsRepository:
             return None
         uri = row.object_uri
         self.db.delete(row)
+        self._touch_print_record(record_id)
         self.db.flush()
         return uri
 
-    def find_unlinked_records_near(self, ts: datetime, window_hours: float = 24.0) -> list[dict[str, Any]]:
+    def find_unlinked_records_near(
+        self,
+        ts: datetime,
+        window_hours: float = 24.0,
+        *,
+        origin_compute_node_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Records without a session whose print date falls within ±window of ts."""
         from datetime import timedelta
 
         lo, hi = ts - timedelta(hours=window_hours), ts + timedelta(hours=window_hours)
         effective_date = func.coalesce(PrintRecord.printed_at, PrintRecord.created_at)
-        rows = self.db.scalars(
+        stmt = (
             select(PrintRecord)
             .where(PrintRecord.session_id.is_(None))
             .where(effective_date >= lo)
             .where(effective_date <= hi)
-        ).all()
+        )
+        if origin_compute_node_id is not None:
+            stmt = stmt.where(PrintRecord.origin_compute_node_id == origin_compute_node_id)
+        rows = self.db.scalars(stmt).all()
         return [_record_to_dict(row) for row in rows]
 
-    def link_session(self, record_id: str, session_id: str, session_start: datetime | None = None) -> bool:
+    def link_session(
+        self,
+        record_id: str,
+        session_id: str,
+        session_start: datetime | None = None,
+        *,
+        compute_node_id: str | None = None,
+    ) -> bool:
         """Attach a log session; its start timestamp becomes the authoritative print date."""
-        row = self.db.get(PrintRecord, record_id)
-        if not row:
+        try:
+            with self.db.begin_nested():
+                row = self.db.scalar(
+                    select(PrintRecord)
+                    .where(PrintRecord.record_id == record_id)
+                    .with_for_update()
+                )
+                session = self.db.scalar(
+                    select(BuildSession)
+                    .where(BuildSession.session_id == session_id)
+                    .with_for_update()
+                )
+                if row is None or session is None:
+                    return False
+                if row.origin_compute_node_id != session.origin_compute_node_id:
+                    return False
+                if compute_node_id is not None:
+                    require_compute_owner(
+                        entity_type="print_record",
+                        entity_id=row.record_id,
+                        origin_compute_node_id=row.origin_compute_node_id,
+                        requested_compute_node_id=compute_node_id,
+                    )
+                    require_compute_owner(
+                        entity_type="session",
+                        entity_id=session.session_id,
+                        origin_compute_node_id=session.origin_compute_node_id,
+                        requested_compute_node_id=compute_node_id,
+                    )
+                existing_link = self.db.scalar(
+                    select(PrintRecord.record_id)
+                    .where(
+                        PrintRecord.session_id == session_id,
+                        PrintRecord.record_id != record_id,
+                    )
+                    .limit(1)
+                )
+                if existing_link is not None:
+                    return False
+                row.session_id = session_id
+                if session_start is not None:
+                    row.printed_at = session_start
+                row.updated_at = datetime.now(timezone.utc)
+                self.db.flush()
+            return True
+        except IntegrityError:
+            # Savepoint rollback keeps the surrounding import transaction
+            # usable; the unique index decides the winner of a true race.
             return False
-        row.session_id = session_id
-        if session_start is not None:
-            row.printed_at = session_start
-        row.updated_at = datetime.now(timezone.utc)
-        return True
 
     # ── Attached files ─────────────────────────────────────────────────────
 
     def add_print_file(self, values: dict[str, Any]) -> dict[str, Any]:
-        row = PrintRecordFile(
-            record_id=values["record_id"],
-            object_uri=values["object_uri"],
-            file_name=values["file_name"],
-            file_type=values["file_type"],
-            size_bytes=int(values.get("size_bytes") or 0),
-            checksum=values.get("checksum") or "",
-        )
-        self.db.add(row)
+        checksum = str(values.get("checksum") or "")
+        if checksum:
+            existing = self.db.scalar(
+                select(PrintRecordFile).where(
+                    PrintRecordFile.record_id == values["record_id"],
+                    PrintRecordFile.checksum == checksum,
+                )
+            )
+            if existing is not None:
+                return {"duplicate": True, **_file_to_dict(existing)}
+
+        row_values = {
+            "record_id": values["record_id"],
+            "object_uri": values["object_uri"],
+            "file_name": values["file_name"],
+            "file_type": values["file_type"],
+            "size_bytes": int(values.get("size_bytes") or 0),
+            "checksum": checksum,
+        }
+        if values.get("file_id"):
+            row_values["file_id"] = values["file_id"]
+        row = PrintRecordFile(**row_values)
+        try:
+            # The pre-check is only a fast path. The unique DB index is the
+            # actual guarantee when two operator PCs upload the same bytes at
+            # once; a savepoint keeps the outer request usable after the loser
+            # receives its expected IntegrityError.
+            with self.db.begin_nested():
+                self.db.add(row)
+                self.db.flush()
+        except IntegrityError as exc:
+            if not checksum:
+                raise
+            if self.db.get_bind().dialect.name == "postgresql":
+                diagnostic = getattr(exc.orig, "diag", None)
+                if (
+                    getattr(diagnostic, "constraint_name", None)
+                    != "ux_print_record_files_record_checksum"
+                ):
+                    raise
+            existing = self.db.scalar(
+                select(PrintRecordFile).where(
+                    PrintRecordFile.record_id == values["record_id"],
+                    PrintRecordFile.checksum == checksum,
+                )
+            )
+            if existing is None:
+                raise
+            return {"duplicate": True, **_file_to_dict(existing)}
+        self._touch_print_record(values["record_id"])
         self.db.flush()
         return _file_to_dict(row)
+
+    def _touch_print_record(self, record_id: str) -> None:
+        """Atomically publish an attachment change to every workstation.
+
+        Attachment additions/removals are commutative: two operators may add
+        different files at the same time and neither operation should fail just
+        because both started from the same card revision.  Mutating a loaded
+        ``PrintRecord`` here used SQLAlchemy's optimistic-version predicate and
+        turned that harmless race into ``StaleDataError``.  A single in-database
+        increment keeps ``revision`` monotonic without copying any possibly
+        stale card fields back over a concurrent edit.
+
+        The explicit increment is important: bulk SQL bypasses the mapper's
+        automatic ``version_id_col`` handling.  Expiring just these two cached
+        attributes makes a record already present in this Session observe the
+        database value before a later version-checked ORM update.
+        """
+        result = self.db.execute(
+            sql_update(PrintRecord)
+            .where(PrintRecord.record_id == record_id)
+            .values(
+                updated_at=datetime.now(timezone.utc),
+                revision=PrintRecord.revision + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount:
+            identity_key = self.db.identity_key(PrintRecord, record_id)
+            loaded = self.db.identity_map.get(identity_key)
+            if loaded is not None:
+                self.db.expire(loaded, ("revision", "updated_at"))
 
     def list_print_files(self, record_id: str) -> list[dict[str, Any]]:
         rows = self.db.scalars(

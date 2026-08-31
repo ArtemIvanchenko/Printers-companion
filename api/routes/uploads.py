@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import shutil
@@ -28,8 +29,8 @@ _MAX_FILE_MB = 2000
 async def upload_logs(files: list[UploadFile]) -> dict:
     """Save uploaded log files to the raw-logs folder (C:\\PrinterLogs).
 
-    The startup-import task and watcher pick them up automatically.
-    Accepts .log and .zip files up to 2000 MB each.
+    Every saved file becomes a durable import job.  Parsing starts only after
+    operator confirmation (unless that policy is explicitly disabled).
     """
     settings = get_settings()
     dest = Path(settings.raw_logs_container_path)
@@ -37,15 +38,22 @@ async def upload_logs(files: list[UploadFile]) -> dict:
         raise HTTPException(500, f"Папка логов не найдена: {dest}")
 
     saved, skipped = [], []
+    batch_dir: Path | None = None
     for f in files:
         name = Path(f.filename or "unknown").name
         suffix = Path(name).suffix.lower()
         if suffix not in _ALLOWED_SUFFIXES:
             skipped.append({"name": name, "reason": "неподдерживаемый тип файла"})
             continue
-        target = dest / name
+        if batch_dir is None:
+            batch_dir = dest / "incoming" / (
+                "upload_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            )
+            batch_dir.mkdir(parents=True, exist_ok=False)
+        target = batch_dir / name
         total = 0
         too_big = False
+        digest = hashlib.sha256()
         tmp_path = f"/tmp/{os.urandom(8).hex()}.upload"
         try:
             with open(tmp_path, "wb") as buf:
@@ -54,26 +62,43 @@ async def upload_logs(files: list[UploadFile]) -> dict:
                     if total > _MAX_FILE_MB * 1024 * 1024:
                         too_big = True
                         break
+                    digest.update(chunk)
                     buf.write(chunk)
             if too_big:
                 os.unlink(tmp_path)
                 skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
             else:
+                checksum = digest.hexdigest()
+                duplicate = False
+                if target.exists():
+                    from core.utils.files import sha256_file
+
+                    if await asyncio.to_thread(sha256_file, target) == checksum:
+                        duplicate = True
+                        os.unlink(tmp_path)
+                    else:
+                        # Never overwrite a different log with the same name.
+                        target = batch_dir / f"{Path(name).stem}__{checksum[:12]}{Path(name).suffix}"
                 # /tmp is a tmpfs and the destination a bind mount, so this is a
                 # cross-device copy of up to 2 GB — off the event loop.
-                await asyncio.to_thread(shutil.move, tmp_path, target)
-                saved.append({"name": name, "size_bytes": total})
+                if not duplicate:
+                    await asyncio.to_thread(shutil.move, tmp_path, target)
+                saved.append({
+                    "name": name,
+                    "stored_name": target.name,
+                    "size_bytes": total,
+                    "checksum": checksum,
+                    "duplicate": duplicate,
+                })
                 logger.info("upload_logs: saved %s (%d bytes) → %s", name, total, target)
         except BaseException:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             raise
 
-    # Trigger re-scan so new files are imported without waiting for next restart
-    if saved:
-        _trigger_rescan(settings.raw_logs_container_path)
+    jobs = _enqueue_import_candidates([batch_dir]) if saved and batch_dir is not None else []
 
-    return {"saved": saved, "skipped": skipped}
+    return {"saved": saved, "skipped": skipped, "jobs": jobs}
 
 
 @router.post("/rescan")
@@ -87,103 +112,64 @@ async def rescan_logs() -> dict:
     dest = Path(settings.raw_logs_container_path)
     if not dest.exists():
         raise HTTPException(500, f"Папка логов не найдена: {dest}")
-    _trigger_rescan(settings.raw_logs_container_path)
-    return {"status": "ok", "message": "Сканирование запущено. Новые данные появятся через минуту."}
+    jobs = _trigger_rescan(settings.raw_logs_container_path, candidates=[dest])
+    waiting = sum(job["status"] == "awaiting_operator_confirmation" for job in jobs)
+    return {
+        "status": "ok",
+        "jobs": jobs,
+        "message": f"Найдено заданий: {len(jobs)}; ожидают подтверждения: {waiting}.",
+    }
 
 
-def _trigger_rescan(path: str) -> None:
-    """Re-import files in the raw-logs folder that haven't been processed yet.
+def _enqueue_import_candidates(
+    paths: list[Path],
+    db=None,
+    *,
+    print_record_id: str | None = None,
+) -> list[dict]:
+    """Persist import work before returning; no in-process task can be lost."""
+    from api.routes.imports import create_detected_import
+    from storage.db.session import session_scope
+    from storage.repositories.runtime import RuntimeRepository
 
-    The heavy work (file I/O + log parsing) runs in a thread-pool worker so the
-    async event loop is never blocked — the API stays responsive during a scan.
-    """
-    def _do_parse(folder: Path, known_paths: set[str]) -> tuple:
-        """Blocking work — runs in a thread via asyncio.to_thread."""
-        from domain.services.ingestion import IngestionService
-        from domain.services.session_grouping import group_files_into_sessions
-        from profiles.m350.profile import build_registry, get_profile
-
-        svc = IngestionService(build_registry(), get_profile())
-        # Scan first (cheap) so we can skip files already in source_files.
-        scan_result = svc.scan(folder)
-        new_files = [f for f in scan_result.files if f.path not in known_paths]
-        if not new_files:
-            return [], 0
-        # Parse only genuinely new files.
-        for item in new_files:
-            from parsers.context import ParserContext
-            profile = get_profile()
-            context = ParserContext(
-                profile_id=profile.profile_id,
-                profile_version=profile.version,
-                signal_mappings=profile.signal_mappings,
+    def persist(repo: RuntimeRepository) -> list[dict]:
+        jobs: list[dict] = []
+        for candidate in paths:
+            result = create_detected_import(
+                str(candidate),
+                repo,
+                print_record_id=print_record_id,
             )
-            try:
-                item.parse_result = svc.registry.parse(Path(item.path), item.classification.family, context)
-            except Exception:
-                item.parse_result = None
-        groups = group_files_into_sessions(new_files)
-        return groups, len(new_files)
+            jobs.append(result.job.model_dump(mode="json"))
+        return jobs
 
-    async def _run() -> None:
-        try:
-            from domain.services.print_linking import auto_link_print_records
-            from domain.services.session_overview import build_group_overview
-            from storage.db.session import session_scope
-            from storage.repositories.runtime import RuntimeRepository
-
-            folder = Path(path)
-
-            # Fetch already-known file paths and session IDs before parsing.
-            with session_scope() as db:
-                repo = RuntimeRepository(db)
-                # IDs only — the payloads are not needed for a membership test.
-                existing_sessions = repo.list_session_ids()
-                from sqlalchemy import text
-                try:
-                    rows = db.execute(text("SELECT original_path FROM source_files")).fetchall()
-                    known_paths = {r[0] for r in rows}
-                except Exception:
-                    known_paths = set()
-
-            # CPU/IO-bound parsing runs in a thread — event loop stays free.
-            groups, n_parsed = await asyncio.to_thread(_do_parse, folder, known_paths)
-
-            if not groups:
-                logger.info("upload rescan: no new files found")
-                return
-
-            with session_scope() as db:
-                repo = RuntimeRepository(db)
-                imported = 0
-                for group in groups:
-                    if group.group_id in existing_sessions:
-                        continue
-                    overview = build_group_overview(
-                        group.group_id, group.files,
-                        start_ts=group.start_ts, end_ts=group.end_ts,
-                        grouping_confidence=group.confidence,
-                    )
-                    repo.save_session_payload(
-                        group.group_id,
-                        {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
-                    )
-                    imported += 1
-                auto_link_print_records(db)
-            logger.info("upload rescan: %d new file(s) parsed, %d session(s) imported", n_parsed, imported)
-        except Exception:
-            logger.exception("upload rescan: failed")
-
-    try:
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(_run())
-        _RESCAN_TASKS.add(task)
-        task.add_done_callback(_RESCAN_TASKS.discard)
-    except RuntimeError:
-        pass  # no running loop (tests)
+    if db is not None:
+        return persist(RuntimeRepository(db))
+    with session_scope() as owned_db:
+        return persist(RuntimeRepository(owned_db))
 
 
-_RESCAN_TASKS: set = set()
+def _trigger_rescan(
+    path: str,
+    candidates: list[Path] | None = None,
+    db=None,
+    *,
+    print_record_id: str | None = None,
+) -> list[dict]:
+    """Convert filesystem candidates into the same durable import jobs.
+
+    The default is deliberately one folder job. A flat printer export contains
+    many complementary logs for several sessions; enumerating children turns
+    every file into an isolated pseudo-session and floods the operator with
+    confirmation cards.
+    """
+    folder = Path(path)
+    paths = candidates if candidates is not None else [folder]
+    return _enqueue_import_candidates(
+        paths,
+        db=db,
+        print_record_id=print_record_id,
+    )
 
 
 # ── Step 3: new-print form ─────────────────────────────────────────────────────

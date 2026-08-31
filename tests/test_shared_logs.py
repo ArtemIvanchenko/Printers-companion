@@ -1,4 +1,4 @@
-"""Calibration-critical logs must survive not being on this machine's disk.
+"""Calibration-critical logs have a compact session-addressable NAS copy.
 
 Against a shared database (the planned NAS setup) an operator sees every
 print, but only has the log files for the ones they imported themselves. Every
@@ -7,8 +7,9 @@ the file is missing — so the accuracy loop silently falls back to wall-clock
 time, which carries operator pauses (18 h of 47.6 on one real build). Nothing
 errors; the numbers just quietly get worse.
 
-Mirroring only time_log keeps this cheap: 3 MB across this shop's 19 real
-prints, against 10 GB for the full log set.
+The complete raw import is archived separately before analysis. Mirroring only
+time_log here keeps cross-PC calibration cheap: 3 MB across this shop's 19 real
+prints instead of downloading a full multi-gigabyte batch for each lookup.
 """
 from datetime import datetime, timezone
 from pathlib import Path

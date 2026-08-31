@@ -108,8 +108,14 @@ def session_burn_by_layer(session_id: str, db: Session) -> dict[int, float] | No
         return {layer: burn / 1000.0 for layer, (burn, _) in stored.items()}
 
     from storage.repositories.runtime import RuntimeRepository
+    from domain.services.compute_affinity import ComputeAffinityError
 
-    files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True)
+    try:
+        files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True)
+    except ComputeAffinityError:
+        # Global calibration may consume normalized rows from every PC, but it
+        # must never fetch/reparse another workstation's raw logs.
+        return None
     if not files:
         return None
     out: dict[int, float] = {}

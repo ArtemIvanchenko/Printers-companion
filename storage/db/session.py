@@ -44,10 +44,10 @@ if not settings.database_url.startswith("sqlite"):
     #   api 2 workers x (5+10) + worker (5+10) + scheduler (5+10) = 60
     pool_config.update({
         "poolclass": QueuePool,
-        "pool_size": 5,
-        "max_overflow": 10,
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
         "pool_recycle": 3600,  # Recycle connections every hour
-        "pool_timeout": 30,  # Wait 30s for a connection from the pool
+        "pool_timeout": settings.db_pool_timeout,
     })
 else:
     # SQLite uses NullPool to avoid connection issues
@@ -106,4 +106,3 @@ def session_scope() -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
-

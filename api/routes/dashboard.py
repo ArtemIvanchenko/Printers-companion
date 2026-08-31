@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from domain.models.entities import OperatorEvent, QualityOutcome
 from domain.models.sessions import BuildSession
+from profiles.signal_catalog import signal_display_name, signal_labels_ru
 from storage.db.session import session_scope
 
 router = APIRouter(tags=["dashboard"])
@@ -306,12 +307,8 @@ def dashboard():
         tel_subtitle = "нет данных"
     tel_session_id = tel_label or ""
 
-    # Build labelled datasets (canonical names from the signal dictionary).
-    _sig_titles = {
-        "SO1": "O₂ канал 1", "SO2": "O₂ канал 2",
-        "ST3": "Камера (низ)", "ST4": "Камера (верх)", "ST5": "Стол",
-        "SP4": "Давление камеры", "ST1 (flow H)": "Влажность", "Flow H": "Влажность",
-    }
+    # User labels come from the profile catalog.  Raw controller codes remain
+    # the data keys, but are no longer duplicated as ad-hoc UI dictionaries.
     _o2_colors = {"SO1": "#ef4444", "SO2": "#f59e0b"}
     _temp_colors = {"ST3": "#60a5fa", "ST4": "#8b5cf6", "ST5": "#10b981"}
 
@@ -320,7 +317,7 @@ def dashboard():
         palette = ["#60a5fa", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"]
         for i, (col, values) in enumerate(series.items()):
             out.append({
-                "label": _sig_titles.get(col, col),
+                "label": signal_display_name(col),
                 "data": values,
                 "borderColor": colors.get(col, palette[i % len(palette)]) if colors else fallback,
                 "backgroundColor": "transparent",
@@ -490,6 +487,7 @@ def dashboard():
         "session_table_rows": _session_table_rows(sessions),
         "gas_table_rows": _gas_table_rows(gas_events),
         "telemetry_session_id": _js_json(tel_session_id),
+        "signal_labels": _js_json(signal_labels_ru()),
     }
 
     return HTMLResponse(_render_template(ctx))

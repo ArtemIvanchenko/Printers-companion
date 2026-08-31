@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
 from api.routes.imports import create_detected_import, handle_import_callback
+from core.config.settings import get_settings
 from core.security.auth import require_service_token
 from core.security.ratelimit import agent_limiter, rate_limit
 from operator_journal.notifications import build_import_confirmation_message, build_import_summary_message
@@ -54,7 +55,13 @@ def pending_notifications(
     limit: int = 20,
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
-    return {"notifications": repo.list_pending_notifications(channel=channel, limit=min(limit, 100))}
+    return {
+        "notifications": repo.list_pending_notifications(
+            owner_node_id=get_settings().compute_node_id,
+            channel=channel,
+            limit=min(limit, 100),
+        )
+    }
 
 
 @router.post("/notifications/{notification_id}/sent")
@@ -63,7 +70,11 @@ def notification_sent(
     payload: dict | None = None,
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
-    ok = repo.mark_notification_sent(notification_id, status_value="sent")
+    ok = repo.mark_notification_sent(
+        notification_id,
+        owner_node_id=get_settings().compute_node_id,
+        status_value="sent",
+    )
     repo.flush()
     return {"ok": ok, "notification_id": notification_id}
 
@@ -77,6 +88,7 @@ def notification_failed(
     payload = payload or {}
     ok = repo.mark_notification_sent(
         notification_id,
+        owner_node_id=get_settings().compute_node_id,
         status_value="failed",
         error=str(payload.get("error", ""))[:1000] or None,
     )
@@ -122,9 +134,13 @@ def agent_send_import_confirmation(
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     job = repo.get_import_job(import_job_id)
-    if not job:
+    if not job or job.owner_node_id != get_settings().compute_node_id:
         return {"error": "not_found"}
-    notification = build_import_confirmation_message(import_job_id, job.source_name)
+    notification = build_import_confirmation_message(
+        import_job_id,
+        job.source_name,
+        job.owner_node_id,
+    )
     repo.save_notifications([notification])
     repo.flush()
     return notification.model_dump(mode="json")
@@ -136,13 +152,14 @@ def agent_send_import_summary(
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     job = repo.get_import_job(import_job_id)
-    if not job:
+    if not job or job.owner_node_id != get_settings().compute_node_id:
         return {"error": "not_found"}
     notification = build_import_summary_message(
         import_job_id,
         job.status.value,
         [f"/reports/{report_id}" for report_id in job.report_ids],
         job.missing_context_questions,
+        job.owner_node_id,
     )
     repo.save_notifications([notification])
     repo.flush()

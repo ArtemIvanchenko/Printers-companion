@@ -12,6 +12,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_PLACEHOLDER_MARKERS = (
+    "change-me",
+    "change_me",
+    "changeme",
+    "replace-me",
+    "replace_me",
+    "minioadmin",
+)
+
+
+def _looks_like_placeholder(value: object) -> bool:
+    normalized = str(value or "").strip().lower()
+    return not normalized or any(marker in normalized for marker in _PLACEHOLDER_MARKERS)
+
 
 @dataclass
 class PreflightReport:
@@ -59,6 +73,45 @@ def check_environ(report: PreflightReport, settings: Settings) -> None:
             else:
                 report.warnings.append(msg)
 
+    # Example files deliberately contain conspicuous placeholders. Check them
+    # case-insensitively as production templates often use uppercase CHANGE_ME,
+    # which exact comparisons against the built-in lowercase defaults miss.
+    sensitive_values = {
+        "DATABASE_URL": settings.database_url,
+        "MINIO_ROOT_USER": settings.minio_root_user,
+        "MINIO_ROOT_PASSWORD": settings.minio_root_password,
+        "AGENT_API_TOKEN": settings.agent_api_token,
+        "API_SERVICE_TOKEN": settings.api_service_token,
+    }
+    for name, value in sensitive_values.items():
+        if not _looks_like_placeholder(value):
+            continue
+        msg = f"{name} is empty or still contains a CHANGE_ME/default placeholder."
+        if is_production:
+            if msg not in report.errors:
+                report.errors.append(msg)
+        elif msg not in report.warnings:
+            report.warnings.append(msg)
+
+    # Job ownership is persisted in the shared database.  Reusing the shipped
+    # placeholder on several PCs would make them one logical worker and allow
+    # either PC to execute the other's calculations.
+    default_node_id = "local-operator"
+    remote_data = (
+        (_is_remote(_host_of(settings.database_url)) and not settings.database_url.startswith("sqlite"))
+        or _is_remote(_host_of(settings.minio_endpoint))
+    )
+    if settings.compute_node_id == default_node_id:
+        msg = (
+            "COMPUTE_NODE_ID is still 'local-operator'. Set a stable, unique value "
+            "for this operator PC (for example operator-01); it is the durable "
+            "owner of locally executed calculations."
+        )
+        if is_production or remote_data:
+            report.errors.append(msg)
+        else:
+            report.warnings.append(msg)
+
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "postgres", "minio", "redis", ""}
 
@@ -87,15 +140,15 @@ def check_remote_backends(report: PreflightReport, settings: Settings) -> None:
     """Refuse default credentials once PostgreSQL or MinIO is off this machine.
 
     check_environ only escalates to an error when APP_ENV says "production", but
-    the shipped default is "local" and nothing in the NAS migration changes it
-    (deploy/nas/README.md) — operators edit DATABASE_URL and MINIO_ENDPOINT and
-    nothing else. At that moment the placeholder passwords stop being a local
+    the shipped default is "local".  An operator stack connected to the NAS sets
+    production, but this host-based check remains deliberately independent of that label.
+    When DATABASE_URL or MINIO_ENDPOINT becomes remote, placeholder passwords stop being a local
     convenience and start guarding a service reachable from the whole tailnet,
     so the check keys on where the backend actually lives, not on a label.
     """
     db_host = _host_of(settings.database_url)
     if _is_remote(db_host) and not settings.database_url.startswith("sqlite"):
-        if any(pw in settings.database_url for pw in _DEFAULT_DB_PASSWORDS):
+        if any(pw in settings.database_url.lower() for pw in _DEFAULT_DB_PASSWORDS) or _looks_like_placeholder(settings.database_url):
             report.errors.append(
                 f"DATABASE_URL points at a remote host ({db_host}) but still carries the "
                 "placeholder password 'change-me'. Set a real password on both the server "
@@ -105,7 +158,10 @@ def check_remote_backends(report: PreflightReport, settings: Settings) -> None:
     minio_host = _host_of(settings.minio_endpoint)
     if _is_remote(minio_host):
         for default, field in _DEFAULT_MINIO.items():
-            if getattr(settings, field, None) == default:
+            if (
+                getattr(settings, field, None) == default
+                or _looks_like_placeholder(getattr(settings, field, None))
+            ):
                 report.errors.append(
                     f"MINIO_ENDPOINT points at a remote host ({minio_host}) but "
                     f"{field.upper()} is still the default '{default}'. Set real "

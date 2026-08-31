@@ -1,12 +1,13 @@
+import hashlib
 import json
 import logging
 import math
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from domain.enums.common import SourceFileFamily, VerificationStatus
@@ -26,6 +27,7 @@ from domain.models.entities import (
 )
 from domain.services.import_jobs import ImportJobRecord
 from domain.services.ingestion import IngestedFile
+from domain.services.compute_affinity import require_compute_owner
 from operator_journal.notifications import NotificationMessage
 
 logger = logging.getLogger(__name__)
@@ -98,7 +100,10 @@ def _load_offloaded_report(storage_uri: str) -> dict[str, Any] | None:
         return None
 
 
-# Log families worth keeping in shared object storage, and why only these.
+# Log families worth keeping as an additional session-addressable fast copy.
+# The complete immutable input batch is already archived under
+# ``raw-logs/imports/<owner>/<job>/...`` before parsing; this small mirror is
+# not the raw retention policy.
 #
 # Every calibration the project has — scan time, recoat time, machine time as
 # the "actual" in predicted-vs-actual — reads exactly one family: time_log. On
@@ -106,11 +111,11 @@ def _load_offloaded_report(storage_uri: str) -> dict[str, Any] | None:
 # 10 GB for the full log set, of which stateFlow alone is 9 GB (and is already
 # skipped at ingest).
 #
-# This matters for the shared-NAS setup: without the logs, an operator who did
+# This matters for the shared-NAS setup: without this direct copy, a consumer
 # not import a print themselves gets None from every calibration path and the
 # accuracy loop silently falls back to wall-clock time — which includes
 # operator pauses, 18 h of 47.6 on one real build. Replicating 160 KB per print
-# fixes that; replicating 10 GB is not worth doing for it.
+# fixes that without downloading/extracting the complete raw batch.
 _SHARED_LOG_FAMILIES = frozenset({SourceFileFamily.time_log})
 
 
@@ -119,7 +124,7 @@ def _shared_log_object_name(session_id: str, file_name: str) -> str:
 
 
 def mirror_logs_to_object_store(session_id: str, files: list[IngestedFile]) -> int:
-    """Copy this session's calibration-critical logs into object storage.
+    """Copy calibration-critical logs to a session-addressable fast path.
 
     Best-effort: object storage being down must never fail an import, since the
     on-disk copy is still the primary. Returns how many files were stored.
@@ -246,6 +251,8 @@ class RuntimeRepository:
     def save_import_job(self, job: ImportJobRecord) -> None:
         data = job.model_dump()
         values = {
+            "owner_node_id": job.owner_node_id,
+            "print_record_id": job.print_record_id,
             "source_path": job.source_path,
             "source_name": job.source_name,
             "source_kind": job.source_kind,
@@ -256,11 +263,16 @@ class RuntimeRepository:
             "confirmed_by": job.confirmed_by,
             "confirmed_at": job.confirmed_at,
             "postponed_until": job.postponed_until,
+            "lease_owner": job.lease_owner,
+            "lease_until": job.lease_until,
+            "lease_generation": job.lease_generation,
             "ignored_by": job.ignored_by,
             "ignored_at": job.ignored_at,
             "last_stability_check_at": job.last_stability_check_at,
+            "stability_check_attempts": job.stability_check_attempts,
             "file_snapshot": jsonable_encoder(data["file_snapshot"]),
             "checksum_manifest": jsonable_encoder(data["checksum_manifest"]),
+            "source_objects": jsonable_encoder(data["source_objects"]),
             "session_ids": jsonable_encoder(data["session_ids"]),
             "report_ids": jsonable_encoder(data["report_ids"]),
             "missing_context_questions": jsonable_encoder(data["missing_context_questions"]),
@@ -274,15 +286,204 @@ class RuntimeRepository:
         row = self.db.get(ImportJob, import_job_id)
         return _import_job_record_from_row(row) if row else None
 
-    def list_import_jobs(self) -> list[ImportJobRecord]:
-        rows = self.db.scalars(select(ImportJob).order_by(ImportJob.detected_at.desc())).all()
+    def get_import_job_for_update(self, import_job_id: str) -> ImportJobRecord | None:
+        """Read and lock an import row for an operator state transition."""
+        row = self.db.scalar(
+            select(ImportJob)
+            .where(ImportJob.import_job_id == import_job_id)
+            .with_for_update()
+        )
+        return _import_job_record_from_row(row) if row else None
+
+    def lock_import_candidate(self, owner_node_id: str, source_path: str) -> None:
+        """Serialize detection of the same local batch on PostgreSQL.
+
+        Watcher and browser upload can report one freshly-created directory at
+        the same time. A transaction-scoped advisory lock closes the list→add
+        race without imposing a global unique constraint that would prevent a
+        legitimately changed file from being re-imported at the same path.
+        SQLite tests are single-process and need no equivalent.
+        """
+        if self.db.get_bind().dialect.name != "postgresql":
+            return
+        digest = hashlib.sha256(
+            f"{owner_node_id}\0{source_path}".encode("utf-8")
+        ).digest()
+        lock_key = int.from_bytes(digest[:8], "big", signed=True)
+        self.db.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
+    def list_import_jobs(
+        self,
+        owner_node_id: str | None = None,
+        *,
+        skip: int = 0,
+        limit: int | None = None,
+    ) -> list[ImportJobRecord]:
+        query = select(ImportJob)
+        if owner_node_id is not None:
+            query = query.where(ImportJob.owner_node_id == owner_node_id)
+        query = query.order_by(ImportJob.detected_at.desc()).offset(max(0, skip))
+        if limit is not None:
+            query = query.limit(max(0, limit))
+        rows = self.db.scalars(query).all()
         return [_import_job_record_from_row(row) for row in rows]
+
+    def list_import_jobs_by_source_path(
+        self,
+        *,
+        owner_node_id: str,
+        source_path: str,
+    ) -> list[ImportJobRecord]:
+        """Only versions of one local path, newest first."""
+        rows = self.db.scalars(
+            select(ImportJob)
+            .where(
+                ImportJob.owner_node_id == owner_node_id,
+                ImportJob.source_path == source_path,
+            )
+            .order_by(ImportJob.detected_at.desc())
+        ).all()
+        return [_import_job_record_from_row(row) for row in rows]
+
+    def has_terminal_import_job_by_name(
+        self,
+        *,
+        owner_node_id: str,
+        source_name: str,
+    ) -> bool:
+        """Cheap hint used before any potentially long local hashing."""
+        found = self.db.scalar(
+            select(ImportJob.import_job_id)
+            .where(
+                ImportJob.owner_node_id == owner_node_id,
+                ImportJob.source_name == source_name,
+                ImportJob.status.in_(("done", "needs_operator_context")),
+            )
+            .limit(1)
+        )
+        return found is not None
+
+    def list_terminal_import_jobs_by_name(
+        self,
+        *,
+        owner_node_id: str,
+        source_name: str,
+    ) -> list[ImportJobRecord]:
+        """Completed imports that may have the same content at another path."""
+        rows = self.db.scalars(
+            select(ImportJob)
+            .where(
+                ImportJob.owner_node_id == owner_node_id,
+                ImportJob.source_name == source_name,
+                ImportJob.status.in_(("done", "needs_operator_context")),
+            )
+            .order_by(ImportJob.detected_at.desc())
+        ).all()
+        return [_import_job_record_from_row(row) for row in rows]
+
+    def count_import_jobs(self, owner_node_id: str | None = None) -> int:
+        query = select(func.count()).select_from(ImportJob)
+        if owner_node_id is not None:
+            query = query.where(ImportJob.owner_node_id == owner_node_id)
+        return int(self.db.scalar(query) or 0)
+
+    def latest_import_job(self, owner_node_id: str) -> ImportJobRecord | None:
+        row = self.db.scalar(
+            select(ImportJob)
+            .where(ImportJob.owner_node_id == owner_node_id)
+            .order_by(ImportJob.updated_at.desc())
+            .limit(1)
+        )
+        return _import_job_record_from_row(row) if row else None
+
+    def claim_next_import_job(
+        self,
+        *,
+        owner_node_id: str,
+        lease_owner: str,
+        now: datetime | None = None,
+        lease_seconds: int = 900,
+    ) -> ImportJobRecord | None:
+        """Atomically lease one due import owned by this operator PC.
+
+        ``owner_node_id`` is stable across container restarts; ``lease_owner``
+        identifies this particular worker process.  Other PCs cannot see the
+        row through this claim even though the database itself is shared.
+        """
+        now = now or datetime.now(timezone.utc)
+        due = or_(
+            ImportJob.status == "checking_stability",
+            and_(
+                ImportJob.status == "postponed",
+                ImportJob.confirmed_by.is_not(None),
+                ImportJob.postponed_until.is_not(None),
+                ImportJob.postponed_until <= now,
+            ),
+        )
+        lease_available = or_(
+            ImportJob.lease_until.is_(None),
+            ImportJob.lease_until < now,
+        )
+        row = self.db.scalar(
+            select(ImportJob)
+            .where(ImportJob.owner_node_id == owner_node_id, due, lease_available)
+            .order_by(ImportJob.updated_at, ImportJob.detected_at)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if row is None:
+            return None
+        row.lease_owner = lease_owner
+        row.lease_until = now + timedelta(seconds=max(60, lease_seconds))
+        row.lease_generation += 1
+        row.updated_at = now
+        self.db.flush()
+        return _import_job_record_from_row(row)
+
+    def renew_import_job_lease(
+        self,
+        import_job_id: str,
+        *,
+        lease_owner: str,
+        lease_generation: int,
+        lease_seconds: int = 900,
+        now: datetime | None = None,
+    ) -> bool:
+        """Keep a long local parse leased without holding a NAS transaction.
+
+        Renewal is fenced by both the worker-process identity and generation.
+        It never revives an expired lease, which could already have been
+        reclaimed by a restarted worker on the same operator PC.
+        """
+        now = now or datetime.now(timezone.utc)
+        row = self.db.scalar(
+            select(ImportJob)
+            .where(ImportJob.import_job_id == import_job_id)
+            .with_for_update()
+        )
+        if row is None or row.lease_owner != lease_owner:
+            return False
+        if row.lease_generation != lease_generation or row.lease_until is None:
+            return False
+        lease_until = row.lease_until
+        if lease_until.tzinfo is None:
+            lease_until = lease_until.replace(tzinfo=timezone.utc)
+        if lease_until <= now:
+            return False
+        row.lease_until = now + timedelta(seconds=max(60, lease_seconds))
+        row.updated_at = now
+        self.db.flush()
+        return True
 
     def save_notifications(self, notifications: Iterable[NotificationMessage]) -> None:
         for notification in notifications:
             existing = self.db.get(NotificationOutbox, notification.notification_id)
             values = notification.model_dump(mode="json")
             if existing:
+                existing.owner_node_id = values["owner_node_id"]
                 existing.channel = values["channel"]
                 existing.text = values["text"]
                 existing.buttons = values["buttons"]
@@ -291,6 +492,7 @@ class RuntimeRepository:
                 self.db.add(
                     NotificationOutbox(
                         notification_id=values["notification_id"],
+                        owner_node_id=values["owner_node_id"],
                         channel=values["channel"],
                         text=values["text"],
                         buttons=values["buttons"],
@@ -299,10 +501,20 @@ class RuntimeRepository:
                     )
                 )
 
-    def list_pending_notifications(self, channel: str = "telegram", limit: int = 20) -> list[dict[str, Any]]:
+    def list_pending_notifications(
+        self,
+        *,
+        owner_node_id: str,
+        channel: str = "telegram",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
         rows = self.db.scalars(
             select(NotificationOutbox)
-            .where(NotificationOutbox.channel == channel, NotificationOutbox.status == "pending")
+            .where(
+                NotificationOutbox.owner_node_id == owner_node_id,
+                NotificationOutbox.channel == channel,
+                NotificationOutbox.status == "pending",
+            )
             .order_by(NotificationOutbox.created_at.asc())
             .limit(limit)
         ).all()
@@ -310,6 +522,7 @@ class RuntimeRepository:
             jsonable_encoder(
                 {
                     "notification_id": row.notification_id,
+                    "owner_node_id": row.owner_node_id,
                     "channel": row.channel,
                     "text": row.text,
                     "buttons": row.buttons or [],
@@ -321,8 +534,22 @@ class RuntimeRepository:
             for row in rows
         ]
 
-    def mark_notification_sent(self, notification_id: str, status_value: str = "sent", error: str | None = None) -> bool:
-        row = self.db.get(NotificationOutbox, notification_id)
+    def mark_notification_sent(
+        self,
+        notification_id: str,
+        *,
+        owner_node_id: str,
+        status_value: str = "sent",
+        error: str | None = None,
+    ) -> bool:
+        row = self.db.scalar(
+            select(NotificationOutbox)
+            .where(
+                NotificationOutbox.notification_id == notification_id,
+                NotificationOutbox.owner_node_id == owner_node_id,
+            )
+            .with_for_update()
+        )
         if not row:
             return False
         row.status = status_value
@@ -330,7 +557,20 @@ class RuntimeRepository:
         row.error = error
         return True
 
-    def save_session_payload(self, session_id: str, payload: dict[str, Any]) -> None:
+    def save_session_payload(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        *,
+        origin_compute_node_id: str | None = None,
+    ) -> None:
+        from core.versioning.constants import ANALYSIS_VERSION
+
+        if origin_compute_node_id is None:
+            from core.config.settings import get_settings
+
+            origin_compute_node_id = get_settings().compute_node_id
+
         existing = self.db.get(BuildSession, session_id)
         context = {"runtime_payload": _sanitize_for_json(jsonable_encoder(payload))}
         group = payload.get("group", {}) or {}
@@ -358,7 +598,14 @@ class RuntimeRepository:
         classification_confidence = float(group.get("classification_confidence") or confidence or 0.0)
 
         if existing:
+            require_compute_owner(
+                entity_type="session",
+                entity_id=session_id,
+                origin_compute_node_id=existing.origin_compute_node_id,
+                requested_compute_node_id=origin_compute_node_id,
+            )
             existing.context = context
+            existing.analysis_version = ANALYSIS_VERSION
             existing.updated_at = datetime.now(timezone.utc)
             # Overwrite, don't fill-if-empty: a re-import re-derives the print
             # span from the full file set, and that recomputed value is the more
@@ -378,11 +625,13 @@ class RuntimeRepository:
             self.db.add(
                 BuildSession(
                     session_id=session_id,
+                    origin_compute_node_id=origin_compute_node_id,
                     status="runtime_payload",
                     context=context,
                     grouping_confidence=confidence,
                     start_ts=start_ts,
                     end_ts=end_ts,
+                    analysis_version=ANALYSIS_VERSION,
                     **({"classification": classification,
                         "classification_confidence": classification_confidence}
                        if classification else {}),
@@ -390,15 +639,52 @@ class RuntimeRepository:
             )
         self.flush()
 
-    def save_sessions(self, sessions: dict[str, dict[str, Any]]) -> None:
+    def save_sessions(
+        self,
+        sessions: dict[str, dict[str, Any]],
+        *,
+        origin_compute_node_id: str | None = None,
+    ) -> None:
         for session_id, payload in sessions.items():
-            self.save_session_payload(session_id, payload)
+            self.save_session_payload(
+                session_id,
+                payload,
+                origin_compute_node_id=origin_compute_node_id,
+            )
 
     def get_session_payload(self, session_id: str) -> dict[str, Any] | None:
         row = self.db.get(BuildSession, session_id)
         if not row:
             return None
         return (row.context or {}).get("runtime_payload")
+
+    def get_session_origin_compute_node_id(self, session_id: str) -> str | None:
+        return self.db.scalar(
+            select(BuildSession.origin_compute_node_id).where(
+                BuildSession.session_id == session_id
+            )
+        )
+
+    def require_session_compute_owner(
+        self,
+        session_id: str,
+        *,
+        requested_compute_node_id: str | None = None,
+    ) -> BuildSession | None:
+        row = self.db.get(BuildSession, session_id)
+        if row is None:
+            return None
+        if requested_compute_node_id is None:
+            from core.config.settings import get_settings
+
+            requested_compute_node_id = get_settings().compute_node_id
+        require_compute_owner(
+            entity_type="session",
+            entity_id=session_id,
+            origin_compute_node_id=row.origin_compute_node_id,
+            requested_compute_node_id=requested_compute_node_id,
+        )
+        return row
 
     def list_session_ids(self) -> set[str]:
         """Every known session id, without loading the payloads.
@@ -409,8 +695,15 @@ class RuntimeRepository:
         """
         return set(self.db.scalars(select(BuildSession.session_id)).all())
 
-    def list_session_payloads(self) -> list[tuple[str, dict[str, Any]]]:
-        rows = self.db.scalars(select(BuildSession).order_by(BuildSession.created_at.desc())).all()
+    def list_session_payloads(
+        self,
+        *,
+        origin_compute_node_id: str | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        stmt = select(BuildSession).order_by(BuildSession.created_at.desc())
+        if origin_compute_node_id is not None:
+            stmt = stmt.where(BuildSession.origin_compute_node_id == origin_compute_node_id)
+        rows = self.db.scalars(stmt).all()
         payloads: list[tuple[str, dict[str, Any]]] = []
         for row in rows:
             payload = (row.context or {}).get("runtime_payload")
@@ -431,6 +724,7 @@ class RuntimeRepository:
             return None
         files = [IngestedFile.model_validate(item) for item in payload.get("files", [])]
         if rehydrate:
+            self.require_session_compute_owner(session_id)
             # session_id lets the mirrored copy stand in when the file is not on
             # this machine — the normal case against a shared database.
             files = _rehydrate_parse_results(files, session_id)
@@ -471,6 +765,22 @@ class RuntimeRepository:
             select(ReportArtifact).where(ReportArtifact.session_id == session_id).order_by(ReportArtifact.generated_at.desc())
         ).all()
         return [row.payload for row in rows]
+
+    def get_latest_report_for_session(self, session_id: str) -> dict[str, Any] | None:
+        """Return the newest saved report, expanding its MinIO payload if present."""
+        row = self.db.scalar(
+            select(ReportArtifact)
+            .where(ReportArtifact.session_id == session_id)
+            .order_by(ReportArtifact.generated_at.desc(), ReportArtifact.report_id.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        if row.storage_uri:
+            full = _load_offloaded_report(row.storage_uri)
+            if full is not None:
+                return full
+        return row.payload
 
     def save_operator_event(self, event: dict[str, Any]) -> dict[str, Any]:
         event = jsonable_encoder(event)
@@ -639,7 +949,8 @@ class RuntimeRepository:
         rows = self.db.scalars(select(ConfirmedKnowledge).order_by(ConfirmedKnowledge.confirmed_at.desc())).all()
         return [_knowledge_to_dict(row) for row in rows]
 
-    def save_source_file(self, source_file_id: str, session_id: str | None, 
+    def save_source_file(self, source_file_id: str, session_id: str | None,
+                         object_uri: str | None,
                          file_name: str, checksum: str, original_path: str,
                          size_bytes: int, family: str, role: str, 
                          encoding: str | None = None, data_quality_status: str = "ok",
@@ -648,6 +959,7 @@ class RuntimeRepository:
         """Save a source file record to the database."""
         values = {
             "session_id": session_id,
+            "object_uri": object_uri,
             "original_path": original_path,
             "file_name": file_name,
             "checksum": checksum,
@@ -723,12 +1035,13 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 _IMPORT_JOB_SCALARS = (
-    "import_job_id", "source_path", "source_name", "source_kind", "status",
+    "import_job_id", "owner_node_id", "print_record_id", "source_path", "source_name", "source_kind", "status",
     "detected_at", "updated_at", "confirmation_deadline", "confirmed_by",
-    "confirmed_at", "postponed_until", "ignored_by", "ignored_at",
-    "last_stability_check_at", "error",
+    "confirmed_at", "postponed_until", "lease_owner", "lease_until", "lease_generation",
+    "ignored_by", "ignored_at",
+    "last_stability_check_at", "stability_check_attempts", "error",
 )
-_IMPORT_JOB_DICTS = ("file_snapshot", "checksum_manifest")
+_IMPORT_JOB_DICTS = ("file_snapshot", "checksum_manifest", "source_objects")
 _IMPORT_JOB_LISTS = (
     "session_ids", "report_ids", "missing_context_questions",
     "notification_log", "audit_trail",

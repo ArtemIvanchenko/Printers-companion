@@ -28,16 +28,41 @@ def _as_utc(ts: datetime) -> datetime:
     return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
 
 
-def _link(record: PrintRecord, session: BuildSession, links: list[dict]) -> None:
-    record.session_id = session.session_id
-    record.printed_at = _as_utc(session.start_ts)  # логи — авторитетная дата печати
-    record.updated_at = datetime.now(timezone.utc)
+def _link(
+    db: Session,
+    record: PrintRecord,
+    session: BuildSession,
+    links: list[dict],
+    *,
+    origin_compute_node_id: str,
+) -> bool:
+    from storage.repositories.prints_repo import PrintsRepository
+
+    linked = PrintsRepository(db).link_session(
+        record.record_id,
+        session.session_id,
+        _as_utc(session.start_ts),
+        compute_node_id=origin_compute_node_id,
+    )
+    if not linked:
+        logger.info(
+            "print_linking: %s ↔ %s lost a concurrent/conflicting link race",
+            record.record_id,
+            session.session_id,
+        )
+        return False
     links.append({"record_id": record.record_id, "session_id": session.session_id})
     logger.info("print_linking: linked %s ↔ %s", record.record_id, session.session_id)
+    return True
 
 
 def _resolve_import_hints(
-    records: list[PrintRecord], sessions: list[BuildSession], links: list[dict],
+    db: Session,
+    records: list[PrintRecord],
+    sessions: list[BuildSession],
+    links: list[dict],
+    *,
+    origin_compute_node_id: str,
 ) -> None:
     """Explicit operator intent: logs uploaded via a record's import-logs.
 
@@ -53,7 +78,13 @@ def _resolve_import_hints(
             if s.session_id and _as_utc(s.start_ts).date().isoformat() == hint.get("date")
         ]
         if len(matches) == 1:
-            _link(record, matches[0], links)
+            _link(
+                db,
+                record,
+                matches[0],
+                links,
+                origin_compute_node_id=origin_compute_node_id,
+            )
         elif len(matches) > 1:
             logger.info("print_linking: hint for %s matches %d sessions — skipped",
                         record.record_id, len(matches))
@@ -65,15 +96,25 @@ def _resolve_import_hints(
             record.metadata_json = meta
 
 
-def auto_link_print_records(db: Session, window_hours: float | None = None) -> list[dict]:
+def auto_link_print_records(
+    db: Session,
+    window_hours: float | None = None,
+    *,
+    origin_compute_node_id: str | None = None,
+) -> list[dict]:
     """Link unlinked print records to sessions by date. Returns created links.
 
     The caller commits; this function only mutates rows.
     """
-    window = timedelta(hours=window_hours or get_settings().print_link_window_hours)
+    settings = get_settings()
+    origin_compute_node_id = origin_compute_node_id or settings.compute_node_id
+    window = timedelta(hours=window_hours or settings.print_link_window_hours)
 
     records = db.scalars(
-        select(PrintRecord).where(PrintRecord.session_id.is_(None))
+        select(PrintRecord).where(
+            PrintRecord.session_id.is_(None),
+            PrintRecord.origin_compute_node_id == origin_compute_node_id,
+        )
     ).all()
     if not records:
         return []
@@ -85,7 +126,10 @@ def auto_link_print_records(db: Session, window_hours: float | None = None) -> l
     }
     sessions = [
         s for s in db.scalars(
-            select(BuildSession).where(BuildSession.start_ts.is_not(None))
+            select(BuildSession).where(
+                BuildSession.start_ts.is_not(None),
+                BuildSession.origin_compute_node_id == origin_compute_node_id,
+            )
         ).all()
         if s.session_id not in taken
     ]
@@ -93,7 +137,13 @@ def auto_link_print_records(db: Session, window_hours: float | None = None) -> l
         return []
 
     links: list[dict] = []
-    _resolve_import_hints(records, sessions, links)
+    _resolve_import_hints(
+        db,
+        records,
+        sessions,
+        links,
+        origin_compute_node_id=origin_compute_node_id,
+    )
     if links:
         linked_sessions = {link["session_id"] for link in links}
         sessions = [s for s in sessions if s.session_id not in linked_sessions]
@@ -126,8 +176,14 @@ def auto_link_print_records(db: Session, window_hours: float | None = None) -> l
             logger.info("print_linking: session %s already claimed in this sweep — skipped",
                         session.session_id)
             continue
-        _link(by_id[record_id], session, links)
-        used_sessions.add(session.session_id)
+        if _link(
+            db,
+            by_id[record_id],
+            session,
+            links,
+            origin_compute_node_id=origin_compute_node_id,
+        ):
+            used_sessions.add(session.session_id)
 
     if links:
         # SessionLocal runs with autoflush=False — flush so repeated calls
@@ -153,7 +209,12 @@ def session_candidates(db: Session, record_id: str, window_hours: float | None =
         )
     }
     out = []
-    for s in db.scalars(select(BuildSession).where(BuildSession.start_ts.is_not(None))).all():
+    for s in db.scalars(
+        select(BuildSession).where(
+            BuildSession.start_ts.is_not(None),
+            BuildSession.origin_compute_node_id == record.origin_compute_node_id,
+        )
+    ).all():
         if s.session_id in taken:
             continue
         delta = abs(_as_utc(s.start_ts) - anchor)

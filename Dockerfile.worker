@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # worker image — ingestion + JSON report generation. Needs the light analytics tier
-# (polars for telemetry parsing, scipy for robust stats) but none of the heavy
-# ML / SLM / 3D packages. Carries: base + analytics.
+# (polars/scipy plus scikit-learn for the optional neural quality profile) but
+# none of the heavy SLM / 3D / boosted-tree packages. Carries: base + analytics.
 FROM ghcr.io/artemivanchenko/printers-companion:base
 
 COPY requirements.analytics.txt /app/

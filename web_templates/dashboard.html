@@ -379,6 +379,7 @@
                 <div id="import-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#60a5fa,#10b981);border-radius:4px;transition:width 0.5s;"></div>
             </div>
             <span id="import-count" style="color:#a0aec0;font-size:12px;"></span>
+            <span id="import-actions" style="display:flex;gap:6px;"></span>
         </div>
     </div>
     
@@ -764,7 +765,7 @@
             <div class="section" style="max-width:600px;margin:0 auto;">
                 <h2 style="margin-bottom:8px;">📂 Загрузка логов</h2>
                 <p style="color:#a0aec0;font-size:13px;margin-bottom:20px;">
-                    Перетащите файлы или нажмите для выбора. Файлы сохраняются в папку логов принтера и автоматически импортируются.
+                    Перетащите файлы или нажмите для выбора. Файлы сохраняются без перезаписи и ждут вашего подтверждения в верхней панели.
                 </p>
                 <div id="drop-zone"
                     ondrop="handleDrop(event)" ondragover="event.preventDefault()" ondragleave="dropLeave(event)"
@@ -1386,6 +1387,24 @@
     </div>
     
     <script>
+        function _getWorkstationId() {
+            const key = 'printer-companion-workstation-id';
+            let value = localStorage.getItem(key);
+            if (!value) {
+                const suffix = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).slice(0, 8);
+                value = `operator-${location.hostname || 'pc'}-${suffix}`;
+                localStorage.setItem(key, value);
+            }
+            return value;
+        }
+
+        function _jsonHeaders() {
+            return {
+                'Content-Type': 'application/json',
+                'X-Workstation-ID': _getWorkstationId(),
+            };
+        }
+
         const chartColors = {
             blue: '#60a5fa',
             green: '#10b981',
@@ -1975,10 +1994,28 @@
                 document.getElementById('import-icon').textContent = info.icon;
                 document.getElementById('import-text').textContent = info.label + ': ' + active[0].source_name;
                 document.getElementById('import-progress-bar').style.width = info.pct + '%';
+                const actions = document.getElementById('import-actions');
+                actions.innerHTML = active[0].status === 'awaiting_operator_confirmation'
+                    ? `<button onclick="actOnImport('${active[0].import_job_id}','confirm')" class="quick-btn primary" style="padding:4px 10px;">Импортировать</button>
+                       <button onclick="actOnImport('${active[0].import_job_id}','ignore')" class="quick-btn" style="padding:4px 10px;">Пропустить</button>`
+                    : '';
                 const done = jobs.filter(j => j.status === 'done' || j.status === 'completed').length;
                 const total = jobs.filter(j => j.status !== 'ignored').length;
                 document.getElementById('import-count').textContent = done + '/' + total;
             } catch(e) { /* ignore */ }
+        }
+
+        async function actOnImport(jobId, action) {
+            const r = await fetch(`/imports/${jobId}/${action}`, {
+                method: 'POST',
+                headers: _jsonHeaders(),
+                body: JSON.stringify({}),
+            });
+            if (!r.ok) {
+                const payload = await r.json().catch(() => ({}));
+                alert('Не удалось изменить импорт: ' + (payload.detail || r.status));
+            }
+            updateImportStatus();
         }
         setInterval(updateImportStatus, 3000);
         updateImportStatus();
@@ -2010,33 +2047,37 @@
             uploadFiles(e.dataTransfer.files);
         }
         async function uploadFiles(fileList) {
-            const res = document.getElementById('upload-result') || document.getElementById('home-upload-result');
             if (!fileList || !fileList.length) return;
             const files = [...fileList];
-            let html = '';
-            for (let i = 0; i < files.length; i++) {
-                const f = files[i];
-                html += `<div style="color:#60a5fa;">Загрузка… ${f.name} (${i + 1}/${files.length})</div>`;
-                res.innerHTML = html;
-                const fd = new FormData();
-                fd.append('files', f);
-                try {
-                    const r = await fetch('/upload/logs', { method: 'POST', body: fd });
-                    const d = await r.json();
-                    if (!r.ok) throw new Error(d.detail || r.status);
-                    const saved  = d.saved || [];
-                    const skipped = d.skipped || [];
-                    saved.forEach(s => html += `<div style="color:#10b981;">✅ ${s.name} (${(s.size_bytes/1024/1024).toFixed(1)} МБ)</div>`);
-                    skipped.forEach(s => html += `<div style="color:#ef4444;">❌ ${s.name} — ${s.reason}</div>`);
-                    res.innerHTML = html;
-                } catch(e) {
-                    html += `<div style="color:#ef4444;">❌ ${f.name} — ${e}</div>`;
-                    res.innerHTML = html;
+            const uploadPage = document.getElementById('page-upload');
+            const res = (uploadPage && uploadPage.style.display !== 'none')
+                ? document.getElementById('upload-result')
+                : document.getElementById('home-upload-result');
+            if (!res) return;
+
+            // One selection is one import batch. Besides avoiding one job per
+            // file, this lets the parser see the complementary logs together.
+            const fd = new FormData();
+            files.forEach(file => fd.append('files', file));
+            res.innerHTML = `<div style="color:#60a5fa;">Загрузка набора: ${files.length} ${_plural(files.length, 'файл', 'файла', 'файлов')}…</div>`
+                + files.map((f, i) => `<div style="color:#a0aec0;">⏳ ${f.name} (${i + 1}/${files.length})</div>`).join('');
+
+            try {
+                const r = await fetch('/upload/logs', { method: 'POST', body: fd });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || r.status);
+                const saved = d.saved || [];
+                const skipped = d.skipped || [];
+                let html = '';
+                saved.forEach(s => html += `<div style="color:#10b981;">✅ ${s.name} (${(s.size_bytes/1024/1024).toFixed(1)} МБ)</div>`);
+                skipped.forEach(s => html += `<div style="color:#ef4444;">❌ ${s.name} — ${s.reason}</div>`);
+                if (saved.length) {
+                    html += '<div style="color:#a0aec0;margin-top:8px;">Файлы поставлены в очередь. Подтвердите импорт в верхней панели.</div>';
                 }
+                res.innerHTML = html;
+            } catch(e) {
+                res.innerHTML = `<div style="color:#ef4444;">❌ Не удалось загрузить набор из ${files.length} ${_plural(files.length, 'файла', 'файлов', 'файлов')}: ${e.message || e}</div>`;
             }
-            const savedCount = (html.match(/✅/g) || []).length;
-            if (savedCount) html += '<div style="color:#a0aec0;margin-top:8px;">Данные импортируются автоматически. Обновите страницу через минуту.</div>';
-            res.innerHTML = html;
         }
 
         async function rescanFolder() {
@@ -2440,14 +2481,7 @@
         // =========================================================
         // PATTERNS — cross-session intelligence
         // =========================================================
-        const _signalLabel = {
-            SO1:'O₂ (SO1)', SO2:'O₂ (SO2)', ST3:'Темп ST3', ST4:'Темп ST4',
-            ST5:'Темп стола (ST5)', SP2:'Давление (SP2)', SP4:'Давление (SP4)',
-            SP8:'Давление (SP8)', SP14:'Давление (SP14)', SP15:'Давление (SP15)',
-            SF1:'Поток SF1',
-            'Flow H':'Влажность', 'Flow T':'Темп газа',
-            LIR:'Уровень жидкости',
-        };
+        const _signalLabel = {!signal_labels!};
         const _groupColor = {
             oxygen:'#ef4444', temperature:'#f59e0b',
             pressure:'#8b5cf6', humidity:'#06b6d4',
@@ -2499,9 +2533,9 @@
 
         function _anomalyDescription(signal, direction) {
             const desc = {
-                'Flow H': { high: 'Влажность в камере была выше нормы', low: 'Влажность в камере была ниже нормы' },
+                'Flow H': { high: 'Влажность продувочного газа была выше нормы', low: 'Влажность продувочного газа была ниже нормы' },
                 'Flow T': { high: 'Температура газового потока была выше нормы', low: 'Температура газового потока была ниже нормы' },
-                LIR: { high: 'Уровень жидкости в системе был повышен', low: 'Уровень жидкости в системе был понижен' },
+                LIR: { high: 'Положение платформы по оси Z было выше обычного', low: 'Положение платформы по оси Z было ниже обычного' },
                 SF1: { high: 'Расход газа был выше нормы', low: 'Расход газа был ниже нормы' },
                 SO1: { high: 'Содержание кислорода было повышено', low: 'Содержание кислорода было понижено' },
                 SO2: { high: 'Содержание кислорода (SO2) было повышено', low: 'Содержание кислорода (SO2) было понижено' },
@@ -2966,7 +3000,7 @@
             try {
                 const r = await fetch('/prints', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: _jsonHeaders(),
                     body: JSON.stringify({
                         name,
                         material: document.getElementById('ar-material').value,
@@ -3000,15 +3034,13 @@
                 const r = await fetch(`/prints/${recordId}/estimate`, { method: 'POST' });
                 const d = await r.json();
                 if (!r.ok) throw new Error(d.detail || r.status);
-                const before = (d.previous || {}).estimated_at || null;
-                _pollEstimate(recordId, before, stayOnCard);
+                _pollEstimate(recordId, d.job_id, stayOnCard);
             } catch (e) { alert('Ошибка расчёта: ' + e.message); }
         }
 
-        // Poll until the snapshot's estimated_at moves. A large plate can take
-        // several minutes, so this waits well past a "surely by now" guess
-        // rather than reporting failure while the job is still running.
-        async function _pollEstimate(recordId, before, stayOnCard, attempt = 0) {
+        // Poll the durable job itself: timestamp-only polling could wait ten
+        // minutes on an idempotently returned completed job or hide a failure.
+        async function _pollEstimate(recordId, jobId, stayOnCard, attempt = 0) {
             const refresh = () => stayOnCard ? openPrintCard(recordId) : loadArchive(_archiveSkip);
             if (attempt === 0) _setEstimateStatus('⏳ Расчёт запущен, это может занять несколько минут…');
             if (attempt >= 60) {          // 60 × 10 s = 10 минут
@@ -3017,15 +3049,20 @@
             }
             await new Promise(res => setTimeout(res, 10000));
             try {
-                const rec = await fetch(`/prints/${recordId}`).then(r => r.json());
-                const now = ((rec.metadata_json || {}).prediction || {}).estimated_at || null;
-                if (now && now !== before) {
+                const response = await fetch(`/background-analysis/jobs/${jobId}`);
+                if (!response.ok) throw new Error(response.status);
+                const job = await response.json();
+                if (job.status === 'done') {
                     _setEstimateStatus('');
                     refresh();
                     return;
                 }
+                if (job.status === 'failed') {
+                    _setEstimateStatus(`❌ Расчёт не выполнен: ${job.error || 'неизвестная ошибка'}`);
+                    return;
+                }
             } catch (e) { /* сеть моргнула — продолжаем опрос */ }
-            _pollEstimate(recordId, before, stayOnCard, attempt + 1);
+            _pollEstimate(recordId, jobId, stayOnCard, attempt + 1);
         }
 
         function _setEstimateStatus(text) {
@@ -3157,6 +3194,9 @@
         // =========================================================
         let _pcRecord = null;   // the record being viewed
         let _pcSession = null;  // its linked log session, if any
+        let _pcDirty = false;   // unsaved local edits must never be overwritten by sync
+        let _printSyncPrimed = false;
+        let _printSyncTimer = null;
 
         async function openPrintCard(recordId) {
             _hideAllPages();
@@ -3169,6 +3209,7 @@
             document.getElementById('pc-subtitle').textContent = '';
             try {
                 _pcRecord = await fetch(`/prints/${recordId}`).then(r => r.json());
+                _pcDirty = false;
                 // The outcome lives on the session, so it is fetched alongside —
                 // "Как прошло" and "Процесс" are unanswerable without it.
                 _pcSession = _pcRecord.session_id
@@ -3252,6 +3293,10 @@
                         </div>
                     </div>
                 </div>`;
+            ['pc-name', 'pc-material', 'pc-thickness', 'pc-powder', 'pc-notes'].forEach(id => {
+                const field = document.getElementById(id);
+                field?.addEventListener(id === 'pc-material' ? 'change' : 'input', () => { _pcDirty = true; });
+            });
         }
 
         function _pcPlatformRows() {
@@ -3275,8 +3320,9 @@
             try {
                 const r = await fetch(`/prints/${_pcRecord.record_id}`, {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: _jsonHeaders(),
                     body: JSON.stringify({
+                        expected_revision: _pcRecord.revision,
                         name: document.getElementById('pc-name').value.trim(),
                         material: document.getElementById('pc-material').value,
                         layer_thickness_mm: thickness === '' ? null : Number(thickness),
@@ -3284,8 +3330,13 @@
                         notes: document.getElementById('pc-notes').value.trim(),
                     }),
                 });
+                if (r.status === 409) {
+                    const conflict = (await r.json()).detail || {};
+                    throw new Error(`${conflict.message || 'Карточка уже изменена на другом ПК'}. Обновите карточку и повторите правку.`);
+                }
                 if (!r.ok) throw new Error((await r.json()).detail || r.status);
                 _pcRecord = { ..._pcRecord, ...(await r.json()) };
+                _pcDirty = false;
                 result.innerHTML = '<span style="color:var(--status-success);">Сохранено</span>';
                 document.getElementById('pc-title').textContent = _pcRecord.name;
                 setTimeout(() => { result.textContent = ''; }, 2500);
@@ -3293,6 +3344,43 @@
                 result.innerHTML = `<span style="color:var(--status-danger);">Ошибка: ${e.message}</span>`;
             }
         }
+
+        async function _refreshOpenPrintCardFromSync() {
+            if (!_pcRecord || document.getElementById('page-print-card').style.display === 'none') return;
+            try {
+                const fresh = await fetch(`/prints/${_pcRecord.record_id}`).then(r => r.ok ? r.json() : null);
+                if (!fresh || fresh.revision === _pcRecord.revision) return;
+                const result = document.getElementById('pc-save-result');
+                if (_pcDirty) {
+                    if (result) result.innerHTML = '<span style="color:var(--status-warning);">Карточка изменена на другом ПК. Ваши поля не перезаписаны — обновите карточку перед сохранением.</span>';
+                    return;
+                }
+                const activeTab = document.querySelector('#pc-tabs a.active')?.id?.replace('pctab-', '') || 'what';
+                _pcRecord = fresh;
+                _pcSession = fresh.session_id
+                    ? await fetch(`/sessions/${fresh.session_id}`).then(r => r.ok ? r.json() : null).catch(() => null)
+                    : null;
+                _renderPrintCard();
+                showPrintCardTab(activeTab);
+                const refreshedResult = document.getElementById('pc-save-result');
+                if (refreshedResult) refreshedResult.innerHTML = '<span style="color:var(--status-success);">Обновлено с другого рабочего места</span>';
+            } catch (e) { /* EventSource переподключится; ручное обновление остаётся доступно. */ }
+        }
+
+        function _startPrintSync() {
+            if (!globalThis.EventSource) return;
+            const source = new EventSource('/prints/events');
+            source.addEventListener('print-records', () => {
+                if (!_printSyncPrimed) { _printSyncPrimed = true; return; }
+                clearTimeout(_printSyncTimer);
+                _printSyncTimer = setTimeout(() => {
+                    if (document.getElementById('page-archive').style.display !== 'none') loadArchive(_archiveSkip);
+                    _refreshOpenPrintCardFromSync();
+                }, 250);
+            });
+        }
+
+        _startPrintSync();
 
         function _renderPcPlan() {
             const pred = (_pcRecord.metadata_json || {}).prediction;
@@ -3375,6 +3463,8 @@
             const f = _pcSession.features || {};
             const health = _pcSession.health || {};
             const anomalies = health.anomalies || [];
+            const soft = ((_pcSession.soft_sensors || {}).metrics || []);
+            const phases = ((_pcSession.phase_statistics || {}).phases || {});
             const readiness = (health.readiness || {}).score;
             const dq = f.data_quality_score;
 
@@ -3384,6 +3474,18 @@
                         <span style="font-weight:400;font-size:12px;color:var(--text-muted);">${a.detail || a.description || ''}</span>
                    </div>`).join('')
                 : '<div style="color:var(--text-muted);font-size:13px;">Аномалий не найдено.</div>';
+
+            const softRows = soft.length
+                ? soft.slice(0, 8).map(metric => `<div class="pc-kv">
+                        <span>${metric.name_ru}</span>
+                        <span title="${metric.method || ''}">${metric.value ?? '—'} ${metric.unit || ''}</span>
+                   </div>`).join('')
+                : '<div style="color:var(--text-muted);font-size:13px;">Недостаточно совместных каналов.</div>';
+            const phaseOrder = ['laser_scan', 'powder_recoat', 'controller_overhead'];
+            const phaseRows = phaseOrder.filter(key => phases[key]).map(key => {
+                const phase = phases[key];
+                return `<div class="pc-kv"><span>${phase.name_ru}</span><span>${(phase.total_sec / 3600).toFixed(2)} ч · ${phase.share_pct ?? '—'}%</span></div>`;
+            }).join('') || '<div style="color:var(--text-muted);font-size:13px;">Нет точных времён по слоям.</div>';
 
             pane.innerHTML = `
                 <div class="pc-grid">
@@ -3397,6 +3499,17 @@
                     <div class="pc-box">
                         <h4>Аномалии процесса (${anomalies.length})</h4>
                         ${anomalyRows}
+                    </div>
+                </div>
+                <div class="pc-grid" style="margin-top:16px;">
+                    <div class="pc-box">
+                        <h4>Расчётные датчики</h4>
+                        ${softRows}
+                        <div style="color:var(--text-muted);font-size:11px;margin-top:8px;">Диагностические оценки из нескольких физических каналов; формула доступна в подсказке.</div>
+                    </div>
+                    <div class="pc-box">
+                        <h4>Из чего сложилось машинное время</h4>
+                        ${phaseRows}
                     </div>
                 </div>
                 <div style="margin-top:16px;">
@@ -3539,7 +3652,7 @@
             try {
                 const created = await fetch('/prints', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: _jsonHeaders(),
                     body: JSON.stringify({ name }),
                 }).then(async r => {
                     if (!r.ok) throw new Error((await r.json()).detail || r.status);
@@ -3560,7 +3673,7 @@
             try {
                 const created = await fetch('/prints', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: _jsonHeaders(),
                     body: JSON.stringify({ name: `Печать ${whenLabel}` }),
                 }).then(async r => {
                     if (!r.ok) throw new Error((await r.json()).detail || r.status);
@@ -3568,8 +3681,8 @@
                 });
                 const linked = await fetch(`/prints/${created.record_id}`, {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId }),
+                    headers: _jsonHeaders(),
+                    body: JSON.stringify({ session_id: sessionId, expected_revision: created.revision }),
                 });
                 if (!linked.ok) throw new Error((await linked.json()).detail || linked.status);
                 loadArchive(_archiveSkip);
@@ -3580,10 +3693,14 @@
             const recordId = document.getElementById(`link-target-${sessionId}`).value;
             if (!recordId) return;
             try {
+                const record = await fetch(`/prints/${recordId}`).then(async r => {
+                    if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                    return r.json();
+                });
                 const r = await fetch(`/prints/${recordId}`, {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId }),
+                    headers: _jsonHeaders(),
+                    body: JSON.stringify({ session_id: sessionId, expected_revision: record.revision }),
                 });
                 if (!r.ok) throw new Error((await r.json()).detail || r.status);
                 loadArchive(_archiveSkip);
@@ -3699,26 +3816,24 @@
         async function uploadArchiveLogs(recordId, fileList) {
             if (!fileList || !fileList.length) return;
             const files = [...fileList];
-            let savedCount = 0, skippedCount = 0, oversizeCount = 0;
-            for (let i = 0; i < files.length; i++) {
-                const f = files[i];
-                const fd = new FormData();
-                fd.append('files', f);
-                try {
-                    const r = await fetch(`/prints/${recordId}/import-logs`, { method: 'POST', body: fd });
-                    const d = await r.json();
-                    if (!r.ok) throw new Error(d.detail || r.status);
-                    savedCount += (d.saved || []).length;
-                    skippedCount += (d.skipped || []).length;
-                } catch (e) {
-                    oversizeCount++;
-                }
+            const fd = new FormData();
+            files.forEach(file => fd.append('files', file));
+            let savedCount = 0, skippedCount = 0;
+            try {
+                const r = await fetch(`/prints/${recordId}/import-logs`, { method: 'POST', body: fd });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || r.status);
+                savedCount = (d.saved || []).length;
+                skippedCount = (d.skipped || []).length;
+            } catch (e) {
+                alert(`Ошибка загрузки набора из ${files.length} ${_plural(files.length, 'файла', 'файлов', 'файлов')}: ${e.message || e}`);
+                return;
             }
             const parts = [];
             if (savedCount) parts.push(`Загружено файлов: ${savedCount}`);
             if (skippedCount) parts.push(`пропущено: ${skippedCount}`);
-            if (oversizeCount) parts.push(`ошибок: ${oversizeCount}`);
-            alert(parts.join(', ') + '.\nЛоги импортируются в фоне.');
+            const summary = parts.length ? parts.join(', ') : 'Файлы не загружены';
+            alert(summary + (savedCount ? '.\nПодтвердите импорт в верхней панели.' : '.'));
             if (savedCount) _pollRecordLink(recordId);
         }
 
@@ -3757,10 +3872,14 @@
         async function confirmSessionLink(recordId) {
             const sessionId = document.getElementById(`cand-${recordId}`).value;
             try {
+                const record = await fetch(`/prints/${recordId}`).then(async r => {
+                    if (!r.ok) throw new Error((await r.json()).detail || r.status);
+                    return r.json();
+                });
                 const r = await fetch(`/prints/${recordId}`, {
                     method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId }),
+                    headers: _jsonHeaders(),
+                    body: JSON.stringify({ session_id: sessionId, expected_revision: record.revision }),
                 });
                 if (!r.ok) throw new Error((await r.json()).detail || r.status);
                 loadArchive(_archiveSkip);
@@ -4077,11 +4196,6 @@
             }
         }
 
-        const _SIG_TITLES = {
-            SO1:'O₂ канал 1', SO2:'O₂ канал 2',
-            ST3:'Камера (низ)', ST4:'Камера (верх)', ST5:'Стол',
-            SP4:'Давление камеры', 'Flow H':'Влажность',
-        };
         const _SIG_COLORS = {
             SO1:'#ef4444', SO2:'#f59e0b',
             ST3:'#60a5fa', ST4:'#8b5cf6', ST5:'#10b981',
@@ -4091,7 +4205,7 @@
 
         function _makeDatasets(series) {
             return Object.entries(series).map(([key, values], i) => ({
-                label: _SIG_TITLES[key] || key,
+                label: sigLabel(key),
                 data: values,
                 borderColor: _SIG_COLORS[key] || _PALETTE[i % _PALETTE.length],
                 backgroundColor: 'transparent',

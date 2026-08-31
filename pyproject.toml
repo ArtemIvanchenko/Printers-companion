@@ -31,6 +31,7 @@ dependencies = [
   "charset-normalizer>=3.3",
   "apscheduler>=3.10",
   "watchdog>=4.0",
+  "tenacity>=8.0",
   "trimesh>=4.0",
   "shapely>=2.0",
   "PythonSLM>=0.6",

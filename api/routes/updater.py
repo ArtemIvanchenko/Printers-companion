@@ -122,11 +122,12 @@ def import_status() -> dict:  # sync: queries the DB, must not run on the loop
             repo = RuntimeRepository(db)
             # Only the count is displayed — don't deserialise every payload for it.
             session_count = len(repo.list_session_ids())
-            jobs = repo.list_import_jobs()
-        last_job = max(jobs, key=lambda j: j.updated_at, default=None)
+            node_id = get_settings().compute_node_id
+            import_job_count = repo.count_import_jobs(owner_node_id=node_id)
+            last_job = repo.latest_import_job(owner_node_id=node_id)
         return {
             "session_count": session_count,
-            "import_job_count": len(jobs),
+            "import_job_count": import_job_count,
             "last_import_at": last_job.updated_at.isoformat() if last_job else None,
             "last_import_status": last_job.status.value if last_job else None,
             "last_import_name": last_job.source_name if last_job else None,

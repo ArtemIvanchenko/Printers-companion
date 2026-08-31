@@ -1,5 +1,7 @@
 """Tests for the print archive: /prints CRUD, file attachments, /settings/machine."""
+import hashlib
 import io
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -7,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routes.prints import _calibration_mismatch_warning
+from core.config.settings import get_settings
+from storage.repositories.prints_repo import PrintsRepository
 
 client = TestClient(app)
 
@@ -32,8 +36,24 @@ class _MemoryObjectStore:
         self.storage[(bucket, object_name)] = data
         return f"s3://{bucket}/{object_name}"
 
+    def put_file(self, bucket, object_name, path, content_type="application/octet-stream"):
+        return self.put_bytes(bucket, object_name, Path(path).read_bytes(), content_type)
+
     def get_bytes(self, bucket, object_name):
         return self.storage.get((bucket, object_name))
+
+    def download_file(
+        self, bucket, object_name, destination, *, expected_sha256=None, chunk_size=1024 * 1024,
+    ):
+        data = self.get_bytes(bucket, object_name)
+        if data is None:
+            return None
+        destination = Path(destination)
+        destination.write_bytes(data)
+        if expected_sha256 and hashlib.sha256(data).hexdigest() != expected_sha256:
+            destination.unlink()
+            return None
+        return destination
 
     def open_stream(self, bucket, object_name, chunk_size=1024 * 1024):
         data = self.storage.get((bucket, object_name))
@@ -79,6 +99,7 @@ class TestPrintRecordCrud:
         assert record["material"] == "steel"
         assert record["status"] == "draft"
         assert record["session_id"] is None
+        assert record["revision"] == 1
 
     def test_create_requires_name(self):
         assert client.post("/prints", json={}).status_code == 422
@@ -93,6 +114,36 @@ class TestPrintRecordCrud:
     def test_create_rejects_blank_material(self):
         response = client.post("/prints", json={"name": "x", "material": "   "})
         assert response.status_code == 422
+
+
+def test_card_log_selection_creates_one_owner_affine_batch(tmp_path, monkeypatch):
+    settings = get_settings().model_copy(update={
+        "raw_logs_container_path": str(tmp_path),
+        "compute_node_id": "operator-01",
+        "require_operator_import_confirmation": True,
+    })
+    monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
+    monkeypatch.setattr("api.routes.imports.get_settings", lambda: settings)
+    record = _create_record()
+
+    response = client.post(
+        f"/prints/{record['record_id']}/import-logs",
+        files=[
+            ("files", ("01.01.2026.log", b"main", "text/plain")),
+            ("files", ("01.01.2026_time.log", b"time", "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["owner_node_id"] == "operator-01"
+    assert jobs[0]["print_record_id"] == record["record_id"]
+    source = Path(jobs[0]["source_path"])
+    assert sorted(path.name for path in source.iterdir()) == [
+        "01.01.2026.log",
+        "01.01.2026_time.log",
+    ]
 
 
 class TestLayerThicknessOnThePrint:
@@ -129,7 +180,11 @@ class TestLayerThicknessOnThePrint:
     def test_thickness_can_be_patched(self):
         record = _create_record()
         response = client.patch(
-            f"/prints/{record['record_id']}", json={"layer_thickness_mm": 0.025},
+            f"/prints/{record['record_id']}",
+            json={
+                "layer_thickness_mm": 0.025,
+                "expected_revision": record["revision"],
+            },
         )
         assert response.status_code == 200
         assert response.json()["layer_thickness_mm"] == 0.025
@@ -139,7 +194,11 @@ class TestLayerThicknessOnThePrint:
             "/prints", json={"name": "x", "layer_thickness_mm": 0.06},
         ).json()
         response = client.patch(
-            f"/prints/{record['record_id']}", json={"layer_thickness_mm": None},
+            f"/prints/{record['record_id']}",
+            json={
+                "layer_thickness_mm": None,
+                "expected_revision": record["revision"],
+            },
         )
         assert response.status_code == 200
         assert response.json()["layer_thickness_mm"] is None
@@ -183,7 +242,11 @@ class TestHatchDistanceOnThePrint:
     def test_hatch_can_be_patched(self):
         record = _create_record()
         response = client.patch(
-            f"/prints/{record['record_id']}", json={"hatch_distance_mm": 0.15},
+            f"/prints/{record['record_id']}",
+            json={
+                "hatch_distance_mm": 0.15,
+                "expected_revision": record["revision"],
+            },
         )
         assert response.status_code == 200
         assert response.json()["hatch_distance_mm"] == 0.15
@@ -193,7 +256,11 @@ class TestHatchDistanceOnThePrint:
             "/prints", json={"name": "x", "hatch_distance_mm": 0.9},
         ).json()
         response = client.patch(
-            f"/prints/{record['record_id']}", json={"hatch_distance_mm": None},
+            f"/prints/{record['record_id']}",
+            json={
+                "hatch_distance_mm": None,
+                "expected_revision": record["revision"],
+            },
         )
         assert response.status_code == 200
         assert response.json()["hatch_distance_mm"] is None
@@ -280,21 +347,74 @@ class TestPrintRecordReads:
         record = _create_record()
         response = client.patch(
             f"/prints/{record['record_id']}",
-            json={"status": "completed", "notes": "ок", "material": "titanium"},
+            json={
+                "status": "completed",
+                "notes": "ок",
+                "material": "titanium",
+                "expected_revision": record["revision"],
+            },
         )
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "completed"
         assert body["notes"] == "ок"
         assert body["material"] == "titanium"
+        assert body["revision"] == record["revision"] + 1
+
+    def test_stale_patch_is_rejected_instead_of_overwriting(self):
+        record = _create_record()
+        first = client.patch(
+            f"/prints/{record['record_id']}",
+            json={"name": "Правка с ПК-1", "expected_revision": record["revision"]},
+            headers={"X-Workstation-ID": "operator-pc-1"},
+        )
+        assert first.status_code == 200
+        assert first.json()["updated_by"] == "operator-pc-1"
+
+        stale = client.patch(
+            f"/prints/{record['record_id']}",
+            json={"name": "Устаревшая правка", "expected_revision": record["revision"]},
+            headers={"X-Workstation-ID": "operator-pc-2"},
+        )
+        assert stale.status_code == 409
+        detail = stale.json()["detail"]
+        assert detail["current"]["name"] == "Правка с ПК-1"
+        assert detail["current"]["revision"] == first.json()["revision"]
+
+        stored = client.get(f"/prints/{record['record_id']}").json()
+        assert stored["name"] == "Правка с ПК-1"
+        assert stored["updated_by"] == "operator-pc-1"
+
+    @pytest.mark.parametrize("revision", [0, -1, True, "не число"])
+    def test_patch_rejects_invalid_expected_revision(self, revision):
+        record = _create_record()
+        response = client.patch(
+            f"/prints/{record['record_id']}",
+            json={"notes": "x", "expected_revision": revision},
+        )
+        assert response.status_code == 422
 
     def test_patch_rejects_bad_status(self):
         record = _create_record()
-        response = client.patch(f"/prints/{record['record_id']}", json={"status": "bogus"})
+        response = client.patch(
+            f"/prints/{record['record_id']}",
+            json={"status": "bogus", "expected_revision": record["revision"]},
+        )
         assert response.status_code == 422
 
     def test_patch_missing_returns_404(self):
-        assert client.patch("/prints/pr_missing", json={"status": "active"}).status_code == 404
+        assert client.patch(
+            "/prints/pr_missing",
+            json={"status": "active", "expected_revision": 1},
+        ).status_code == 404
+
+    def test_patch_requires_revision_for_shared_card(self):
+        record = _create_record()
+        response = client.patch(
+            f"/prints/{record['record_id']}",
+            json={"notes": "unsafe blind write"},
+        )
+        assert response.status_code == 428
 
 
 class TestPrintFiles:
@@ -308,9 +428,9 @@ class TestPrintFiles:
         assert response.status_code == 200
         body = response.json()
         assert body["file_type"] == "stl"
-        # Object key carries a checksum prefix so renames/replacements never collide
+        # Object key carries a unique file id and full checksum.
         assert body["object_uri"].startswith(f"s3://stls/{record['record_id']}/")
-        assert body["object_uri"].endswith("_деталь.stl")
+        assert body["object_uri"].endswith(body["checksum"])
         assert body["size_bytes"] == 7
 
     def test_upload_support_stl_autoclassified(self, memory_store):
@@ -344,6 +464,35 @@ class TestPrintFiles:
             data={"file_type": "exe"},
         )
         assert response.status_code == 422
+
+    def test_upload_rejects_filename_larger_than_database_field(self, memory_store):
+        record = _create_record()
+        response = client.post(
+            f"/prints/{record['record_id']}/files",
+            files={"file": ("x" * 301, io.BytesIO(b"x"), "model/stl")},
+            data={"file_type": "stl"},
+        )
+        assert response.status_code == 422
+        assert _MemoryObjectStore.storage == {}
+
+    def test_upload_removes_its_object_when_database_publication_fails(
+        self,
+        memory_store,
+        monkeypatch,
+    ):
+        record = _create_record()
+
+        def fail_insert(self, values):
+            raise RuntimeError("simulated database outage")
+
+        monkeypatch.setattr(PrintsRepository, "add_print_file", fail_insert)
+        with pytest.raises(RuntimeError, match="database outage"):
+            client.post(
+                f"/prints/{record['record_id']}/files",
+                files={"file": ("a.stl", io.BytesIO(b"solid"), "model/stl")},
+                data={"file_type": "stl"},
+            )
+        assert _MemoryObjectStore.storage == {}
 
     def test_upload_unavailable_store_returns_503(self):
         # conftest stubs ObjectStore.is_available to False by default
@@ -486,20 +635,125 @@ class TestDeletion:
             )
         files = client.get(f"/prints/{record['record_id']}").json()["files"]
         assert len(files) == 2
-        # Checksum prefix keeps the object keys distinct → both versions stored
+        # Immutable upload IDs keep the object keys distinct → both versions stored
         assert files[0]["object_uri"] != files[1]["object_uri"]
         assert len(_MemoryObjectStore.storage) == 2
+
+
+class TestStreamingModelIO:
+    def test_upload_uses_temporary_file_instead_of_put_bytes(self, monkeypatch):
+        class _StreamingOnlyStore:
+            uploaded = None
+            staged_path = None
+
+            def is_available(self):
+                return True
+
+            def put_bytes(self, *args, **kwargs):
+                raise AssertionError("large upload must not be buffered into put_bytes")
+
+            def put_file(self, bucket, object_name, path, content_type="application/octet-stream"):
+                path = Path(path)
+                assert path.exists()
+                _StreamingOnlyStore.staged_path = path
+                _StreamingOnlyStore.uploaded = path.read_bytes()
+                return f"s3://{bucket}/{object_name}"
+
+        monkeypatch.setattr("api.routes.prints.ObjectStore", _StreamingOnlyStore)
+        record = _create_record(name="потоковая загрузка")
+        payload = b"large-document" * 100_000
+
+        response = client.post(
+            f"/prints/{record['record_id']}/files",
+            files={"file": ("drawing.pdf", io.BytesIO(payload), "application/pdf")},
+            data={"file_type": "doc"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert _StreamingOnlyStore.uploaded == payload
+        assert not _StreamingOnlyStore.staged_path.exists()
+
+    def test_estimator_downloads_to_paths_and_removes_them(self, monkeypatch):
+        from api.routes import prints as prints_module
+
+        payload = b"binary-stl"
+        checksum = hashlib.sha256(payload).hexdigest()
+        observed_paths = []
+
+        class _StreamingOnlyStore:
+            def download_file(
+                self,
+                bucket,
+                object_name,
+                destination,
+                *,
+                expected_sha256=None,
+                chunk_size=1024 * 1024,
+            ):
+                assert (bucket, object_name) == ("stls", "record/model.stl")
+                assert expected_sha256 == checksum
+                destination = Path(destination)
+                destination.write_bytes(payload)
+                return destination
+
+            def get_bytes(self, *args, **kwargs):
+                raise AssertionError("estimator must not materialize MinIO blobs as bytes")
+
+        def fake_combined(parts, supports, *args, **kwargs):
+            assert supports == []
+            assert len(parts) == 1 and isinstance(parts[0][1], Path)
+            assert parts[0][1].read_bytes() == payload
+            observed_paths.append(parts[0][1])
+            return {
+                "available": True,
+                "method": "test:path",
+                "print_hours": 1.25,
+                "cost_total_rub": 100,
+                "prediction": None,
+                "cost_prediction": None,
+            }
+
+        monkeypatch.setattr(prints_module, "ObjectStore", _StreamingOnlyStore)
+        monkeypatch.setattr(prints_module, "_combined_prediction", fake_combined)
+        prepared = {
+            "record": {
+                "record_id": "pr_stream_input",
+                "revision": 7,
+                "metadata_json": {},
+            },
+            "platform_files": [{
+                "file_name": "model.stl",
+                "file_type": "stl",
+                "object_uri": "s3://stls/record/model.stl",
+                "checksum": checksum,
+            }],
+            "material": "steel",
+            "params": {"layer_thickness_mm": 0.06, "hatch_distance_mm": 0.12},
+            "powder_cost": None,
+        }
+
+        snapshot = prints_module._calculate_prediction_snapshot(prepared)
+
+        assert snapshot["method"] == "test:path"
+        assert observed_paths and not observed_paths[0].exists()
 
 
 class TestSessionLinking:
     def test_link_session_sets_printed_at(self):
         from datetime import datetime, timezone
+        from domain.models.sessions import BuildSession
         from storage.db.session import session_scope
         from storage.repositories.prints_repo import PrintsRepository
 
         record = _create_record(name="привязка-тест")
         start = datetime(2026, 5, 10, 8, 30, tzinfo=timezone.utc)
         with session_scope() as db:
+            db.add(BuildSession(
+                session_id="session_xyz",
+                origin_compute_node_id=record["origin_compute_node_id"],
+                start_ts=start,
+            ))
+            db.flush()
             repo = PrintsRepository(db)
             assert repo.link_session(record["record_id"], "session_xyz", session_start=start)
         body = client.get(f"/prints/{record['record_id']}").json()
