@@ -17,13 +17,13 @@ Order of checks matters: most-specific patterns before broad keyword matches so
 "Ожидание старта прожига" is NOT classified as "start", etc.
 """
 import re
-from datetime import timedelta
 from pathlib import Path
 
 from domain.enums.common import FileRole, SourceFileFamily
 from domain.schemas.parsing import CanonicalEventDraft, ParseDiagnosticRecord, ParseResult, SourceLocation
 from parsers.base.base import BaseParser, ParserContext
 from parsers.common.encoding import estimate_encoding, iter_text_lines
+from parsers.common.timeline import TimestampQualityTracker
 from parsers.common.timestamps import date_hint_from_filename, parse_timestamp_token
 
 # "-45878 2 Прожиг" — platform position, layer number, keyword
@@ -104,7 +104,7 @@ def classify_event(text: str) -> tuple[str, str | None, dict]:
 
 class EventLogParser(BaseParser):
     name = "main_event_log"
-    version = "0.2.0"
+    version = "0.3.0"
     file_family = SourceFileFamily.main_event_log
     role = FileRole.primary
 
@@ -113,21 +113,13 @@ class EventLogParser(BaseParser):
         date_hint = date_hint_from_filename(path)
         events: list[CanonicalEventDraft] = []
         diagnostics: list[ParseDiagnosticRecord] = []
-        missing_ts = 0
-        day_shift = 0
-        prev_ts = None
+        timeline = TimestampQualityTracker()
 
         for line_no, offset, line in iter_text_lines(path, encoding):
             if not line.strip():
                 continue
             ts, raw_ts, uncertainty = parse_timestamp_token(line, date_hint)
-            if ts is not None:
-                candidate = ts + timedelta(days=day_shift)
-                if prev_ts is not None and candidate + timedelta(hours=12) < prev_ts:
-                    day_shift += 1
-                    candidate = ts + timedelta(days=day_shift)
-                ts = candidate
-                prev_ts = ts
+            ts = timeline.add(ts)
 
             event_type, phase, extra = classify_event(line)
 
@@ -149,9 +141,6 @@ class EventLogParser(BaseParser):
                 if vm:
                     payload["vertical_position"] = float(vm.group(1).replace(",", "."))
 
-            if ts is None:
-                missing_ts += 1
-
             events.append(CanonicalEventDraft(
                 ts=ts,
                 raw_timestamp=raw_ts,
@@ -170,12 +159,19 @@ class EventLogParser(BaseParser):
                 payload=payload,
             ))
 
-        if missing_ts:
+        if timeline.missing_count:
             diagnostics.append(ParseDiagnosticRecord(
                 severity="warning",
                 code="missing_timestamps",
-                message=f"{missing_ts} event-log rows had no parseable timestamp.",
-                context={"count": missing_ts},
+                message=f"{timeline.missing_count} event-log rows had no parseable timestamp.",
+                context={"count": timeline.missing_count},
+            ))
+        if timeline.out_of_order_count:
+            diagnostics.append(ParseDiagnosticRecord(
+                severity="warning",
+                code="out_of_order_timestamps",
+                message=f"{timeline.out_of_order_count} event-log timestamps moved backwards.",
+                context={"count": timeline.out_of_order_count},
             ))
 
         return ParseResult(
@@ -186,6 +182,8 @@ class EventLogParser(BaseParser):
             role=self.role,
             events=events,
             diagnostics=diagnostics,
-            data_quality=["partial_recovery"] if missing_ts else ["ok"],
-            metadata={"encoding": encoding, "line_count": len(events)},
+            data_quality=["partial_recovery"] if (
+                timeline.missing_count or timeline.out_of_order_count
+            ) else ["ok"],
+            metadata={"encoding": encoding, "line_count": len(events), **timeline.metadata()},
         )

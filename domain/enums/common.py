@@ -30,6 +30,8 @@ class DataQualityStatus(StrEnum):
     partial_recovery = "partial_recovery"
     unsupported = "unsupported"
     binary_or_unknown = "binary_or_unknown"
+    skipped_large_file = "skipped_large_file"
+    truncated = "truncated"
 
 
 class EvidenceKind(StrEnum):

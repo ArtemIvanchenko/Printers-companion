@@ -8,13 +8,17 @@ from parsers.formats._tables import parse_table_stream
 
 class BurnLogParser(BaseParser):
     name = "burn_log"
-    version = "0.1.0"
+    version = "0.2.0"
     file_family = SourceFileFamily.burn_log
     role = FileRole.primary
 
     def parse(self, path: Path, context: ParserContext) -> ParseResult:
-        known_columns = context.signal_mappings.keys()
-        table, diagnostics, metadata = parse_table_stream(path, known_columns=known_columns)
+        known_columns = set(context.signal_mappings) | {"Time", "N", "LIR", "Table"}
+        table, diagnostics, metadata = parse_table_stream(
+            path,
+            known_columns=known_columns,
+            numeric_abs_limit=float(context.options.get("sensor_abs_limit", 10_000_000)),
+        )
         if table.repeated_headers:
             diagnostics.append(
                 ParseDiagnosticRecord(
@@ -35,4 +39,3 @@ class BurnLogParser(BaseParser):
             data_quality=["partial_recovery"] if table.malformed_rows else ["ok"],
             metadata=metadata | {"unknown_columns": table.unknown_columns},
         )
-

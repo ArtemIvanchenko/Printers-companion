@@ -19,6 +19,35 @@ def test_monitor100_recovers_glued_entries(tmp_path: Path) -> None:
     assert result.events[1].payload["value"] == "1"
 
 
+def test_monitor_recognizes_numeric_record_types_and_midnight_rollover(tmp_path: Path) -> None:
+    path = tmp_path / "27.04.2026_Monitor100.log"
+    path.write_text(
+        "23:59:59 |1|0|-46999|15|\n"
+        "00:00:01 |7|0|6|-104290|0|\n",
+        encoding="utf-8",
+    )
+
+    result = Monitor100LogParser().parse(path, ParserContext())
+
+    assert [event.event_type for event in result.events] == [
+        "monitor_motion_snapshot", "monitor_axis_snapshot",
+    ]
+    assert result.events[1].ts > result.events[0].ts
+    assert result.metadata["midnight_rollovers"] == 1
+    assert result.metadata["record_type_counts"] == {"1": 1, "7": 1}
+
+
+def test_stateflow_large_file_returns_typed_skip_status(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "job_stateFlow.log"
+    path.write_text("Timestamp;State\n2026-04-27 10:00:00;1\n", encoding="utf-8")
+    monkeypatch.setattr(StateFlowLogParser, "MAX_FILE_SIZE_BYTES", 1)
+
+    result = StateFlowLogParser().parse(path, ParserContext())
+
+    assert result.data_quality == ["skipped_large_file"]
+    assert result.diagnostics[0].code == "stateflow_skipped_large_file"
+
+
 def test_stateflow_streaming_rle_emits_only_transitions(tmp_path: Path) -> None:
     path = tmp_path / "job_stateFlow.log"
     path.write_text(
@@ -45,4 +74,3 @@ def test_stateflowdata_binary_is_preserved_as_unsupported_metadata(tmp_path: Pat
 
     assert "unsupported" in result.data_quality
     assert result.metadata["format"] == "binary_or_unknown"
-

@@ -1,4 +1,5 @@
 import json
+from time import perf_counter
 from pathlib import Path
 
 import typer
@@ -19,6 +20,43 @@ app = typer.Typer(help="Industrial printer log analytics CLI")
 
 def _parse_folder(folder: Path):
     return IngestionService(build_registry(), get_profile()).parse(folder)
+
+
+@app.command("audit-log")
+def audit_log(
+    file: Path,
+    neural: bool = typer.Option(False, "--neural/--no-neural"),
+) -> None:
+    """Parse one log and emit a compact, machine-readable quality audit."""
+    from domain.services.file_classifier import classify_file
+    from parsers.base.base import ParserContext
+
+    profile = get_profile()
+    classification = classify_file(file)
+    started = perf_counter()
+    result = build_registry().parse(
+        file,
+        classification.family,
+        ParserContext(
+            profile_id=profile.profile_id,
+            profile_version=profile.version,
+            signal_mappings=profile.signal_mappings,
+            options={"enable_neural_log_analysis": neural},
+        ),
+    )
+    typer.echo(json.dumps({
+        "file": str(file),
+        "family": classification.family,
+        "parser": result.parser_name,
+        "parser_version": result.parser_version,
+        "elapsed_seconds": round(perf_counter() - started, 3),
+        "event_count": len(result.events),
+        "transition_count": len(result.transitions),
+        "sampled_table_rows": sum(len(table.rows) for table in result.tables),
+        "data_quality": result.data_quality,
+        "diagnostics": [item.model_dump(mode="json") for item in result.diagnostics],
+        "metadata": result.metadata,
+    }, ensure_ascii=False, indent=2, default=str))
 
 
 @app.command("ingest-session")
@@ -152,4 +190,3 @@ def backup_minio() -> None:
 
 if __name__ == "__main__":
     app()
-

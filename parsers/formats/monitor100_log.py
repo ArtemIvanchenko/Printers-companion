@@ -18,10 +18,14 @@ from domain.enums.common import FileRole, SourceFileFamily
 from domain.schemas.parsing import CanonicalEventDraft, ParseDiagnosticRecord, ParseResult, SourceLocation
 from parsers.base.base import BaseParser, ParserContext
 from parsers.common.encoding import estimate_encoding, iter_text_lines
+from parsers.common.timeline import TimestampQualityTracker
 from parsers.common.timestamps import TIMESTAMP_PATTERNS, date_hint_from_filename, parse_timestamp_token
+from parsers.formats._tables import coerce_value
 
-# Matches the Monitor type marker after the timestamp
-_ENTRY_TYPE_RE = re.compile(r"\|([RSPT])\|(.+)", re.DOTALL)
+# The firmware emits letter and numeric record types (R/S/P/T/F/M/D/1/7...).
+# Anchor the marker at the start of the timestamp-stripped text so a numeric
+# payload cell cannot be mistaken for a record type in a damaged continuation.
+_ENTRY_TYPE_RE = re.compile(r"^\s*\|([A-Za-zА-Яа-я]|\d)\|(.*)$", re.DOTALL)
 
 # Fallback: legacy "CODE=value" / "CODE:value" pairs seen in older firmware logs
 _CODE_VALUE_RE = re.compile(r"(?P<code>[A-Za-zА-Яа-я_]*\d{1,4})\s*[:=]\s*(?P<value>[-+.\wА-Яа-я]+)")
@@ -49,18 +53,19 @@ def _classify_entry(entry: str, raw_ts: str) -> tuple[str, dict]:
 
     type_code = m.group(1)
     # Strip trailing pipes and split
-    values = [v.strip() for v in m.group(2).rstrip("|").split("|")]
+    values = [coerce_value(v) for v in m.group(2).rstrip("|").split("|")]
 
     if type_code == "R":
         # Realtime reading: 12-13 numeric pressure/flow values
         return "monitor_reading", {
             "raw_text": entry,
+            "record_type": type_code,
             "values": values,
         }
 
     if type_code == "S":
         # State change: signal_id | value | signal_name
-        payload: dict = {"raw_text": entry}
+        payload: dict = {"raw_text": entry, "record_type": type_code}
         if len(values) >= 3:
             payload["signal_id"] = values[0]
             payload["signal_value"] = values[1]
@@ -74,6 +79,7 @@ def _classify_entry(entry: str, raw_ts: str) -> tuple[str, dict]:
         # Print parameters snapshot
         return "monitor_print_params", {
             "raw_text": entry,
+            "record_type": type_code,
             "values": values,
         }
 
@@ -81,10 +87,22 @@ def _classify_entry(entry: str, raw_ts: str) -> tuple[str, dict]:
         # Track/trajectory parameters
         return "monitor_track_params", {
             "raw_text": entry,
+            "record_type": type_code,
             "values": values,
         }
 
-    return "monitor_transition", {"raw_text": entry}
+    semantic_types = {
+        "F": "monitor_frequency_change",
+        "M": "monitor_message",
+        "D": "monitor_diagnostic",
+        "1": "monitor_motion_snapshot",
+        "7": "monitor_axis_snapshot",
+    }
+    return semantic_types.get(type_code, f"monitor_record:{type_code}"), {
+        "raw_text": entry,
+        "record_type": type_code,
+        "values": values,
+    }
 
 
 def _classify_entry_legacy(entry: str, raw_ts: str) -> tuple[str, dict]:
@@ -102,7 +120,7 @@ def _classify_entry_legacy(entry: str, raw_ts: str) -> tuple[str, dict]:
 
 class Monitor100LogParser(BaseParser):
     name = "monitor100_log"
-    version = "0.2.0"
+    version = "0.3.0"
     file_family = SourceFileFamily.monitor100_log
     role = FileRole.primary
 
@@ -112,6 +130,9 @@ class Monitor100LogParser(BaseParser):
         events: list[CanonicalEventDraft] = []
         diagnostics: list[ParseDiagnosticRecord] = []
         glued_count = 0
+        unstructured_count = 0
+        record_type_counts: dict[str, int] = {}
+        timeline = TimestampQualityTracker()
 
         for line_no, offset, line in iter_text_lines(path, encoding):
             entries = split_embedded_timestamp_entries(line)
@@ -120,12 +141,19 @@ class Monitor100LogParser(BaseParser):
 
             for entry in entries:
                 ts, raw_ts, uncertainty = parse_timestamp_token(entry, date_hint)
+                ts = timeline.add(ts)
                 # Try |R|S|P|T| format first; fall back to legacy CODE=value
                 search_area = entry.replace(raw_ts, "", 1) if raw_ts else entry
                 if _ENTRY_TYPE_RE.search(search_area):
                     event_type, payload = _classify_entry(entry, raw_ts or "")
+                    record_type = payload.get("record_type")
+                    if isinstance(record_type, str):
+                        record_type_counts[record_type] = record_type_counts.get(record_type, 0) + 1
                 else:
                     event_type, payload = _classify_entry_legacy(entry, raw_ts or "")
+                    if event_type == "monitor_transition":
+                        unstructured_count += 1
+                structured = "record_type" in payload or event_type.startswith("monitor_code:")
                 events.append(CanonicalEventDraft(
                     ts=ts,
                     raw_timestamp=raw_ts,
@@ -139,7 +167,7 @@ class Monitor100LogParser(BaseParser):
                     subsystem="monitor100",
                     event_type=event_type,
                     payload=payload,
-                    confidence=0.9 if ts else 0.65,
+                    confidence=(0.95 if ts else 0.55) if structured else (0.7 if ts else 0.3),
                 ))
 
         if glued_count:
@@ -148,6 +176,27 @@ class Monitor100LogParser(BaseParser):
                 code="glued_monitor_entries_recovered",
                 message="Recovered embedded Monitor100 entries by scanning timestamps inside lines.",
                 context={"extra_entries": glued_count},
+            ))
+        if timeline.missing_count:
+            diagnostics.append(ParseDiagnosticRecord(
+                severity="warning",
+                code="monitor_missing_timestamps",
+                message=f"{timeline.missing_count} Monitor entries had no parseable timestamp.",
+                context={"count": timeline.missing_count},
+            ))
+        if timeline.out_of_order_count:
+            diagnostics.append(ParseDiagnosticRecord(
+                severity="warning",
+                code="monitor_out_of_order_timestamps",
+                message=f"{timeline.out_of_order_count} Monitor timestamps moved backwards.",
+                context={"count": timeline.out_of_order_count},
+            ))
+        if unstructured_count:
+            diagnostics.append(ParseDiagnosticRecord(
+                severity="warning",
+                code="monitor_unstructured_entries",
+                message=f"{unstructured_count} Monitor entries had no recognizable record marker.",
+                context={"count": unstructured_count},
             ))
 
         type_counts: dict[str, int] = {}
@@ -162,12 +211,17 @@ class Monitor100LogParser(BaseParser):
             role=self.role,
             events=events,
             diagnostics=diagnostics,
-            data_quality=["partial_recovery"] if glued_count else ["ok"],
+            data_quality=["partial_recovery"] if (
+                glued_count or timeline.missing_count or unstructured_count
+            ) else ["ok"],
             metadata={
                 "encoding": encoding,
                 "entry_count": len(events),
                 "glued_entries_recovered": glued_count,
                 "event_type_counts": type_counts,
+                "record_type_counts": record_type_counts,
+                "unstructured_entries": unstructured_count,
+                **timeline.metadata(),
             },
         )
 

@@ -8,7 +8,7 @@ from parsers.formats._tables import parse_table_stream
 
 class TableTempLogParser(BaseParser):
     name = "table_temp_log"
-    version = "0.1.0"
+    version = "0.2.0"
     file_family = SourceFileFamily.table_temp_log
     role = FileRole.secondary
 
@@ -16,7 +16,12 @@ class TableTempLogParser(BaseParser):
         # Pass known signal columns (+ Time) so genuine sensor columns are not
         # all reported as unknown_columns.
         known = set(context.signal_mappings.keys()) | {"Time"}
-        table, diagnostics, metadata = parse_table_stream(path, known_columns=known, max_rows=5000)
+        table, diagnostics, metadata = parse_table_stream(
+            path,
+            known_columns=known,
+            max_rows=5000,
+            numeric_abs_limit=float(context.options.get("sensor_abs_limit", 10_000_000)),
+        )
         return ParseResult(
             parser_name=self.name,
             parser_version=self.version,
@@ -28,4 +33,3 @@ class TableTempLogParser(BaseParser):
             data_quality=["partial_recovery"] if table.malformed_rows else ["ok"],
             metadata=metadata | {"streaming": True},
         )
-

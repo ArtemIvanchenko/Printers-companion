@@ -34,7 +34,7 @@ def infer_subsystem(changed_columns: list[str]) -> str | None:
 
 class StateFlowLogParser(BaseParser):
     name = "stateflow_log"
-    version = "0.1.0"
+    version = "0.2.0"
     file_family = SourceFileFamily.stateflow_log
     role = FileRole.primary
 
@@ -228,4 +228,3 @@ class StateFlowLogParser(BaseParser):
                 "truncated": truncated,
             },
         )
-
