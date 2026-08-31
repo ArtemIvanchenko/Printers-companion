@@ -29,5 +29,11 @@ def test_m350_signal_alarm_thresholds() -> None:
     assert st5.get("alarm_high") == 200
 
     sf1 = profile.signal_mappings.get("SF1", {})
-    assert sf1.get("nominal_val") == 3.0
+    assert sf1.get("unit") == "raw_sensor_units"
+    assert "min_val" not in sf1
 
+    flow_t = profile.signal_mappings.get("Flow T", {})
+    assert flow_t.get("invalid_values") == [125.0]
+
+    lir = profile.signal_mappings.get("LIR", {})
+    assert lir.get("min_val") == -420000

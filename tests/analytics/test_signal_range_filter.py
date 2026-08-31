@@ -9,6 +9,7 @@ forecast as a genuine reading.
 """
 import pytest
 
+from analytics.process_health import _clean_signal
 from analytics.telemetry_parser import compute_full_signal_stats, downsample_full_series
 
 _HEADER = ("      Time|       LIR|       ST4|       ST3|       ST5|"
@@ -79,12 +80,46 @@ def test_downsample_can_clip_to_active_clock_window(tmp_path):
     assert sampled["SO1"] == [float(i) for i in range(10, 20)]
 
 
+def test_explicit_sentinel_is_filtered_even_when_it_dominates_signal(tmp_path):
+    """A known firmware sentinel is unconditional, unlike candidate bounds."""
+    rows = [{"Flow T": 25.0}] * 10 + [{"Flow T": 125.0}] * 50
+    valid_ranges = {
+        "Flow T": {"min_val": -10.0, "max_val": 80.0, "invalid_values": [125.0]},
+    }
+
+    stats = compute_full_signal_stats(_log(tmp_path, rows), valid_ranges=valid_ranges)
+    sampled = downsample_full_series(
+        _log(tmp_path, rows), ["Flow T"], max_points=60, valid_ranges=valid_ranges,
+    )
+
+    assert stats["Flow T"]["n"] == 10
+    assert stats["Flow T"]["out_of_range"] == 50
+    assert stats["Flow T"]["max"] == pytest.approx(25.0)
+    assert sampled["Flow T"].count(None) == 50
+
+
+def test_process_health_uses_the_same_explicit_sentinel_policy():
+    assert _clean_signal("Flow T", [25.0, 125.0, 26.0]) == [25.0, 26.0]
+
+
+def test_enforced_range_can_filter_dominant_non_sentinel_values(tmp_path):
+    rows = [{"Flow T": 25.0}] * 10 + [{"Flow T": 90.0}] * 50
+    valid_ranges = {
+        "Flow T": {"min_val": -10.0, "max_val": 80.0, "range_policy": "enforced"},
+    }
+
+    stats = compute_full_signal_stats(_log(tmp_path, rows), valid_ranges=valid_ranges)
+
+    assert stats["Flow T"]["n"] == 10
+    assert stats["Flow T"]["out_of_range"] == 50
+
+
 class TestWrongProfileRangeIsIgnored:
     """A range rejecting most of a signal describes a different machine.
 
-    Real cases: LIR reads negative throughout while the profile says
-    0..390000 (99.9% rejected), SF1 reads ~986 against a stated 0..30 (54%).
-    Both are profile guesses — confidence 0.5, active_status "candidate".
+    Historical real cases: LIR reads negative and SF1 is scaled near 986.
+    Those findings corrected the bundled profile, but caller-supplied candidate
+    profiles still need the same guard against silently erasing real data.
     """
 
     def test_range_rejecting_almost_everything_is_not_applied(self, tmp_path):

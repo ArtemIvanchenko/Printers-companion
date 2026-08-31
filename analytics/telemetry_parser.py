@@ -16,6 +16,11 @@ import numpy as np
 import polars as pl
 
 from analytics.robust_stats import theil_sen_slope
+from analytics.thresholds import (
+    should_apply_valid_range,
+    value_in_valid_range,
+    value_is_explicitly_invalid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +32,6 @@ logger = logging.getLogger(__name__)
 # unconditionally — unlike the profile ranges below, it needs no per-signal
 # knowledge and so cannot be wrong about a signal the profile has mis-guessed.
 _ABSURD_MAGNITUDE = 1e7
-
-# A profile range rejecting more than this fraction of a signal is describing a
-# different machine (or different units) than the one that wrote the log.
-_MAX_PROFILE_REJECT_FRACTION = 0.20
 
 # ── Signal → semantic group mapping ─────────────────────────────────────────
 
@@ -154,7 +155,7 @@ def downsample_full_series(
     max_points: int = 150,
     start_clock_seconds: float | None = None,
     end_clock_seconds: float | None = None,
-    valid_ranges: dict[str, dict[str, float]] | None = None,
+    valid_ranges: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, list]:
     """Return up to ``max_points`` rows spaced evenly across the ENTIRE file.
 
@@ -245,20 +246,24 @@ def downsample_full_series(
             if col == time_column:
                 continue
             rng = valid_ranges.get(col) or {}
+            out[col] = [
+                None
+                if isinstance(value, (int, float))
+                and value_is_explicitly_invalid(value, rng)
+                else value
+                for value in values
+            ]
+            values = out[col]
             finite = [value for value in values if isinstance(value, (int, float))]
             if not finite or not rng:
                 continue
-            rejected = [
-                value for value in finite
-                if ((rng.get("min_val") is not None and value < rng["min_val"])
-                    or (rng.get("max_val") is not None and value > rng["max_val"]))
-            ]
-            if len(rejected) / len(finite) <= _MAX_PROFILE_REJECT_FRACTION:
+            rejected = [value for value in finite if not value_in_valid_range(value, rng)]
+            if should_apply_valid_range(rng, len(rejected) / len(finite)):
                 out[col] = [
-                    None if isinstance(value, (int, float)) and (
-                        (rng.get("min_val") is not None and value < rng["min_val"])
-                        or (rng.get("max_val") is not None and value > rng["max_val"])
-                    ) else value
+                    None
+                    if isinstance(value, (int, float))
+                    and not value_in_valid_range(value, rng)
+                    else value
                     for value in values
                 ]
         return out
@@ -270,7 +275,7 @@ def downsample_full_series(
 def compute_full_signal_stats(
     path: Path,
     alarm_thresholds: dict[str, dict[str, float]] | None = None,
-    valid_ranges: dict[str, dict[str, float]] | None = None,
+    valid_ranges: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Compute per-signal statistics from the complete sensors.log.
 
@@ -278,10 +283,10 @@ def compute_full_signal_stats(
         path: absolute path to the *_sensors.log file.
         alarm_thresholds: optional dict {signal: {"alarm_high": float,
                           "alarm_low": float}} from signals.yaml.
-        valid_ranges: optional dict {signal: {"min_val": float,
-                      "max_val": float}} from signals.yaml — the physically
-                      possible range. Defaults to the profile's; pass ``{}``
-                      to disable range filtering entirely.
+        valid_ranges: optional per-signal physical bounds, explicit firmware
+                      sentinels and enforcement policy from signals.yaml.
+                      Defaults to the profile's; pass ``{}`` to disable range
+                      and sentinel filtering entirely.
 
     Returns:
         {signal: {mean, std, min, max, p05, p95, p99, n,
@@ -316,23 +321,31 @@ def compute_full_signal_stats(
         # visible instead of silently vanishing.
         keep = np.abs(vals) <= _ABSURD_MAGNITUDE
 
-        # The profile's own min_val/max_val are applied on top — but only when
-        # they agree with reality. Several are guesses (LIR and SF1 carry
-        # confidence 0.5 / active_status "candidate"), and two of them are
-        # simply wrong for this machine: LIR reads negative throughout while the
-        # profile says 0..390000, and SF1 reads ~986 against a stated 0..30.
-        # Trusting them blindly would discard 99.8% and 54% of real samples.
-        # A range that rejects most of the signal is a bad range, not a bad
-        # sensor, so it is ignored (and reported) rather than obeyed.
+        # Explicit firmware sentinels are always removed. Candidate min/max
+        # bounds are applied only when they agree with the remaining real data;
+        # a range that rejects most of a signal probably describes other units
+        # or another machine. A profile may mark a confirmed range as enforced.
         rng = valid_ranges.get(col) or {}
         if rng:
+            invalid_values = rng.get("invalid_values", ())
+            explicit_invalid = (
+                np.isin(vals, invalid_values)
+                if invalid_values
+                else np.zeros(len(vals), dtype=bool)
+            )
+            keep &= ~explicit_invalid
             in_profile = np.ones(len(vals), dtype=bool)
             if (lo := rng.get("min_val")) is not None:
                 in_profile &= vals >= lo
             if (hi := rng.get("max_val")) is not None:
                 in_profile &= vals <= hi
-            rejected = 1.0 - (in_profile.sum() / len(vals)) if len(vals) else 0.0
-            if rejected <= _MAX_PROFILE_REJECT_FRACTION:
+            eligible = keep.copy()
+            rejected = (
+                1.0 - (in_profile[eligible].sum() / eligible.sum())
+                if eligible.any()
+                else 0.0
+            )
+            if should_apply_valid_range(rng, rejected):
                 keep &= in_profile
             else:
                 logger.warning(

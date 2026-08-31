@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+
+
+MAX_CANDIDATE_RANGE_REJECT_FRACTION = 0.20
 
 
 @lru_cache(maxsize=1)
@@ -41,8 +45,8 @@ def load_alarm_thresholds() -> dict[str, dict[str, float]]:
 
 
 @lru_cache(maxsize=1)
-def load_valid_ranges() -> dict[str, dict[str, float]]:
-    """Return ``{signal: {"min_val": x, "max_val": y}}`` (entries optional).
+def load_valid_ranges() -> dict[str, dict[str, Any]]:
+    """Return physical bounds plus their enforcement policy (entries optional).
 
     These are the profile's physically possible bounds — passport limits, not
     alarm levels. Readings outside them are firmware/wiring artefacts: the
@@ -56,13 +60,17 @@ def load_valid_ranges() -> dict[str, dict[str, float]]:
         from profiles.base.profile import load_yaml
         signals_path = Path(__file__).resolve().parents[1] / "profiles" / "m350" / "signals.yaml"
         raw = load_yaml(signals_path)
-        result: dict[str, dict[str, float]] = {}
+        result: dict[str, dict[str, Any]] = {}
         for sig_name, sig_data in (raw.get("signals") or {}).items():
-            entry: dict[str, float] = {}
+            entry: dict[str, Any] = {}
             if (lo := sig_data.get("min_val")) is not None:
                 entry["min_val"] = float(lo)
             if (hi := sig_data.get("max_val")) is not None:
                 entry["max_val"] = float(hi)
+            if invalid_values := sig_data.get("invalid_values"):
+                entry["invalid_values"] = [float(value) for value in invalid_values]
+            if policy := sig_data.get("range_policy"):
+                entry["range_policy"] = str(policy)
             if entry:
                 result[sig_name] = entry
         return result
@@ -70,4 +78,32 @@ def load_valid_ranges() -> dict[str, dict[str, float]]:
         return {}
 
 
-__all__ = ["load_alarm_thresholds", "load_valid_ranges"]
+def value_in_valid_range(value: float, spec: dict[str, Any]) -> bool:
+    """Return whether a value satisfies every bound present in ``spec``."""
+    return (
+        (spec.get("min_val") is None or value >= spec["min_val"])
+        and (spec.get("max_val") is None or value <= spec["max_val"])
+    )
+
+
+def value_is_explicitly_invalid(value: float, spec: dict[str, Any]) -> bool:
+    """Return whether firmware uses this exact value as a documented sentinel."""
+    return value in spec.get("invalid_values", ())
+
+
+def should_apply_valid_range(spec: dict[str, Any], rejected_fraction: float) -> bool:
+    """Apply confirmed ranges always; distrust candidate ranges that erase reality."""
+    return (
+        spec.get("range_policy") == "enforced"
+        or rejected_fraction <= MAX_CANDIDATE_RANGE_REJECT_FRACTION
+    )
+
+
+__all__ = [
+    "MAX_CANDIDATE_RANGE_REJECT_FRACTION",
+    "load_alarm_thresholds",
+    "load_valid_ranges",
+    "should_apply_valid_range",
+    "value_is_explicitly_invalid",
+    "value_in_valid_range",
+]

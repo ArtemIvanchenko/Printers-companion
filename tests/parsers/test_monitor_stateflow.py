@@ -37,6 +37,60 @@ def test_monitor_recognizes_numeric_record_types_and_midnight_rollover(tmp_path:
     assert result.metadata["record_type_counts"] == {"1": 1, "7": 1}
 
 
+def test_monitor_marks_underwidth_known_records_as_truncated(tmp_path: Path) -> None:
+    path = tmp_path / "27.04.2026_Monitor100.log"
+    path.write_text(
+        "10:00:00 |S|58|1|Command|\n"
+        "10:00:01 |S|58|1|\n"
+        "10:00:02 |R\n",
+        encoding="utf-8",
+    )
+
+    result = Monitor100LogParser().parse(path, ParserContext())
+
+    assert result.events[0].payload["structurally_complete"] is True
+    assert result.events[0].confidence == 0.95
+    assert result.events[1].payload["structurally_complete"] is False
+    assert result.events[1].payload["field_count"] == 2
+    assert result.events[1].confidence == 0.35
+    assert result.events[2].event_type == "monitor_reading"
+    assert result.events[2].payload["structurally_complete"] is False
+    assert result.metadata["truncated_records"] == 2
+    assert result.metadata["truncated_record_type_counts"] == {"S": 1, "R": 1}
+    assert any(d.code == "monitor_truncated_records" for d in result.diagnostics)
+
+
+def test_monitor_recovers_timestamp_prefix_but_not_untimestamped_fragment(tmp_path: Path) -> None:
+    path = tmp_path / "27.04.2026_Monitor100.log"
+    path.write_text(
+        "011:03:17 |S|9|1|V9_airToChamber|\n"
+        "0|0|10|1|\n",
+        encoding="utf-8",
+    )
+
+    result = Monitor100LogParser().parse(path, ParserContext())
+
+    assert result.events[0].event_type == "monitor_state_change"
+    assert result.events[0].payload["recovered_prefix"] == "0"
+    assert result.events[0].payload["structurally_complete"] is True
+    assert result.events[1].event_type == "monitor_transition"
+    assert result.metadata["prefixed_records_recovered"] == 1
+    assert result.metadata["unstructured_entries"] == 1
+
+
+def test_monitor_classifies_standalone_firmware_marker(tmp_path: Path) -> None:
+    path = tmp_path / "27.04.2026_Monitor100.log"
+    path.write_text("20:14:52 X\n", encoding="utf-8")
+
+    result = Monitor100LogParser().parse(path, ParserContext())
+
+    assert result.events[0].event_type == "monitor_marker"
+    assert result.events[0].payload["marker"] == "X"
+    assert result.events[0].confidence == 0.85
+    assert result.metadata["marker_entries"] == 1
+    assert result.metadata["unstructured_entries"] == 0
+
+
 def test_stateflow_large_file_returns_typed_skip_status(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "job_stateFlow.log"
     path.write_text("Timestamp;State\n2026-04-27 10:00:00;1\n", encoding="utf-8")

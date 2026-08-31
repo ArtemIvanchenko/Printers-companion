@@ -1,4 +1,4 @@
-version: m350-signals-0.3.0
+version: m350-signals-0.4.0
 profile_id: laser-systems-m350
 machine:
   model: M-450M
@@ -88,6 +88,7 @@ signals:
     confidence: 0.7
     min_val: -10
     max_val: 80
+    invalid_values: [125.0]
     active_status: confirmed_class_candidate_channel
     notes: "Gas/purge flow temperature (panel ST1 shows T)."
   "ST1 (flow H)":
@@ -109,8 +110,11 @@ signals:
     confidence: 0.7
     min_val: -10
     max_val: 80
+    invalid_values: [125.0]
     active_status: confirmed_class_candidate_channel
-    notes: "Sensors-log alias of ST1 (flow T)."
+    notes: >-
+      Sensors-log alias of ST1 (flow T). The exact 125.0 plateau found in 268,415
+      real samples is treated as sensor saturation/disconnect, not gas temperature.
   "Flow H":
     canonical_name: purge_flow_humidity
     subsystem: atmosphere
@@ -235,26 +239,29 @@ signals:
     canonical_name: purge_gas_flow
     subsystem: atmosphere
     semantic_class: flow
-    unit: l_per_min
-    confidence: 0.55
-    min_val: 0
-    max_val: 30
-    nominal_val: 3.0       # Passport: расход инертного газа 3 л/мин
-    alarm_low: 1.5         # Below half nominal = insufficient purging
+    unit: raw_sensor_units
+    confidence: 0.4
     active_status: candidate
-    notes: "Gas flow sensor. Passport: 3 L/min inert gas flow during build."
+    notes: >-
+      Panel class SF denotes flow, but the sensors-log channel is bimodal at 0
+      and approximately 986-991. Its scale is not L/min; no physical range or
+      alarm is applied until firmware units are confirmed. The passport's 3 L/min
+      machine requirement must not be compared directly with this raw channel.
 
   # --- Mechanics / process geometry ---
   LIR:
     canonical_name: build_platform_z_position
     subsystem: motion
     semantic_class: position
-    unit: microns_or_steps
+    unit: signed_encoder_units
     confidence: 0.5
-    min_val: 0
-    max_val: 390000        # Passport: рабочий ход по Z 390 мм (in µm encoder counts)
+    min_val: -420000
+    max_val: 1000
     active_status: candidate
-    notes: "Vertical build platform position (Z). Passport Z-travel = 390 mm."
+    notes: >-
+      Signed vertical build-platform encoder. Across 5.86M real rows, normal
+      values span -405001..7; positive 32765 and multi-million values are damaged
+      sentinels. The passport's 390 mm travel does not prove the encoder scale.
   Table:
     canonical_name: table_position
     subsystem: motion

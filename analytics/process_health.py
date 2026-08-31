@@ -35,19 +35,25 @@ def _clean_signal(signal: str, values: list[Any]) -> list[float]:
     cleaned = _clean(values)
     if not cleaned:
         return []
-    from analytics.thresholds import load_valid_ranges
+    from analytics.thresholds import (
+        load_valid_ranges,
+        should_apply_valid_range,
+        value_in_valid_range,
+        value_is_explicitly_invalid,
+    )
 
     rng = load_valid_ranges().get(signal) or {}
     if not rng:
         return cleaned
-    accepted = [
-        value for value in cleaned
-        if (rng.get("min_val") is None or value >= rng["min_val"])
-        and (rng.get("max_val") is None or value <= rng["max_val"])
-    ]
+    cleaned = [value for value in cleaned if not value_is_explicitly_invalid(value, rng)]
+    if not cleaned:
+        return []
+    accepted = [value for value in cleaned if value_in_valid_range(value, rng)]
     # Candidate profile mappings can have wrong units. Match the full-stats
-    # parser: ignore a range that rejects more than 20% instead of erasing data.
-    return accepted if len(accepted) >= 0.8 * len(cleaned) else cleaned
+    # parser: confirmed ranges stay active while contradictory candidate ranges
+    # are ignored instead of erasing data.
+    rejected_fraction = 1.0 - len(accepted) / len(cleaned)
+    return accepted if should_apply_valid_range(rng, rejected_fraction) else cleaned
 
 
 def _pstdev(values: list[float]) -> float:
