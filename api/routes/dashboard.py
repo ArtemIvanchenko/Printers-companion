@@ -4,8 +4,8 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,20 @@ from profiles.signal_catalog import signal_display_name, signal_labels_ru
 from storage.db.session import session_scope
 
 router = APIRouter(tags=["dashboard"])
+
+
+@router.get("/assets/log-insights.js", include_in_schema=False)
+def log_insights_script():
+    return FileResponse(Path(__file__).resolve().parents[2] / "web_assets" / "log-insights.js",
+                        media_type="text/javascript")
+
+
+@router.get('/assets/{asset_name}', include_in_schema=False)
+def catalogue_script(asset_name: str):
+    if asset_name not in {'catalog-pager.js', 'folder-import.js'}:
+        raise HTTPException(404, 'Asset not found')
+    return FileResponse(Path(__file__).resolve().parents[2] / 'web_assets' / asset_name,
+                        media_type='text/javascript')
 
 
 def esc(value) -> str:
@@ -261,12 +275,7 @@ def dashboard():
         quality = get_quality_paginated(db, skip=0, limit=10_000)
         tel_label, telemetry, health, tel_start_ts = get_latest_print_telemetry(db)
     
-    # Stats
-    prints = len([s for s in sessions if s['type'] == 'REAL_PRINT'])
-    hours = sum(s['duration_min'] for s in sessions) // 60
-    # Counts by category (Counter keeps first-seen order, like the old dicts)
-    types = Counter(s['type'] for s in sessions)
-    materials = Counter(s.get('material') or 'unknown' for s in sessions)
+    # Quality breakdowns remain inputs for the dedicated quality page.
     quality_stats = Counter(q['result'] for q in quality)
     defects = Counter(q['defect_type'] for q in quality if q.get('defect_type'))
 
@@ -277,10 +286,7 @@ def dashboard():
     # Pauses
     pauses = [s.get('pause_count', 0) for s in sessions]
     
-    # Pre-compute JS-safe color arrays (avoids undefined-variable ReferenceError in browser)
-    duration_colors = _js_json(
-        ["#10b981" if d > 500 else "#f59e0b" if d > 100 else "#60a5fa" for d in durations]
-    )
+    # Pre-compute JS-safe color arrays (avoids undefined-variable ReferenceError in browser).
     pause_colors = _js_json(
         ["#f59e0b" if p > 0 else "#60a5fa" for p in pauses]
     )
@@ -439,8 +445,6 @@ def dashboard():
     ctx = {
         "machine_info": machine_info,
         "vendor": _profile.vendor,
-        "real_print_count": prints,
-        "total_print_hours": hours,
         "telemetry_subtitle": tel_subtitle,
         "telemetry_missing_notice": "" if has_telemetry else '<div class="section" style="text-align:center;color:#6b7280;">Нет данных телеметрии. Импортируйте логи реальной печати (burn/sensors).</div>',
         "process_health_panel": health_panel if has_telemetry else "",
@@ -453,15 +457,9 @@ def dashboard():
         "pressure_alarm_class": _ac(alarm_press),
         "pressure_alarm_badge": _ex(alarm_press),
         "session_count": len(sessions),
-        "session_type_labels": _js_json(list(types.keys())),
-        "session_type_counts": _js_json(list(types.values())),
-        "material_labels": _js_json(list(materials.keys())),
-        "material_counts": _js_json(list(materials.values())),
-        # Shared by the duration and the hours charts.
+        # Used by the timeline chart in the dedicated sessions view.
         "real_print_date_labels": real_print_dates,
-        "real_print_duration_min": _js_json(durations),
         "real_print_duration_hours": _js_json([d / 60 for d in durations]),
-        "real_print_duration_colors": duration_colors,
         # Shared by the line-count, pause and burn-event charts.
         "session_date_labels": session_dates,
         "session_line_counts": session_lines,

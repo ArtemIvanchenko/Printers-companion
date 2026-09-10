@@ -345,7 +345,7 @@ class TestMachineTimeActuals:
         assert row["actual_source"] == "machine_log"
         assert row["actual_hours"] == pytest.approx(1000 * 39.25 / 3600, abs=0.02)
 
-    def test_partial_log_falls_back_to_wall_span(self, db, tmp_path):
+    def test_partial_log_keeps_wall_span_diagnostic_only(self, db, tmp_path):
         # Лог покрывает 400 из 1000 слоёв (суточная ротация) — сумма машинного
         # времени занижена и НЕ должна использоваться как факт.
         self._pair(db, tmp_path, "pr_part", log_layers=400, snapshot_layers=1000,
@@ -353,8 +353,10 @@ class TestMachineTimeActuals:
         db.flush()
 
         row = next(r for r in prediction_accuracy(db)["pairs"] if r["record_id"] == "pr_part")
-        assert row["actual_source"] == "wall_span"
-        assert row["actual_hours"] == pytest.approx(12.0, abs=0.01)
+        assert row["actual_source"] is None
+        assert row["actual_hours"] is None
+        assert row["wall_span_hours"] == pytest.approx(12.0, abs=0.01)
+        assert row["error_pct"] is None
         assert row["used_for_calibration"] is False
         assert row["excluded_reason"] == "machine_time_unavailable"
 
@@ -367,8 +369,9 @@ class TestMachineTimeActuals:
         db.flush()
 
         row = next(r for r in prediction_accuracy(db)["pairs"] if r["record_id"] == "pr_nolayers")
-        assert row["actual_source"] == "wall_span"
-        assert row["actual_hours"] == pytest.approx(6.0, abs=0.01)
+        assert row["actual_source"] is None
+        assert row["actual_hours"] is None
+        assert row["wall_span_hours"] == pytest.approx(6.0, abs=0.01)
 
     def test_high_numbered_partial_log_cannot_masquerade_as_complete(self, db, tmp_path):
         self._pair(db, tmp_path, "pr_tail", log_layers=1000, snapshot_layers=1000,
@@ -380,5 +383,7 @@ class TestMachineTimeActuals:
         db.flush()
 
         row = next(r for r in prediction_accuracy(db)["pairs"] if r["record_id"] == "pr_tail")
-        assert row["actual_source"] == "wall_span"
+        assert row["actual_source"] is None
+        assert row["actual_hours"] is None
+        assert row["wall_span_hours"] == pytest.approx(20.0, abs=0.01)
         assert row["excluded_reason"] == "machine_time_unavailable"

@@ -32,6 +32,12 @@ x-app-env: &app-env
     MINIO_BUCKET_PHOTOS:                 ${MINIO_BUCKET_PHOTOS:-photos}
     MINIO_BUCKET_DOCS:                   ${MINIO_BUCKET_DOCS:-docs}
     MINIO_SECURE:                        ${MINIO_SECURE:-false}
+    NAS_OUTBOX_PATH:                     ${NAS_OUTBOX_PATH:-/var/lib/printer-companion/nas-outbox}
+    NAS_OUTBOX_MAX_BYTES:                ${NAS_OUTBOX_MAX_BYTES:-21474836480}
+    NAS_SYNC_POLL_SECONDS:               ${NAS_SYNC_POLL_SECONDS:-2}
+    NAS_SYNC_RETRY_MIN_SECONDS:          ${NAS_SYNC_RETRY_MIN_SECONDS:-5}
+    NAS_SYNC_RETRY_MAX_SECONDS:          ${NAS_SYNC_RETRY_MAX_SECONDS:-300}
+    NAS_SYNC_CLAIM_SECONDS:              ${NAS_SYNC_CLAIM_SECONDS:-900}
     RAW_LOGS_CONTAINER_PATH:             ${RAW_LOGS_CONTAINER_PATH:-/mnt/raw_logs}
     INCOMING_PATH:                       ${INCOMING_PATH:-/mnt/raw_logs}
     STARTUP_IMPORT_ENABLED:               ${STARTUP_IMPORT_ENABLED:-true}
@@ -176,6 +182,36 @@ services:
         limits:
           cpus: "4.0"
           memory: 8g
+
+  nas-sync:
+    <<: *app-env
+    image: ghcr.io/artemivanchenko/printers-companion:worker
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    command: python -m worker.nas_sync
+    volumes:
+      - type: volume
+        source: operator_state
+        target: /var/lib/printer-companion
+    networks:
+      - backend_net
+      - storage_net
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
 
   estimator:
     <<: *app-env

@@ -11,6 +11,7 @@ from domain.services.compute_affinity import ComputeAffinityError
 from domain.services.ingestion import IngestionService
 from domain.services.session_grouping import group_files_into_sessions
 from domain.services.session_overview import build_group_overview
+from domain.services.operator_report import build_operator_report
 from profiles.m350.profile import build_registry, get_profile
 from reporting.json_report.generator import _timeline_preview, generate_session_json_report
 from reporting.markdown_report.generator import generate_markdown_report
@@ -169,6 +170,7 @@ def get_session_telemetry(
         "soft_sensors": group.get("soft_sensors") or {},
         "phase_statistics": group.get("phase_statistics") or {},
         "advanced_monitoring": group.get("advanced_monitoring") or {},
+        "log_insights": group.get("log_insights") or {},
         "has_telemetry": bool(tel.get("time")),
     }
 
@@ -179,6 +181,40 @@ def get_session(session_id: str, repo: RuntimeRepository = Depends(get_runtime_r
     if not payload:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"session_id": session_id, **payload.get("group", {})}
+
+
+@router.get("/{session_id}/operator-report")
+def get_operator_report(
+    session_id: str,
+    repo: RuntimeRepository = Depends(get_runtime_repository),
+) -> dict:
+    """Compact current-state report; safe to read from every operator PC."""
+    payload = repo.get_session_payload(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from domain.models.prints import PrintRecord
+    from sqlalchemy import select
+    from storage.repositories.prints_repo import PrintsRepository
+
+    print_row = repo.db.scalar(
+        select(PrintRecord).where(PrintRecord.session_id == session_id).limit(1)
+    )
+    print_record = PrintsRepository(repo.db).get_print_record(print_row.record_id) if print_row else None
+    outcomes = repo.list_quality_outcomes(session_id=session_id)
+    if print_record:
+        # Include labels created before the logs were linked. De-duplicate rows
+        # that now carry both the print and session references.
+        by_id = {row["outcome_id"]: row for row in outcomes}
+        for row in repo.list_quality_outcomes(print_record_id=print_record["record_id"]):
+            by_id[row["outcome_id"]] = row
+        outcomes = list(by_id.values())
+    return build_operator_report(
+        session_id=session_id,
+        group=payload.get("group") or {},
+        quality_outcomes=outcomes,
+        print_record=print_record,
+    )
 
 
 @router.post("/{session_id}/analyze")
@@ -323,7 +359,19 @@ def _generate_report(session_id: str, include_markdown: bool, repo: RuntimeRepos
     files = repo.get_session_files(session_id, rehydrate=True)
     if files is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    report = generate_session_json_report(session_id, files)
+    session_payload = repo.get_session_payload(session_id) or {}
+    quality_outcomes = repo.list_quality_outcomes(session_id=session_id)
+    report = generate_session_json_report(
+        session_id,
+        files,
+        quality_outcomes=quality_outcomes,
+    )
+    report["operator_report"] = build_operator_report(
+        session_id=session_id,
+        group=session_payload.get("group") or {},
+        quality_outcomes=quality_outcomes,
+    )
+    report["log_insights"] = (session_payload.get("group") or {}).get("log_insights") or {}
     if include_markdown:
         report["markdown"] = generate_markdown_report(report)
     repo.save_report(report)

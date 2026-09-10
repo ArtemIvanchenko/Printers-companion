@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from api.main import app
 from api.routes.prints import _calibration_mismatch_warning
@@ -66,9 +67,14 @@ class _MemoryObjectStore:
 
 
 @pytest.fixture
-def memory_store(monkeypatch):
+def memory_store(monkeypatch, tmp_path):
     _MemoryObjectStore.storage = {}
     monkeypatch.setattr("api.routes.prints.ObjectStore", _MemoryObjectStore)
+    settings = get_settings().model_copy(update={
+        "nas_outbox_path": str(tmp_path / "nas-outbox"),
+        "nas_outbox_max_bytes": 10 * 1024 * 1024,
+    })
+    monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
     return _MemoryObjectStore
 
 
@@ -208,9 +214,9 @@ class TestHatchDistanceOnThePrint:
     """Hatch distance belongs to the print, not to the material preset.
 
     It used to come only from the per-material preset, which held a fixed
-    0.12 mm — while the machine's own Monitor100 log shows the applied value
-    moving 0.16 -> 0.10 -> 0.90 mm across steel jobs. Scan length goes as
-    ~1/hatch, so that one number rescales the entire estimate.
+    0.12 mm, while an individual slicing strategy may use another value. Scan
+    length goes approximately as 1/hatch, so this belongs in the print input.
+    Unlabelled Monitor100 ``|P|`` cells are deliberately not used as evidence.
     """
 
     def test_hatch_is_stored_and_returned(self):
@@ -322,6 +328,23 @@ class TestScanParamsResolution:
 
 
 class TestPrintRecordReads:
+    def test_has_logs_filters_before_pagination_and_counts(self):
+        from domain.models.sessions import BuildSession
+        from storage.db.session import session_scope
+
+        linked = _create_record(name="linked-filter-fixture")
+        unlinked = _create_record(name="unlinked-filter-fixture")
+        with session_scope() as db:
+            db.add(BuildSession(session_id="session_filter_fixture",
+                                origin_compute_node_id=linked["origin_compute_node_id"]))
+            db.flush()
+            PrintsRepository(db).link_session(linked["record_id"], "session_filter_fixture")
+        present = client.get("/prints", params={"q": "filter-fixture", "has_logs": True, "limit": 1}).json()
+        absent = client.get("/prints", params={"q": "filter-fixture", "has_logs": False, "limit": 1}).json()
+        assert present["total"] == absent["total"] == 1
+        assert present["items"][0]["record_id"] == linked["record_id"]
+        assert absent["items"][0]["record_id"] == unlinked["record_id"]
+
     def test_get_returns_record_with_files(self):
         record = _create_record()
         response = client.get(f"/prints/{record['record_id']}")
@@ -494,15 +517,76 @@ class TestPrintFiles:
             )
         assert _MemoryObjectStore.storage == {}
 
-    def test_upload_unavailable_store_returns_503(self):
+    def test_transient_database_failure_keeps_remote_and_local_retry_copy(
+        self,
+        memory_store,
+        monkeypatch,
+        tmp_path,
+    ):
+        record = _create_record()
+        settings = get_settings().model_copy(update={
+            "nas_outbox_path": str(tmp_path / "retry-outbox"),
+            "nas_outbox_max_bytes": 1024 * 1024,
+        })
+        monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
+
+        def fail_insert(self, values):
+            raise OperationalError("INSERT print_record_files", {}, ConnectionError("NAS down"))
+
+        monkeypatch.setattr(PrintsRepository, "add_print_file", fail_insert)
+        response = client.post(
+            f"/prints/{record['record_id']}/files",
+            files={"file": ("drawing.pdf", io.BytesIO(b"durable"), "application/pdf")},
+            data={"file_type": "doc"},
+        )
+
+        assert response.status_code == 202
+        assert response.json()["queued"] is True
+        assert next((tmp_path / "retry-outbox" / "pending").glob("*/payload")).read_bytes() == b"durable"
+        assert list(_MemoryObjectStore.storage.values()) == [b"durable"]
+
+    def test_upload_unavailable_store_is_queued_locally(self, tmp_path, monkeypatch):
         # conftest stubs ObjectStore.is_available to False by default
+        settings = get_settings().model_copy(update={
+            "nas_outbox_path": str(tmp_path / "nas-outbox"),
+            "nas_outbox_max_bytes": 1024 * 1024,
+        })
+        monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
         record = _create_record()
         response = client.post(
             f"/prints/{record['record_id']}/files",
             files={"file": ("a.stl", io.BytesIO(b"x"), "model/stl")},
             data={"file_type": "stl"},
         )
-        assert response.status_code == 503
+        assert response.status_code == 202
+        assert response.json()["queued"] is True
+        assert response.json()["sync_status"] == "pending"
+        payloads = list((tmp_path / "nas-outbox" / "pending").glob("*/payload"))
+        assert len(payloads) == 1
+        assert payloads[0].read_bytes() == b"x"
+
+    def test_upload_from_open_card_survives_complete_nas_outage(self, tmp_path, monkeypatch):
+        record = _create_record()
+        settings = get_settings().model_copy(update={
+            "nas_outbox_path": str(tmp_path / "nas-outbox"),
+            "nas_outbox_max_bytes": 1024 * 1024,
+        })
+        monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
+
+        def database_down(self, record_id):
+            raise OperationalError("SELECT print_records", {}, ConnectionError("NAS down"))
+
+        monkeypatch.setattr(PrintsRepository, "get_print_record", database_down)
+        response = client.post(
+            f"/prints/{record['record_id']}/files",
+            files={"file": ("offline.pdf", io.BytesIO(b"offline"), "application/pdf")},
+            data={"file_type": "doc"},
+        )
+
+        assert response.status_code == 202
+        assert response.json()["queued"] is True
+        payload = next((tmp_path / "nas-outbox" / "pending").glob("*/payload"))
+        assert payload.read_bytes() == b"offline"
 
     def test_download_roundtrip(self, memory_store):
         record = _create_record()

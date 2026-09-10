@@ -20,7 +20,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # imports and noise in the logs. matplotlib arrives via shap/tsfresh.
     MPLCONFIGDIR=/tmp/matplotlib
 
-RUN groupadd --system app && useradd --system --gid app --uid 10001 app
+RUN groupadd --system app \
+    && useradd --system --gid app --uid 10001 app \
+    && mkdir -p /var/lib/printer-companion \
+    && chown app:app /var/lib/printer-companion
 WORKDIR /app
 
 # Copy only dependency manifests — source code is added by child images.

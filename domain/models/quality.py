@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from storage.db.base import Base
@@ -22,12 +22,28 @@ class QualityOutcome(Base):
     __tablename__ = "quality_outcomes"
 
     outcome_id: Mapped[str] = mapped_column(String(80), primary_key=True, default=lambda: _new_id("quality"))
+    # Direct link to the operator-facing print card.  ``session_id`` alone is
+    # not enough: inspection may be recorded before logs are uploaded/linked,
+    # and a card must keep its label while that happens.
+    print_record_id: Mapped[str | None] = mapped_column(
+        ForeignKey("print_records.record_id", ondelete="SET NULL"), index=True
+    )
     session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     build_id: Mapped[str | None] = mapped_column(ForeignKey("build_jobs.build_id"), index=True)
     part_id: Mapped[str | None] = mapped_column(ForeignKey("parts.part_id"), index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     inspection_type: Mapped[str] = mapped_column(String(80), index=True)
     result: Mapped[str] = mapped_column(String(80), index=True)
+    # Generic observations remain useful evidence, but only strict append-only
+    # card verdicts are ground truth for model training.
+    is_final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    supersedes_outcome_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quality_outcomes.outcome_id", ondelete="SET NULL"), index=True
+    )
+    # Human-readable result of the inspection itself (measurement, protocol
+    # conclusion, CT density, dimensional deviation, etc.). ``result`` above
+    # remains the normalized good/defect label consumed by ML.
+    inspection_result: Mapped[str | None] = mapped_column(Text)
     defect_type: Mapped[str | None] = mapped_column(String(120), index=True)
     defect_location: Mapped[str | None] = mapped_column(String(240))
     layer_range: Mapped[dict[str, Any] | None] = mapped_column(JSON)

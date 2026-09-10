@@ -70,6 +70,11 @@ class LayerGeometrySeries:
     # TIME is joint (bodies are co-hatched); this is only for attributing a
     # display share per body. Aligned with the meshes list passed in.
     body_boundary_mm: list[float] = field(default_factory=list)
+    # Approximate Z intervals in which each input body produced a non-empty
+    # sampled section.  Unlike a body's bounding box this does not claim that
+    # an arch, disconnected component or internal gap is printed continuously
+    # from z_min to z_max. Aligned with the input mesh list.
+    body_active_z_intervals_mm: list[list[list[float]]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     def body_shares(self) -> list[float]:
@@ -84,7 +89,11 @@ class LayerGeometrySeries:
         return max(self.z_max - self.z_min, 0.0)
 
     def layer_count(self, layer_thickness_mm: float) -> int:
-        return max(int(math.ceil(self.height_mm / layer_thickness_mm)), 1)
+        ratio = self.height_mm / layer_thickness_mm
+        nearest = round(ratio)
+        if math.isclose(ratio, nearest, rel_tol=1e-6, abs_tol=1e-6):
+            return max(int(nearest), 1)
+        return max(int(math.ceil(ratio)), 1)
 
     def at(self, z: float) -> tuple[float, ...]:
         """Geometry components at height z (linear interpolation between samples)."""
@@ -113,7 +122,10 @@ class LayerGeometrySeries:
                 integral += float(series[0]) * (zs[0] - self.z_min)
                 integral += float(series[-1]) * (self.z_max - zs[-1])
             else:
-                integral = float(series[0]) * self.height_mm if len(series) else 0.0
+                integral = (
+                    float(series[0]) * max(self.height_mm, layer_thickness_mm)
+                    if len(series) else 0.0
+                )
             out[name] = integral / layer_thickness_mm
         return out
 
@@ -130,6 +142,11 @@ class LayerGeometrySeries:
             "z_min": round(self.z_min, 3),
             "z_max": round(self.z_max, 3),
             "body_boundary_mm": [round(v, 1) for v in self.body_boundary_mm],
+            "body_active_z_intervals_mm": [
+                [[round(low, 3), round(high, 3)] for low, high in intervals]
+                for intervals in self.body_active_z_intervals_mm
+            ],
+            "warnings": list(self.warnings),
         }
 
     @classmethod
@@ -147,27 +164,52 @@ class LayerGeometrySeries:
             # list, and body_shares() already splits evenly when it's empty —
             # same behaviour as before this field was added.
             body_boundary_mm=list(data.get("body_boundary_mm") or []),
+            body_active_z_intervals_mm=list(data.get("body_active_z_intervals_mm") or []),
+            warnings=list(data.get("warnings") or []),
         )
 
 
 def resolve_scan_model(params: dict, material: str, layer_thickness_mm: float) -> dict | None:
-    """Fitted scan model for exactly this (material, thickness), or None.
+    """Fitted scan model for this machine/mode, or a legacy exact-mode model.
 
     A fitted model must never be applied to a different mode: real-data
     validation showed cross-mode transfer degrades to worse-than-mean (R² < 0).
     """
     models = params.get("scan_model_by_mat") or {}
-    model = models.get(scan_model_key(material, layer_thickness_mm))
-    if not isinstance(model, dict):
-        return None
-    beta = model.get("beta")
-    if not isinstance(beta, list) or len(beta) != len(GEOMETRY_FEATURES) + 1:
-        return None
-    return model
+    keys = []
+    printer_id = params.get("printer_id")
+    laser_count = int(params.get("laser_count") or 1)
+    if printer_id:
+        keys.append(machine_mode_key(
+            str(printer_id), material, layer_thickness_mm, laser_count,
+        ))
+    # Backward-compatible single-machine models used this shorter key.
+    keys.append(scan_model_key(material, layer_thickness_mm))
+    for key in keys:
+        model = models.get(key)
+        if not isinstance(model, dict):
+            continue
+        beta = model.get("beta")
+        if isinstance(beta, list) and len(beta) == len(GEOMETRY_FEATURES) + 1:
+            return model
+    return None
 
 
 def scan_model_key(material: str, layer_thickness_mm: float) -> str:
     return f"{material}@{layer_thickness_mm:.3f}"
+
+
+def machine_mode_key(
+    printer_id: str | None,
+    material: str,
+    layer_thickness_mm: float,
+    laser_count: int,
+) -> str:
+    """Calibration scope; legacy key when a physical machine is unknown."""
+    legacy = scan_model_key(material, layer_thickness_mm)
+    if not printer_id:
+        return legacy
+    return f"{printer_id}|{legacy}|lasers={max(int(laser_count), 1)}"
 
 
 def scan_seconds_from_model(
@@ -185,6 +227,33 @@ def scan_seconds_from_model(
     ) / max(laser_count, 1)
     seconds += beta[len(GEOMETRY_FEATURES)] * layer_count
     return seconds
+
+
+def scan_seconds_by_layer_from_model(
+    series: LayerGeometrySeries,
+    layer_thickness_mm: float,
+    laser_count: int,
+    model: dict,
+) -> list[float]:
+    """Fitted burn prediction at every physical layer centre.
+
+    The aggregate linear scan model can be summed from geometry totals.  A
+    minimum machine-cycle floor is nonlinear, however, so downstream cycle
+    calculation must retain the distribution over layers and apply ``max``
+    before summing.
+    """
+    beta = model["beta"]
+    out: list[float] = []
+    for index in range(series.layer_count(layer_thickness_mm)):
+        z = series.z_min + (index + 0.5) * layer_thickness_mm
+        geometry = series.at(z)
+        seconds = sum(
+            beta[position] * value
+            for position, value in enumerate(geometry)
+        ) / max(laser_count, 1)
+        seconds += beta[len(GEOMETRY_FEATURES)]
+        out.append(max(float(seconds), 0.0))
+    return out
 
 
 
@@ -306,7 +375,9 @@ def _polygons_to_paths(polygons: list) -> list:
     return paths
 
 
-def _hatch_level(meshes: list, z: float, hatcher) -> tuple[float, float, float, float, float]:
+def _hatch_level(
+    meshes: list, z: float, hatcher,
+) -> tuple[float, float, float, float, float, list[float]]:
     """Co-hatch every body's closed sections at z; returns geometry components."""
     import numpy as np
     import pyslm
@@ -351,6 +422,7 @@ def compute_layer_series(
     hatch_distance_mm: float,
     layer_thickness_mm: float,
     uniform_levels: int = _UNIFORM_LEVELS,
+    build_origin_z_mm: float | None = None,
 ) -> LayerGeometrySeries:
     """Co-hatched geometry series for a plate of trimesh bodies (shared coords).
 
@@ -365,15 +437,30 @@ def compute_layer_series(
     if not meshes:
         raise EstimationError("Не передано ни одного тела")
 
-    z_min = min(float(m.bounds[0][2]) for m in meshes)
+    geometry_z_min = min(float(m.bounds[0][2]) for m in meshes)
     z_max = max(float(m.bounds[1][2]) for m in meshes)
-    if z_max - z_min <= 0:
-        raise EstimationError("Нулевая высота компоновки")
+    # A raised body does not by itself prove whether native supports extend to
+    # Z=0 (real Magics archives contain both coordinate conventions). Use a
+    # caller-confirmed origin when available; otherwise the conservative
+    # contract begins at the lowest supplied printable geometry and labels the
+    # origin as unconfirmed in the prediction snapshot.
+    z_min = geometry_z_min if build_origin_z_mm is None else float(build_origin_z_mm)
+    if geometry_z_min < z_min - 1e-6:
+        raise EstimationError(
+            f"Часть STL ниже заданного начала печати Z={z_min:g} мм; "
+            "исправьте координаты или build_origin_z_mm"
+        )
+    if z_max <= z_min:
+        raise EstimationError("Нулевая высота компоновки относительно начала печати")
+    geometry_warnings: list[str] = []
 
     pad = layer_thickness_mm / 2.0
-    levels: set[float] = set(
-        float(z) for z in _linspace(z_min + pad, z_max - pad, uniform_levels)
-    )
+    if z_max - z_min <= layer_thickness_mm * (1.0 + 1e-8):
+        levels: set[float] = {(z_min + z_max) / 2.0}
+    else:
+        levels = set(
+            float(z) for z in _linspace(z_min + pad, z_max - pad, uniform_levels)
+        )
     # Body boundaries: the geometry changes discontinuously where a body starts
     # or ends, so sample just inside each boundary.
     for mesh in meshes:
@@ -407,6 +494,7 @@ def compute_layer_series(
 
     columns = {name: [] for name in GEOMETRY_FEATURES}
     body_totals = [0.0] * len(meshes)
+    body_activity = [[] for _ in meshes]
     for h, c, j, nj, o, per_body in results:
         columns["hatch_mm"].append(h)
         columns["contour_mm"].append(c)
@@ -415,9 +503,40 @@ def compute_layer_series(
         columns["open_mm"].append(o)
         for i, v in enumerate(per_body):
             body_totals[i] += v
+            body_activity[i].append(v > _FIX_EPS)
+
+    # Convert the sampled activity mask to compact Z intervals. Boundaries are
+    # halfway to the neighbouring sample and therefore remain explicitly
+    # approximate; body bounds clip them more tightly in plate_estimator.
+    body_intervals: list[list[list[float]]] = []
+    for activity in body_activity:
+        intervals: list[list[float]] = []
+        start_index: int | None = None
+        for index, active in enumerate([*activity, False]):
+            if active and start_index is None:
+                start_index = index
+            elif not active and start_index is not None:
+                end_index = index - 1
+                low = (
+                    z_min if start_index == 0
+                    else (zs[start_index - 1] + zs[start_index]) / 2.0
+                )
+                high = (
+                    z_max if end_index == len(zs) - 1
+                    else (zs[end_index] + zs[end_index + 1]) / 2.0
+                )
+                intervals.append([float(low), float(high)])
+                start_index = None
+        body_intervals.append(intervals)
 
     series = LayerGeometrySeries(
-        zs=zs, z_min=z_min, z_max=z_max, body_boundary_mm=body_totals, **columns,
+        zs=zs,
+        z_min=z_min,
+        z_max=z_max,
+        body_boundary_mm=body_totals,
+        body_active_z_intervals_mm=body_intervals,
+        **columns,
+        warnings=geometry_warnings,
     )
     if sum(series.hatch_mm) + sum(series.open_mm) <= 0:
         raise EstimationError(

@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 
+from core.config.settings import get_settings
 from storage.db.session import SessionLocal
 from storage.repositories.runtime import RuntimeRepository
 
@@ -74,6 +75,7 @@ class TestRuntimeRepositorySessions:
 
         existing = MagicMock()
         existing.context = {}
+        existing.origin_compute_node_id = get_settings().compute_node_id
         mock_db_session.get.return_value = existing
 
         repo = RuntimeRepository(mock_db_session)

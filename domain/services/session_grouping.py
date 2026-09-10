@@ -32,8 +32,10 @@ Those runs are rejoined afterwards on layer continuity — see
 ``_merge_resumed_runs``.
 """
 import hashlib
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 
 from pydantic import BaseModel, Field
 
@@ -68,6 +70,20 @@ PREFIXLESS_MAX_SPAN = timedelta(hours=36)
 # A run that begins at a layer this low is starting a print, not resuming one.
 # Real logs open at layer 1 or 2 depending on firmware version.
 _FIRST_LAYER_OF_A_PRINT = 2
+
+# A logger restart can lose the timing row for the layer that was in flight.
+# We only bridge one such missing layer when the independently recorded table
+# position proves that the physical Z sequence continued at the same step.
+_MAX_MISSING_BOUNDARY_LAYERS = 1
+
+
+@dataclass(frozen=True)
+class _LayerBoundaryEvidence:
+    first_layer: int
+    last_layer: int
+    first_position: float | None
+    last_position: float | None
+    position_step_per_layer: float | None
 
 
 class SessionGroup(BaseModel):
@@ -210,23 +226,88 @@ def _drop_logless_files(files: list[IngestedFile]) -> list[IngestedFile]:
     return kept
 
 
-def _layer_span(files: list[IngestedFile]) -> tuple[int, int] | None:
-    """(first, last) layer the printer recorded for this run, or None.
+def _layer_boundary_evidence(files: list[IngestedFile]) -> _LayerBoundaryEvidence | None:
+    """Layer range plus independent physical-position evidence for a run.
 
-    Read from the same ``layer_timing_summary`` events the stored per-layer
-    timings come from, so grouping and calibration agree on what a run covered.
+    ``*_time.log`` is the preferred timing source, but real M350 data can lose
+    its final row during a restart even though the main event log records the
+    burn and table position.  Session identity therefore uses both families;
+    calibration still uses only the detailed timing rows.
     """
     layers: list[int] = []
+    positions: dict[int, float] = {}
     for file in files:
-        if file.classification.family != SourceFileFamily.time_log or not file.parse_result:
+        if not file.parse_result:
             continue
         for event in file.parse_result.events:
-            if getattr(event, "event_type", None) != "layer_timing_summary":
+            event_type = getattr(event, "event_type", None)
+            payload = getattr(event, "payload", None) or {}
+            if event_type == "layer_timing_summary":
+                layer = payload.get("layer", getattr(event, "layer", None))
+            elif event_type == "burn_event":
+                layer = getattr(event, "layer", None)
+            else:
                 continue
-            layer = (getattr(event, "payload", None) or {}).get("layer")
             if isinstance(layer, int):
                 layers.append(layer)
-    return (min(layers), max(layers)) if layers else None
+                position = payload.get("table_position")
+                if isinstance(position, (int, float)):
+                    positions[layer] = float(position)
+    if not layers:
+        return None
+
+    first_layer, last_layer = min(layers), max(layers)
+    ordered_positions = sorted(positions.items())
+    per_layer_steps = [
+        (position_b - position_a) / (layer_b - layer_a)
+        for (layer_a, position_a), (layer_b, position_b)
+        in zip(ordered_positions, ordered_positions[1:])
+        if 0 < layer_b - layer_a <= 3
+    ]
+    return _LayerBoundaryEvidence(
+        first_layer=first_layer,
+        last_layer=last_layer,
+        first_position=positions.get(first_layer),
+        last_position=positions.get(last_layer),
+        position_step_per_layer=median(per_layer_steps) if per_layer_steps else None,
+    )
+
+
+def _is_physical_boundary_continuation(
+    previous: _LayerBoundaryEvidence,
+    following: _LayerBoundaryEvidence,
+) -> bool:
+    """True when a one-row logger hole still follows the same physical Z path."""
+    layer_delta = following.first_layer - previous.last_layer
+    # Firmware commonly copies the boundary layer into both files (delta 0),
+    # or opens the next file at the following layer (delta 1).
+    if layer_delta in (0, 1):
+        return True
+    if layer_delta < 0:
+        return False
+    missing_layers = layer_delta - 1
+    if missing_layers > _MAX_MISSING_BOUNDARY_LAYERS:
+        return False
+
+    if previous.last_position is None or following.first_position is None:
+        return False
+    steps = [
+        step for step in (
+            previous.position_step_per_layer,
+            following.position_step_per_layer,
+        )
+        if step is not None and abs(step) > 1e-9
+    ]
+    if not steps:
+        return False
+    if len(steps) == 2 and steps[0] * steps[1] <= 0:
+        return False
+
+    expected_step = median(steps)
+    observed_delta = following.first_position - previous.last_position
+    expected_delta = expected_step * layer_delta
+    tolerance = max(5.0, abs(expected_delta) * 0.10)
+    return abs(observed_delta - expected_delta) <= tolerance
 
 
 def _merge_resumed_runs(
@@ -244,6 +325,8 @@ def _merge_resumed_runs(
     A run resumes the previous one when it does not start at the beginning and
     picks up at the previous run's last layer (the same layer is usually
     reported twice, once by each side, so ``last`` and ``last + 1`` both count).
+    One missing boundary layer is also accepted, but only when main-log table
+    positions independently prove the expected physical Z step.
     Confirmed on every real log: 27.05 ended at 384 and 28.05 opened at 384;
     23.03 ended at 6843 and 27.03 opened at 6843; 08.06 ended at 1133 and 09.06
     opened at 1134. Reprints of the same plate open at layer 2 and so stay
@@ -254,19 +337,20 @@ def _merge_resumed_runs(
     27→28.05 but four for 23→27.03. ``max_span`` is only an outer bound.
 
     Chaining is safe here, unlike the time-gap clustering this module warns
-    about: layer numbers must line up exactly, so A→B→C means one print resumed
-    twice, not two prints that happened to fall near each other.
+    about: layer numbers must line up, with the sole position-proven one-layer
+    exception above. Thus A→B→C means one print resumed twice, not two prints
+    that merely happened to fall near each other.
     """
     merged: list[tuple[str | None, SessionGroup]] = []
-    spans: list[tuple[int, int] | None] = []
+    boundaries: list[_LayerBoundaryEvidence | None] = []
     for prefix, group in pending:
-        span = _layer_span(group.files)
-        prev_span = spans[-1] if spans else None
+        boundary = _layer_boundary_evidence(group.files)
+        previous = boundaries[-1] if boundaries else None
         if (
-            span is not None
-            and prev_span is not None
-            and span[0] > _FIRST_LAYER_OF_A_PRINT
-            and prev_span[1] <= span[0] <= prev_span[1] + 1
+            boundary is not None
+            and previous is not None
+            and boundary.first_layer > _FIRST_LAYER_OF_A_PRINT
+            and _is_physical_boundary_continuation(previous, boundary)
             and group.start_ts is not None
             and merged[-1][1].start_ts is not None
             and group.start_ts - merged[-1][1].start_ts <= max_span
@@ -275,12 +359,32 @@ def _merge_resumed_runs(
             head.files.extend(group.files)
             head.end_ts = max(filter(None, (head.end_ts, group.end_ts)), default=head.end_ts)
             head.reasons.append("resumed_run")
+            if boundary.first_layer == previous.last_layer + 2:
+                head.reasons.append("resumed_run_position_continuity")
             head.confidence = _confidence(head)
             # The print now reaches this run's last layer.
-            spans[-1] = (prev_span[0], span[1])
+            boundaries[-1] = _LayerBoundaryEvidence(
+                first_layer=previous.first_layer,
+                last_layer=boundary.last_layer,
+                first_position=previous.first_position,
+                last_position=boundary.last_position,
+                position_step_per_layer=(
+                    median([
+                        step for step in (
+                            previous.position_step_per_layer,
+                            boundary.position_step_per_layer,
+                        )
+                        if step is not None
+                    ])
+                    if any(step is not None for step in (
+                        previous.position_step_per_layer,
+                        boundary.position_step_per_layer,
+                    )) else None
+                ),
+            )
             continue
         merged.append((prefix, group))
-        spans.append(span)
+        boundaries.append(boundary)
     return merged
 
 

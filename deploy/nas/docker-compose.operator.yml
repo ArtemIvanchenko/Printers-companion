@@ -1,8 +1,8 @@
 # Local compute stack for EVERY operator workstation.
 #
-# PostgreSQL and MinIO live on the NAS.  API, import worker, estimator, watcher
-# and Redis stay on this workstation, so uploaded data is calculated where it
-# originated. The global scheduler is disabled in NAS mode because its
+# PostgreSQL and MinIO live on the NAS. API, import worker, estimator, watcher,
+# nas-sync and Redis stay on this workstation, so uploaded data is calculated
+# where it originated. The global scheduler is disabled in NAS mode because its
 # historical aggregate jobs are not tied to the PC that created each session.
 #
 # Requires Docker Compose >= 2.24.4 for the !override/!reset merge tags.
@@ -10,7 +10,7 @@
 # Normal operator PC:
 #   docker compose --env-file deploy/nas/.env.operator \
 #     -f docker-compose.yml -f deploy/nas/docker-compose.operator.yml \
-#     up -d api worker estimator watcher redis
+#     up -d api worker estimator watcher nas-sync redis
 #
 x-operator-runtime: &operator-runtime
   environment:
@@ -77,6 +77,12 @@ services:
     depends_on: !override
       redis:
         condition: service_healthy
+
+  nas-sync:
+    <<: *operator-runtime
+    env_file: !reset []
+    volumes:
+      - *operator-state
 
   estimator:
     <<: *operator-runtime

@@ -1,9 +1,9 @@
 """The dashboard template and its render context must stay in sync.
 
 The two sides are joined only by string keys, so nothing used to notice when
-they drifted. Seven values (the old EXPR2, EXPR5 and EXPR38…EXPR42) were being
-computed on every page load after their placeholders had been deleted from the
-markup, and a placeholder with no matching key renders as the literal
+they drifted. Aggregate values that belonged to the old landing-page charts
+were being computed on every page load after their placeholders had been
+deleted from the markup, and a placeholder with no matching key renders as the literal
 ``{!name!}`` on the page rather than failing.
 """
 import re
@@ -127,3 +127,81 @@ def test_print_card_log_selection_is_sent_as_one_multipart_batch():
     assert "files.forEach(file => fd.append('files', file))" in source
     assert source.count("fetch(`/prints/${recordId}/import-logs`") == 1
     assert "for (" not in source
+
+
+def test_print_attachment_upload_explains_deferred_nas_sync():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    source = _javascript_function(html, "uploadArchiveFile", "previewArchiveStl")
+
+    assert "result.queued" in source
+    assert "будет отправлен на NAS автоматически" in source
+
+
+def test_quality_correction_sends_the_current_final_verdict_id():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    start = html.index("async function savePrintQualityOutcome(")
+    end = html.index("function _renderPcProcess(", start)
+    source = html[start:end]
+
+    assert "find(item => item.is_final)" in source
+    assert "payload.supersedes_outcome_id = latestFinalOutcome.outcome_id" in source
+
+
+def test_dashboard_uses_explicit_motion_tokens_and_reduced_motion():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    assert "transition: all" not in html
+    assert "--ease-out: cubic-bezier(0.23, 1, 0.32, 1)" in html
+    assert "@media (prefers-reduced-motion: reduce)" in html
+    assert "animation: alarm-pulse" not in html
+
+
+def test_home_prioritizes_print_cards_over_aggregate_charts():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    assert 'class="home-print-grid"' in html
+    assert 'id="home-recent-sessions"' in html
+    assert "_renderHomeStlPreview" in html
+    assert "fetch('/prints?limit=100')" in html
+    assert "linesChart" not in html
+    assert "Строк логов по сессиям" not in html
+    assert "materialsChart" not in html
+    assert "typesChart" not in html
+    assert "durationChart" not in html
+
+
+def test_dashboard_uses_dark_handoff_shell_and_stl_preview():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    assert "--bg-page: #201e1d" in html
+    assert "--color-primary: #c67139" in html
+    assert 'id="nav-add"' in html
+    assert "home-add-card" in html
+    assert "pc-preview-host" in html
+    assert "home-print-card.needs-logs" in html
+
+
+def test_handoff_secondary_screens_are_api_backed_and_complete():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    for page in ("add", "estimate", "anomalies", "quality", "journal", "settings"):
+        assert f'id="page-design-{page}"' in html
+    assert "_designAccuracyChart" in html
+    assert "аномалия вызвала дефект" not in html.lower()
+    assert "паузы оператора не включены" in html
+    assert "Это частота, а не доказательство причины дефекта" in html
+    assert "saveDesignJournalEntry" in html
+    assert "correction_locked" in html
+
+
+def test_print_card_actions_target_current_record_and_camera_switches_are_real():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    assert "uploadArchiveLogs('${rec.record_id}',this.files)" in html
+    assert "uploadArchiveFile('${rec.record_id}',this.files[0])" in html
+    assert "setCamera(['45', 'top', 'front'][buttonIndex])" in html
+    assert "camera.position.set(0, 0, viewDistance)" in html
+    assert "camera.position.set(0, -viewDistance, 0)" in html
+
+
+def test_dashboard_dialogs_and_errors_are_non_blocking_and_accessible():
+    html = _TEMPLATE.read_text(encoding="utf-8")
+    assert 'role="dialog" aria-modal="true"' in html
+    assert 'id="app-toast-region"' in html
+    assert "function showToast(" in html
+    assert "alert(" not in html

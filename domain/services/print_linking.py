@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from analytics.prediction.pair_matching import PairMatchScore, score_print_session_pair
 from core.config.settings import get_settings
 from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession
@@ -35,6 +36,8 @@ def _link(
     links: list[dict],
     *,
     origin_compute_node_id: str,
+    evidence: PairMatchScore | None = None,
+    method: str = "automatic_evidence",
 ) -> bool:
     from storage.repositories.prints_repo import PrintsRepository
 
@@ -51,9 +54,62 @@ def _link(
             session.session_id,
         )
         return False
+    if evidence is not None:
+        metadata = dict(record.metadata_json or {})
+        metadata["session_link_evidence"] = {
+            "method": method,
+            **evidence.as_dict(),
+        }
+        record.metadata_json = metadata
     links.append({"record_id": record.record_id, "session_id": session.session_id})
     logger.info("print_linking: linked %s ↔ %s", record.record_id, session.session_id)
     return True
+
+
+def _record_expected_layers(record: PrintRecord) -> int | None:
+    prediction = (record.metadata_json or {}).get("prediction") or {}
+    value = prediction.get("layer_count")
+    if value is None and isinstance(prediction.get("scan_geometry"), dict):
+        geometry = prediction["scan_geometry"]
+        thickness = geometry.get("layer_thickness_mm") or record.layer_thickness_mm
+        z_min, z_max = geometry.get("z_min"), geometry.get("z_max")
+        if all(isinstance(item, (int, float)) for item in (thickness, z_min, z_max)) and thickness > 0:
+            value = round((z_max - z_min) / thickness)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _session_last_layer(session: BuildSession) -> int | None:
+    group = ((session.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
+    features = group.get("features") or {}
+    value = features.get("last_layer") or features.get("layers")
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _session_material(session: BuildSession) -> str | None:
+    group = ((session.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
+    material = (group.get("features") or {}).get("material")
+    return str(material) if material else None
+
+
+def _score(record: PrintRecord, session: BuildSession, *, explicit_hint: bool = False) -> PairMatchScore:
+    anchor = _as_utc(record.printed_at or record.created_at)
+    delta = (_as_utc(session.start_ts) - anchor).total_seconds() / 3600 if session.start_ts else None
+    return score_print_session_pair(
+        date_delta_hours=delta,
+        expected_layers=_record_expected_layers(record),
+        observed_last_layer=_session_last_layer(session),
+        expected_material=record.material,
+        observed_material=_session_material(session),
+        explicit_import_hint=explicit_hint,
+    )
 
 
 def _resolve_import_hints(
@@ -78,22 +134,26 @@ def _resolve_import_hints(
             if s.session_id and _as_utc(s.start_ts).date().isoformat() == hint.get("date")
         ]
         if len(matches) == 1:
-            _link(
-                db,
-                record,
-                matches[0],
-                links,
-                origin_compute_node_id=origin_compute_node_id,
-            )
+            evidence = _score(record, matches[0], explicit_hint=True)
+            linked = False
+            if evidence.eligible:
+                linked = _link(
+                    db,
+                    record,
+                    matches[0],
+                    links,
+                    origin_compute_node_id=origin_compute_node_id,
+                    evidence=evidence,
+                    method="operator_import_hint",
+                )
+            if linked:
+                meta = dict(record.metadata_json or {})
+                meta.pop("log_import_hint", None)
+                record.metadata_json = meta
         elif len(matches) > 1:
             logger.info("print_linking: hint for %s matches %d sessions — skipped",
                         record.record_id, len(matches))
             continue
-        # Hint resolved (or no session yet — keep it for the next sweep)
-        if len(matches) == 1:
-            meta = dict(record.metadata_json or {})
-            meta.pop("log_import_hint", None)
-            record.metadata_json = meta
 
 
 def auto_link_print_records(
@@ -149,25 +209,42 @@ def auto_link_print_records(
         sessions = [s for s in sessions if s.session_id not in linked_sessions]
         records = [r for r in records if r.session_id is None]
 
-    # record → matching sessions and session → matching records
-    record_candidates: dict[str, list[BuildSession]] = {}
-    session_hits: dict[str, int] = {}
+    # Rank by independent evidence. Date only opens the candidate window; it
+    # never links a card automatically because file preparation dates can be a
+    # day (or more) earlier than the actual print.
+    record_candidates: dict[str, list[tuple[BuildSession, PairMatchScore]]] = {}
     for record in records:
         anchor = _as_utc(record.printed_at or record.created_at)
         matches = [s for s in sessions if abs(_as_utc(s.start_ts) - anchor) <= window]
-        record_candidates[record.record_id] = matches
-        for s in matches:
-            session_hits[s.session_id] = session_hits.get(s.session_id, 0) + 1
+        scored = [(session, _score(record, session)) for session in matches]
+        record_candidates[record.record_id] = sorted(
+            (row for row in scored if row[1].eligible),
+            key=lambda row: row[1].score,
+            reverse=True,
+        )
+
+    proposals: dict[str, tuple[BuildSession, PairMatchScore]] = {}
+    for record_id, ranked in record_candidates.items():
+        if not ranked:
+            continue
+        best_session, best_score = ranked[0]
+        runner_up = ranked[1][1].score if len(ranked) > 1 else None
+        if not best_score.auto_link_allowed:
+            logger.info("print_linking: record %s has only weak/date-only evidence — skipped", record_id)
+            continue
+        if runner_up is not None and best_score.score - runner_up < 15:
+            logger.info("print_linking: record %s has no 15-point evidence margin — skipped", record_id)
+            continue
+        proposals[record_id] = (best_session, best_score)
+
+    session_hits: dict[str, int] = {}
+    for session, _ in proposals.values():
+        session_hits[session.session_id] = session_hits.get(session.session_id, 0) + 1
 
     by_id = {r.record_id: r for r in records}
     used_sessions: set[str] = set()
-    for record_id, matches in record_candidates.items():
-        if len(matches) != 1:
-            if len(matches) > 1:
-                logger.info("print_linking: record %s matches %d sessions — skipped (ambiguous)",
-                            record_id, len(matches))
-            continue
-        session = matches[0]
+    for record_id, proposal in proposals.items():
+        session, evidence = proposal
         if session_hits.get(session.session_id, 0) != 1:
             logger.info("print_linking: session %s matches several records — skipped (ambiguous)",
                         session.session_id)
@@ -182,6 +259,7 @@ def auto_link_print_records(
             session,
             links,
             origin_compute_node_id=origin_compute_node_id,
+            evidence=evidence,
         ):
             used_sessions.add(session.session_id)
 
@@ -228,8 +306,14 @@ def session_candidates(db: Session, record_id: str, window_hours: float | None =
                 "end_ts": _as_utc(s.end_ts).isoformat() if s.end_ts else None,
                 "duration_min": duration_min,
                 "hours_from_record_date": round(delta.total_seconds() / 3600, 1),
+                "match_evidence": _score(record, s).as_dict(),
             })
-    out.sort(key=lambda c: c["hours_from_record_date"])
+    out.sort(
+        key=lambda c: (
+            -(c["match_evidence"]["score"] or 0),
+            c["hours_from_record_date"],
+        )
+    )
     return out
 
 

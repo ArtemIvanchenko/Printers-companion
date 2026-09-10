@@ -24,7 +24,7 @@ $From = if ($LastDeployed) { $LastDeployed } else { $Local }
 
 if ($Local -ne $Remote) {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm')] Обновление: $($Local.Substring(0,8)) -> $($Remote.Substring(0,8))" | Add-Content $Log
-    git pull origin main -q
+    git pull --ff-only origin main -q
     if ($LASTEXITCODE -ne 0) { throw "git pull failed with exit code $LASTEXITCODE" }
 }
 
@@ -38,7 +38,15 @@ if ($Changed -match 'Dockerfile\.base|requirements') {
 
 # Rebuild and restart all currently running app services (dynamic — respects active profiles).
 $Running  = docker compose ps --services --filter status=running 2>$null
-$Services = if ($Running) { $Running } else { @("api", "worker", "watcher", "scheduler") }
+$Services = if ($Running) { $Running } else { @("api", "worker", "estimator", "nas-sync", "watcher", "scheduler") }
+# Complete an older operator stack without starting compute on storage-only NAS.
+$Services = @($Services)
+if ($Services -contains "api" -or $Services -contains "worker") {
+    foreach ($Required in @("estimator", "nas-sync")) {
+        if ($Services -notcontains $Required) { $Services += $Required }
+    }
+}
+$env:GIT_COMMIT = (git rev-parse --short HEAD).Trim()
 
 docker compose up -d --build @Services 2>&1 | Add-Content $Log
 if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }

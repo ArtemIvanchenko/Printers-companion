@@ -16,3 +16,13 @@ def test_event_log_supports_cp1251_russian_and_layer(tmp_path: Path) -> None:
     assert result.events[1].layer == 12
     assert result.events[1].payload["vertical_position"] == 0.45
 
+
+def test_event_log_recognises_machine_completion_phrase(tmp_path: Path) -> None:
+    path = tmp_path / "10.07.2026.log"
+    path.write_bytes("14:31:49 Изготовление окончено\n".encode("cp1251"))
+
+    result = EventLogParser().parse(path, ParserContext(source_file_id="file_finish"))
+
+    assert len(result.events) == 1
+    assert result.events[0].event_type == "finish"
+    assert result.events[0].phase == "finish"

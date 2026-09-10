@@ -33,6 +33,10 @@ from operator_journal.notifications import NotificationMessage
 logger = logging.getLogger(__name__)
 
 
+class QualityOutcomeConflict(RuntimeError):
+    """A final quality verdict does not extend the card's current audit chain."""
+
+
 def _sanitize_for_json(obj: Any) -> Any:
     """Recursively replace NaN/Inf floats with None so the payload is valid JSON.
 
@@ -856,16 +860,21 @@ class RuntimeRepository:
         rows = self.db.scalars(select(OperatorJournalEntry).order_by(OperatorJournalEntry.created_at.desc())).all()
         return [_operator_journal_entry_to_dict(row) for row in rows]
 
-    def save_quality_outcome(self, outcome: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _quality_outcome_values(outcome: dict[str, Any]) -> dict[str, Any]:
+        """Map an API payload to the persisted quality-outcome columns."""
         outcome = jsonable_encoder(outcome)
-        outcome_id = outcome["outcome_id"]
-        values = {
+        return {
+            "print_record_id": outcome.get("print_record_id"),
             "session_id": outcome.get("session_id"),
             "build_id": outcome.get("build_id"),
             "part_id": outcome.get("part_id"),
             "timestamp": _parse_datetime(outcome.get("timestamp")) or datetime.now(timezone.utc),
             "inspection_type": outcome.get("inspection_type", "visual"),
             "result": outcome.get("result", "unknown"),
+            "is_final": bool(outcome.get("is_final", False)),
+            "supersedes_outcome_id": outcome.get("supersedes_outcome_id"),
+            "inspection_result": outcome.get("inspection_result"),
             "defect_type": outcome.get("defect_type"),
             "defect_location": outcome.get("defect_location"),
             "layer_range": outcome.get("layer_range"),
@@ -875,16 +884,96 @@ class RuntimeRepository:
             "created_by": outcome.get("created_by", "unknown"),
             "evidence_links": outcome.get("evidence_links", []),
         }
-        self._upsert(QualityOutcome, outcome_id, "outcome_id", values)
+
+    def create_quality_outcome(self, outcome: dict[str, Any]) -> dict[str, Any]:
+        """Insert an inspection row without ever updating an existing verdict."""
+        outcome = jsonable_encoder(outcome)
+        outcome_id = str(outcome["outcome_id"])
+        if self.db.get(QualityOutcome, outcome_id) is not None:
+            raise ValueError(f"Quality outcome '{outcome_id}' already exists")
+
+        supersedes_id = outcome.get("supersedes_outcome_id")
+        if bool(outcome.get("is_final")):
+            print_record_id = outcome.get("print_record_id")
+            if not print_record_id:
+                raise ValueError("A final quality verdict must belong to a print card")
+
+            # All final verdicts for one card form one append-only chain. Locking
+            # the card serialises two operator PCs before either reads the head;
+            # the second request therefore sees the first one's committed head
+            # and receives a conflict instead of creating a competing branch.
+            from domain.models.prints import PrintRecord
+
+            card = self.db.scalar(
+                select(PrintRecord)
+                .where(PrintRecord.record_id == str(print_record_id))
+                .with_for_update()
+            )
+            if card is None:
+                raise QualityOutcomeConflict("Карточка печати больше не существует")
+            current = self.db.scalar(
+                select(QualityOutcome)
+                .where(
+                    QualityOutcome.print_record_id == str(print_record_id),
+                    QualityOutcome.is_final.is_(True),
+                )
+                .order_by(QualityOutcome.timestamp.desc(), QualityOutcome.outcome_id.desc())
+                .with_for_update()
+                .limit(1)
+            )
+            if current is None:
+                if supersedes_id:
+                    raise QualityOutcomeConflict(
+                        "Первый итог контроля не должен ссылаться на исправляемую запись"
+                    )
+            elif str(supersedes_id or "") != current.outcome_id:
+                raise QualityOutcomeConflict(
+                    "Итог контроля уже изменён; обновите карточку и повторите исправление"
+                )
+        elif supersedes_id:
+            raise ValueError("Only a final verdict can supersede another final verdict")
+
+        row = QualityOutcome(
+            outcome_id=outcome_id,
+            **self._quality_outcome_values(outcome),
+        )
+        self.db.add(row)
         self.flush()
         return outcome
+
+    def save_quality_outcome(self, outcome: dict[str, Any]) -> dict[str, Any]:
+        """Backward-compatible name for the create-only persistence operation."""
+        return self.create_quality_outcome(outcome)
+
+    def link_quality_outcome_session(self, outcome_id: str, session_id: str) -> dict[str, Any]:
+        """Link an interim observation without exposing a generic row update."""
+        row = self.db.get(QualityOutcome, outcome_id)
+        if row is None:
+            raise ValueError(f"Quality outcome '{outcome_id}' does not exist")
+        if row.is_final:
+            raise ValueError("Final quality outcomes are immutable")
+        row.session_id = session_id
+        self.flush()
+        return _quality_outcome_to_dict(row)
 
     def get_quality_outcome(self, outcome_id: str) -> dict[str, Any] | None:
         row = self.db.get(QualityOutcome, outcome_id)
         return _quality_outcome_to_dict(row) if row else None
 
-    def list_quality_outcomes(self) -> list[dict[str, Any]]:
-        rows = self.db.scalars(select(QualityOutcome).order_by(QualityOutcome.timestamp.desc())).all()
+    def list_quality_outcomes(
+        self,
+        *,
+        session_id: str | None = None,
+        print_record_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        stmt = select(QualityOutcome)
+        if session_id is not None:
+            stmt = stmt.where(QualityOutcome.session_id == session_id)
+        if print_record_id is not None:
+            stmt = stmt.where(QualityOutcome.print_record_id == print_record_id)
+        rows = self.db.scalars(
+            stmt.order_by(QualityOutcome.timestamp.desc(), QualityOutcome.outcome_id.desc())
+        ).all()
         return [_quality_outcome_to_dict(row) for row in rows]
 
     def save_historical_verdict(self, verdict: dict[str, Any]) -> None:
@@ -1009,6 +1098,44 @@ class RuntimeRepository:
         }
         return self._upsert(CanonicalEvent, event_id, "event_id", values)
 
+    def save_canonical_event_batch(self, events: list[dict[str, Any]]) -> int:
+        """Idempotent bounded writes; avoid a NAS SELECT per machine event.
+
+        The caller owns commit/rollback and lease checks. Preserve the original
+        created_at on retries, updating the same fields as save_canonical_event.
+        """
+        if not events:
+            return 0
+        dialect = self.db.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            for event in events:
+                self.save_canonical_event(**event)
+            return len(events)
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+        else:
+            from sqlalchemy.dialects.sqlite import insert
+        rows = {}
+        for event in events:
+            row = {key: None for key in (
+                "session_id", "source_file_id", "ts", "raw_timestamp", "layer",
+                "source_line", "source_offset", "raw_excerpt", "subsystem", "phase",
+            )}
+            row.update({"severity": "info", "confidence": 1.0, "evidence_kind": "machine_log"})
+            row.update(event)
+            row["ts_uncertainty"] = 0.0
+            row["payload"] = row.get("payload") or {}
+            row["provenance"] = row.get("provenance") or [{"source": "parser"}]
+            rows[row["event_id"]] = row
+        values = list(rows.values())
+        self.db.flush()
+        # 25 rows also fit older SQLite's 999-bind limit.
+        for offset in range(0, len(values), 25):
+            statement = insert(CanonicalEvent).values(values[offset:offset + 25])
+            updates = {key: getattr(statement.excluded, key) for key in values[0] if key != "event_id"}
+            self.db.execute(statement.on_conflict_do_update(index_elements=["event_id"], set_=updates))
+        return len(events)
+
     def list_canonical_events_by_session(self, session_id: str) -> list[CanonicalEvent]:
         """Get all canonical events for a session."""
         return self.db.scalars(
@@ -1078,8 +1205,9 @@ def _operator_journal_entry_to_dict(row: OperatorJournalEntry) -> dict[str, Any]
 
 def _quality_outcome_to_dict(row: QualityOutcome) -> dict[str, Any]:
     return _model_to_dict(row, [
-        "outcome_id", "session_id", "build_id", "part_id", "timestamp",
-        "inspection_type", "result", "defect_type", "defect_location",
+        "outcome_id", "print_record_id", "session_id", "build_id", "part_id", "timestamp",
+        "inspection_type", "result", "is_final", "supersedes_outcome_id",
+        "inspection_result", "defect_type", "defect_location",
         "layer_range", "severity", "notes", "attachments", "created_by", "evidence_links"
     ])
 

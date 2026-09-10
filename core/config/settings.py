@@ -21,6 +21,12 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     log_level: str = "INFO"
+    # Optional confirmed process thresholds: {"SO1": {"high": ..., "unit": ..., "confirmed": true}}.
+    # Empty uses explicitly provisional machine-profile limits, never quality labels.
+    log_insights_thresholds: dict[str, dict] = Field(default_factory=dict)
+    log_insights_max_gap_seconds: float = Field(default=5.0, gt=0, le=60)
+    log_insights_stable_seconds: float = Field(default=30.0, gt=0, le=600)
+    log_insights_clock_timezone: str = "Europe/Moscow"
 
     # Stable identity of the operator PC that owns locally executed work.  It
     # must be configured explicitly for every workstation that shares a NAS.
@@ -57,6 +63,18 @@ class Settings(BaseSettings):
     minio_bucket_photos: str = "photos"
     minio_bucket_docs: str = "docs"
     minio_secure: bool = False
+
+    # Workstation-local transport buffer for uploads interrupted while the NAS
+    # is unavailable. It lives beside instance-id in the persistent local
+    # volume and is never shared between PCs.
+    # Native development uses a project-local ignored directory. Docker
+    # overrides this to the persistent /var/lib/printer-companion volume.
+    nas_outbox_path: str = "./.operator-state/nas-outbox"
+    nas_outbox_max_bytes: int = Field(default=20 * 1024**3, ge=1024**2)
+    nas_sync_poll_seconds: float = Field(default=2.0, ge=0.25, le=60.0)
+    nas_sync_retry_min_seconds: int = Field(default=5, ge=1, le=3600)
+    nas_sync_retry_max_seconds: int = Field(default=300, ge=1, le=24 * 60 * 60)
+    nas_sync_claim_seconds: int = Field(default=15 * 60, ge=60, le=24 * 60 * 60)
 
     raw_logs_host_path: str = r"C:\PrinterLogs"
     raw_logs_container_path: str = "/mnt/raw_logs"
@@ -120,6 +138,10 @@ class Settings(BaseSettings):
     def _validate_job_lease(self):
         if self.job_heartbeat_seconds * 2 >= self.job_lease_seconds:
             raise ValueError("JOB_HEARTBEAT_SECONDS must be less than half JOB_LEASE_SECONDS")
+        if self.nas_sync_retry_min_seconds > self.nas_sync_retry_max_seconds:
+            raise ValueError(
+                "NAS_SYNC_RETRY_MIN_SECONDS must not exceed NAS_SYNC_RETRY_MAX_SECONDS"
+            )
         return self
 
     @model_validator(mode="after")

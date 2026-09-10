@@ -168,9 +168,32 @@ docker compose logs -f api  # логи API в реальном времени
 
 ### Вручную
 
-```bash
-git pull && GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+Windows (PowerShell из папки проекта, Docker Desktop должен быть запущен):
+
+```powershell
+git pull --ff-only origin main
+if ($LASTEXITCODE -ne 0) { throw "Не удалось обновить исходники" }
+docker build -f Dockerfile.base -t ghcr.io/artemivanchenko/printers-companion:base .
+if ($LASTEXITCODE -ne 0) { throw "Не удалось собрать базовый образ" }
+$env:GIT_COMMIT = (git rev-parse --short HEAD).Trim()
+docker compose up -d --build
 ```
+
+macOS / Linux:
+
+```bash
+git pull --ff-only origin main && \
+  docker build -f Dockerfile.base -t ghcr.io/artemivanchenko/printers-companion:base . && \
+  GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+```
+
+Сборка базового образа важна при изменении зависимостей или прав локального
+хранилища оператора. В `docker compose ps` должны работать `api`, `worker`,
+`estimator` (расчёт времени) и `nas-sync` (очередь записи в хранилище).
+GitHub переносит только исходники: карточки, логи, модели и резервные копии БД
+между ПК таким обновлением **не синхронизируются**. До подключения общего NAS
+базы на двух ПК остаются отдельными. Не используйте `docker compose down -v`
+для обновления: эта команда удаляет тома с данными.
 
 ## Стек
 
@@ -181,6 +204,11 @@ git pull && GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --buil
 | Redis 7 | очередь задач |
 | MinIO | хранилище файлов (STL, magics, фото) |
 | Docker Compose | оркестрация |
+
+На операторском ПК сервис `nas-sync` хранит незавершённые загрузки в локальном
+outbox и повторяет их после восстановления NAS. MinIO/PostgreSQL остаются
+хранилищами, все вычисления по-прежнему выполняются локально. Протокол и
+диагностика: [docs/NAS_SYNC.md](docs/NAS_SYNC.md).
 
 ## Разработка
 

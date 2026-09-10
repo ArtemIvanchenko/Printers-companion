@@ -7,6 +7,7 @@ from statistics import median
 from typing import Any
 
 from analytics.robust_stats import theil_sen_slope
+from analytics.prediction.timing_validation import calibration_timing_payloads
 
 
 def _value(item: Any, name: str, default=None):
@@ -43,6 +44,8 @@ def _summary(values_by_layer: dict[int, float], name_ru: str) -> dict[str, Any]:
 def compute_layer_phase_statistics(events: list[Any]) -> dict[str, Any]:
     """Split layer cycle into scan, recoat and residual controller overhead."""
     timing: dict[int, dict[str, float]] = {}
+    summaries = calibration_timing_payloads(events)
+    has_summaries = any(_value(e, "event_type") == "layer_timing_summary" for e in events)
     absolute: dict[int, dict[str, float]] = {}
     for event in events:
         payload = _value(event, "payload", {}) or {}
@@ -51,6 +54,9 @@ def compute_layer_phase_statistics(events: list[Any]) -> dict[str, Any]:
             continue
         event_type = str(_value(event, "event_type", ""))
         if event_type == "layer_timing_summary":
+            if layer not in summaries:
+                continue
+            payload = summaries[layer]
             if layer in timing:
                 continue  # deterministic first-wins for repeated firmware dumps
             timing[layer] = {
@@ -61,7 +67,7 @@ def compute_layer_phase_statistics(events: list[Any]) -> dict[str, Any]:
         elif isinstance(payload.get("abs_ms"), int):
             absolute.setdefault(layer, {})[event_type] = float(payload["abs_ms"])
 
-    if not timing:
+    if not timing and not has_summaries:
         for layer, values in absolute.items():
             burn_start, burn_end = values.get("burn_start"), values.get("burn_end")
             pour_start, pour_end = values.get("pour_start"), values.get("pour_end")
@@ -87,7 +93,7 @@ def compute_layer_phase_statistics(events: list[Any]) -> dict[str, Any]:
     phases = {
         "laser_scan": _summary(scan, "Лазерное сканирование"),
         "powder_recoat": _summary(recoat, "Нанесение и разравнивание порошка"),
-        "controller_overhead": _summary(overhead, "Служебные операции контроллера"),
+        "controller_overhead": _summary(overhead, "Остаток цикла: ожидания и возможные остановки"),
         "full_layer_cycle": _summary(cycle, "Полный машинный цикл слоя"),
     }
     total = phases["full_layer_cycle"]["total_sec"] or 1.0
@@ -100,7 +106,7 @@ def compute_layer_phase_statistics(events: list[Any]) -> dict[str, Any]:
         "first_layer": min(valid),
         "last_layer": max(valid),
         "phases": phases,
-        "method_version": "layer-phases-0.1.0",
+        "method_version": "layer-phases-0.2.0",
         "source": "time_log layer_timing_summary / NEW_STATS",
     }
 

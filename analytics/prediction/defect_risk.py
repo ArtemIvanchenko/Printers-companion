@@ -400,6 +400,11 @@ def _model_info(model: dict[str, Any]) -> dict[str, Any]:
         "n_defects": model.get("n_defects"),
         "cv_auc": model.get("cv_auc"),
         "cv_folds": model.get("cv_folds"),
+        "model_version_id": model.get("model_version_id"),
+        "registry_status": model.get("registry_status"),
+        "training_fingerprint": model.get("training_fingerprint"),
+        "app_version": model.get("app_version"),
+        "analysis_version": model.get("analysis_version"),
     }
 
 

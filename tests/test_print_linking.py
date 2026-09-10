@@ -14,12 +14,26 @@ from storage.db.session import SessionLocal
 client = TestClient(app)
 
 
-def _make_session(db, session_id: str, start: datetime) -> None:
-    db.add(BuildSession(session_id=session_id, status="runtime_payload", context={}, start_ts=start))
+def _make_session(db, session_id: str, start: datetime, layers: int | None = 100) -> None:
+    features = {"last_layer": layers, "layers": layers} if layers else {}
+    db.add(BuildSession(
+        session_id=session_id,
+        status="runtime_payload",
+        context={"runtime_payload": {"group": {"features": features}}},
+        start_ts=start,
+    ))
 
 
-def _make_record(db, record_id: str, name: str, printed_at: datetime | None) -> None:
-    db.add(PrintRecord(record_id=record_id, name=name, printed_at=printed_at))
+def _make_record(
+    db, record_id: str, name: str, printed_at: datetime | None, layers: int | None = 100,
+) -> None:
+    prediction = {"layer_count": layers} if layers else {}
+    db.add(PrintRecord(
+        record_id=record_id,
+        name=name,
+        printed_at=printed_at,
+        metadata_json={"prediction": prediction} if prediction else {},
+    ))
 
 
 @pytest.fixture
@@ -94,6 +108,25 @@ class TestAutoLink:
         second = auto_link_print_records(db)
         assert len([link for link in first if link["record_id"] == "pr_idem"]) == 1
         assert not [link for link in second if link["record_id"] == "pr_idem"]
+
+    def test_date_only_pair_requires_manual_confirmation(self, db):
+        ts = datetime(2027, 6, 20, 9, 0, tzinfo=timezone.utc)
+        _make_session(db, "s_date_only", ts, layers=None)
+        _make_record(db, "pr_date_only", "без геометрии", ts, layers=None)
+        db.flush()
+
+        assert auto_link_print_records(db) == []
+        assert db.get(PrintRecord, "pr_date_only").session_id is None
+
+    def test_layers_resolve_two_sessions_near_same_date(self, db):
+        ts = datetime(2027, 6, 25, 9, 0, tzinfo=timezone.utc)
+        _make_session(db, "s_wrong_layers", ts, layers=423)
+        _make_session(db, "s_right_layers", ts.replace(hour=12), layers=950)
+        _make_record(db, "pr_layer_match", "плита", ts, layers=950)
+        db.flush()
+
+        links = auto_link_print_records(db)
+        assert {"record_id": "pr_layer_match", "session_id": "s_right_layers"} in links
 
 
 class TestImportHint:

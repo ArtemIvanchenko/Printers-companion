@@ -214,11 +214,11 @@ def printed_at(record: PrintRecord, session: BuildSession) -> datetime:
 
 
 def _actual_hours(session: BuildSession) -> float | None:
-    """Wall-clock print span in hours — the FALLBACK actual, pause-contaminated.
+    """Wall-clock span in hours for diagnostics only.
 
     ``start_ts``/``end_ts`` are the monitor100-excluded print span computed by
-    ``compute_print_span``. Callers must prefer ``_machine_hours_from_logs``;
-    this remains only for sessions whose time_log is missing or incomplete.
+    ``compute_print_span``. It may include pauses and must never substitute for
+    normal machine time in prediction accuracy or calibration.
     """
     if not session.start_ts or not session.end_ts:
         return None
@@ -296,17 +296,18 @@ def prediction_accuracy(db: Session) -> dict:
         components = _machine_components_from_logs(
             record.session_id, snapshot.get("layer_count"), db,
         )
+        wall_span = _actual_hours(session)
         if components is not None:
             actual_scan, actual_recoat = components
             actual = actual_scan + actual_recoat
             actual_source = "machine_log"
         else:
             actual_scan = actual_recoat = None
-            actual = _actual_hours(session)
-            actual_source = "wall_span" if actual is not None else None
+            actual = None
+            actual_source = None
 
         raw_total = _raw_predicted(snapshot)
-        if actual is None or raw_total is None:
+        if raw_total is None:
             continue
 
         material = (snapshot.get("material") or record.material or "—")
@@ -325,14 +326,15 @@ def prediction_accuracy(db: Session) -> dict:
         shown_scan = _positive_number(snapshot.get("scan_hours"))
         shown_recoat = _positive_number(snapshot.get("recoat_hours"))
         ratio = actual_scan / raw_scan if actual_scan is not None and raw_scan else None
-        skip_reason = _usable_for_calibration(session, actual)
+        skip_reason = (
+            _usable_for_calibration(session, actual)
+            if actual is not None else "machine_time_unavailable"
+        )
 
         if skip_reason is None and calibration_is_excluded(record, "time"):
             skip_reason = "manually_excluded"
         if skip_reason is None and link_counts[record.session_id] > 1:
             skip_reason = "duplicate_session_link"
-        if skip_reason is None and actual_source != "machine_log":
-            skip_reason = "machine_time_unavailable"
         if skip_reason is None and snapshot.get("scan_source", "physics") != "physics":
             skip_reason = "already_fitted"
         if skip_reason is None and (raw_scan is None or raw_recoat is None):
@@ -359,9 +361,10 @@ def prediction_accuracy(db: Session) -> dict:
             "session_id": record.session_id,
             "material": material,
             "mode": mode,
-            "actual_hours": round(actual, 2),
+            "actual_hours": round(actual, 2) if actual is not None else None,
             "actual_scan_hours": round(actual_scan, 3) if actual_scan is not None else None,
             "actual_recoat_hours": round(actual_recoat, 3) if actual_recoat is not None else None,
+            "wall_span_hours": round(wall_span, 2) if wall_span is not None else None,
             # The corrected figure the operator saw — this is what "error" must
             # be measured against. The raw geometric hours are kept alongside it
             # because that is what the calibration ratio is computed from.
@@ -372,8 +375,14 @@ def prediction_accuracy(db: Session) -> dict:
             "raw_scan_hours": round(raw_scan, 3) if raw_scan is not None else None,
             "raw_recoat_hours": round(raw_recoat, 3) if raw_recoat is not None else None,
             "correction_factor": round(factor, 3),
-            "error_pct": round((shown - actual) / actual * 100, 1),
-            "raw_error_pct": round((raw_total - actual) / actual * 100, 1),
+            "error_pct": (
+                round((shown - actual) / actual * 100, 1)
+                if actual is not None else None
+            ),
+            "raw_error_pct": (
+                round((raw_total - actual) / actual * 100, 1)
+                if actual is not None else None
+            ),
             "scan_ratio": round(ratio, 3) if ratio is not None else None,
             "used_for_calibration": skip_reason is None,
             "excluded_reason": skip_reason,

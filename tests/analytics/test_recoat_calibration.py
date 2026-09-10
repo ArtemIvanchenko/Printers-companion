@@ -8,6 +8,7 @@ guess is the single highest-leverage accuracy fix available.
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from analytics.prediction.recoat_calibration import (
     RECOAT_MAX_MS,
@@ -44,12 +45,9 @@ class TestPourSecondsFromEvents:
         events = [_event(1, 9500), _event(2, 9600), _event(3, 9400)]
         assert sorted(_pour_seconds_from_events(events)) == [9.4, 9.5, 9.6]
 
-    def test_duplicate_layer_is_first_wins(self):
-        # Matches session_overview._layer_burn_times's convention: a rotated
-        # or duplicated log must not double-count (or let a later, possibly
-        # corrupted, reading silently overwrite a good one).
+    def test_conflicting_retry_excludes_the_layer_even_when_out_of_range(self):
         events = [_event(1, 9500), _event(1, 500_000)]
-        assert _pour_seconds_from_events(events) == [9.5]
+        assert _pour_seconds_from_events(events) == []
 
     def test_ignores_other_event_types(self):
         events = [_event(1, 9500, event_type="burn_start"), _event(2, 9600)]
@@ -73,8 +71,12 @@ class TestPourSecondsFromEvents:
 
 # ── End-to-end: real time_log file on disk, rehydrated through the real parser ──
 
-def _write_time_log(tmp_path, session_id: str, pour_ms_by_layer: dict, burn_ms: int = 5000, make_ms: int = 15000):
-    lines = [f"OLD_STATS: {layer} | {pour} | {burn_ms} | {make_ms} |" for layer, pour in sorted(pour_ms_by_layer.items())]
+def _write_time_log(tmp_path, session_id: str, pour_ms_by_layer: dict, burn_ms: int = 5000, make_ms: int | None = None):
+    lines = [
+        f"OLD_STATS: {layer} | {pour} | {burn_ms} | "
+        f"{make_ms if make_ms is not None else pour + burn_ms + 300} |"
+        for layer, pour in sorted(pour_ms_by_layer.items())
+    ]
     # One physical file per session: reusing a path across sessions in the same
     # tmp_path would make every rehydration re-read whichever file was written
     # LAST (rehydration parses from disk at query time, not at write time).
@@ -148,16 +150,12 @@ class TestRecoatAccuracy:
         assert report["by_material"]["steel"]["n_sessions"] == 0
         assert report["excluded"][0]["reason"] == "not_a_print"
 
-    def test_duplicate_card_links_do_not_count_as_independent_sessions(self, db, tmp_path):
+    def test_database_rejects_duplicate_card_links(self, db, tmp_path):
         _session_with_time_log(db, "s_dup", tmp_path, {1: 9500, 2: 9500})
         for idx in range(3):
             _record(db, f"pr_dup{idx}", "s_dup")
-        db.flush()
-
-        report = recoat_accuracy(db)
-        assert report["n_usable_sessions"] == 0
-        assert all(row["excluded_reason"] == "duplicate_session_link"
-                   for row in report["sessions"])
+        with pytest.raises(IntegrityError, match="print_records.session_id"):
+            db.flush()
 
     def test_scan_only_exclusion_keeps_valid_recoat_measurement(self, db, tmp_path):
         _session_with_time_log(db, "s_scoped", tmp_path, {1: 9500, 2: 9500})

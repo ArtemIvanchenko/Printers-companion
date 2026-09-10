@@ -13,7 +13,9 @@ from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession
 from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
 from domain.services.import_jobs import (
+    ImportJobRecord,
     LeaseCheckUnavailableError,
+    RetryableImportError,
     StaleImportLeaseError,
     retry_import_job,
 )
@@ -66,6 +68,48 @@ def _lease_expired(lease_until: datetime | None) -> bool:
     return lease_until <= datetime.now(timezone.utc)
 
 
+def _apply_import_failure_policy(
+    job: ImportJobRecord,
+    error: Exception,
+    *,
+    settings,
+    now: datetime,
+) -> None:
+    """Keep infrastructure outages retryable; bound only real worker bugs."""
+    job.error = str(error)[:4000]
+    if isinstance(error, ComputeAffinityError):
+        # Ownership conflicts require an operator/admin to fix the entity, not
+        # another automatic raw parse.
+        job.status = ImportJobStatus.failed
+        job.postponed_until = None
+    elif isinstance(error, RetryableImportError):
+        # NAS/database availability is not bad input and must not consume the
+        # bounded parser/stability budget. lease_generation is monotonic,
+        # providing backoff without a new schema column.
+        retry = min(
+            settings.nas_sync_retry_max_seconds,
+            settings.nas_sync_retry_min_seconds
+            * (2 ** min(max(0, job.lease_generation - 1), 16)),
+        )
+        job.status = ImportJobStatus.postponed
+        job.postponed_until = now + timedelta(seconds=retry)
+    else:
+        # Unexpected worker bugs retain a bounded retry budget so malformed
+        # input cannot spin forever.
+        job.stability_check_attempts += 1
+        if job.stability_check_attempts < settings.file_stability_max_retries:
+            job.status = ImportJobStatus.postponed
+            job.postponed_until = now + timedelta(
+                seconds=settings.file_stability_retry_seconds
+            )
+        else:
+            job.status = ImportJobStatus.failed
+            job.postponed_until = None
+    job.updated_at = now
+    job.lease_owner = None
+    job.lease_until = None
+
+
 class ExponentialBackoff:
     """Exponential backoff with jitter for retries."""
     
@@ -99,7 +143,13 @@ def ingest_folder(folder: str) -> dict:
 
 def analyze_folder(folder: str, session_id: str = "local_session") -> dict:
     result = IngestionService(build_registry(), get_profile()).parse(Path(folder))
-    return generate_session_json_report(session_id, result.files)
+    from analytics.log_insights.pipeline import build_log_insights
+
+    report = generate_session_json_report(session_id, result.files)
+    report["log_insights"] = build_log_insights(
+        result.files, [e for f in result.files if f.parse_result for e in f.parse_result.events],
+    )
+    return report
 
 
 def process_due_import_jobs(lease_owner: str | None = None) -> int:
@@ -263,6 +313,18 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
                     )
                 )
                 if links:
+                    # A strict quality verdict may have been entered on the
+                    # card before logs arrived. Linking creates the first
+                    # training-grade session/outcome pair, so enqueue its
+                    # owner-local model refresh now.
+                    from analytics.prediction.retraining import (
+                        enqueue_retraining_for_session,
+                    )
+
+                    for linked_session_id in {
+                        str(link["session_id"]) for link in links if link.get("session_id")
+                    }:
+                        enqueue_retraining_for_session(db, linked_session_id)
                     # New predicted/actual pairs appeared → refresh per-material
                     # time-correction factors automatically.
                     from analytics.prediction.accuracy import (
@@ -317,30 +379,12 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
                             # leave the row reclaimable rather than publishing
                             # a terminal state from a stale worker.
                             continue
-                        # Any exception escaping confirm_import_job is either
-                        # infrastructure/finalization failure or an unexpected
-                        # worker bug. Retry deterministically up to the bounded
-                        # budget; parser/data errors are converted to a terminal
-                        # result inside confirm_import_job and do not get here.
-                        job2.stability_check_attempts += 1
-                        if isinstance(exc, ComputeAffinityError):
-                            # Ownership conflicts require an operator/admin to
-                            # fix the entity, not another automatic raw parse.
-                            job2.status = ImportJobStatus.failed
-                            job2.postponed_until = None
-                        elif (
-                            job2.stability_check_attempts
-                            < settings.file_stability_max_retries
-                        ):
-                            job2.status = ImportJobStatus.postponed
-                            job2.postponed_until = failure_now + timedelta(
-                                seconds=settings.file_stability_retry_seconds
-                            )
-                        else:
-                            job2.status = ImportJobStatus.failed
-                        job2.updated_at = failure_now
-                        job2.lease_owner = None
-                        job2.lease_until = None
+                        _apply_import_failure_policy(
+                            job2,
+                            exc,
+                            settings=settings,
+                            now=failure_now,
+                        )
                         repo2.save_import_job(job2)
                         db2.commit()
             except Exception as db_exc:

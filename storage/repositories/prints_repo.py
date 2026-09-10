@@ -32,7 +32,8 @@ _PARAM_FIELDS = (
     "powder_cost_rub_per_kg", "gas_cost_rub_per_atm", "gas_atm_per_print",
     "filter_cost_rub", "filter_lifetime_hours", "platform_cost_rub",
     "material_densities", "hatch_speeds_by_mat", "time_correction_by_mat",
-    "recoat_time_by_mat", "scan_model_by_mat", "build_area_cm2",
+    "recoat_time_by_mat", "scan_model_by_mat", "layer_cycle_model_by_mode",
+    "build_area_cm2",
 )
 
 
@@ -177,6 +178,17 @@ class PrintsRepository:
         for key in _RECORD_FIELDS:
             if key in values:
                 setattr(row, key, values[key])
+        if "session_id" in values:
+            # Inspection can be entered before logs arrive. Once the card is
+            # linked (or corrected to another session), keep its append-only
+            # labels attached to the same physical print for ML/reporting.
+            from domain.models.quality import QualityOutcome
+
+            self.db.execute(
+                sql_update(QualityOutcome)
+                .where(QualityOutcome.print_record_id == record_id)
+                .values(session_id=values["session_id"])
+            )
         row.updated_at = datetime.now(timezone.utc)
         try:
             self.db.flush()
@@ -209,10 +221,13 @@ class PrintsRepository:
         material: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        has_logs: bool | None = None,
     ):
         # printed_at is the real print date; fall back to created_at when unknown
         effective_date = func.coalesce(PrintRecord.printed_at, PrintRecord.created_at)
         stmt = select(PrintRecord)
+        if has_logs is not None:
+            stmt = stmt.where(PrintRecord.session_id.is_not(None) if has_logs else PrintRecord.session_id.is_(None))
         if query:
             stmt = stmt.where(PrintRecord.name.ilike(f"%{query}%"))
         if material:
@@ -231,10 +246,11 @@ class PrintsRepository:
         material: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        has_logs: bool | None = None,
     ) -> list[dict[str, Any]]:
-        stmt, effective_date = self._filtered_records(query, material, date_from, date_to)
+        stmt, effective_date = self._filtered_records(query, material, date_from, date_to, has_logs)
         rows = self.db.scalars(
-            stmt.order_by(effective_date.desc()).offset(skip).limit(limit)
+            stmt.order_by(effective_date.desc(), PrintRecord.record_id.desc()).offset(skip).limit(limit)
         ).all()
         return [_record_to_dict(row) for row in rows]
 
@@ -244,8 +260,9 @@ class PrintsRepository:
         material: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        has_logs: bool | None = None,
     ) -> int:
-        stmt, _ = self._filtered_records(query, material, date_from, date_to)
+        stmt, _ = self._filtered_records(query, material, date_from, date_to, has_logs)
         return int(self.db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
 
     def last_powder_cost(self) -> float | None:
@@ -361,6 +378,13 @@ class PrintsRepository:
                 if existing_link is not None:
                     return False
                 row.session_id = session_id
+                from domain.models.quality import QualityOutcome
+
+                self.db.execute(
+                    sql_update(QualityOutcome)
+                    .where(QualityOutcome.print_record_id == record_id)
+                    .values(session_id=session_id)
+                )
                 if session_start is not None:
                     row.printed_at = session_start
                 row.updated_at = datetime.now(timezone.utc)

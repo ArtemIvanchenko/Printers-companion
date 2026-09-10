@@ -8,6 +8,7 @@ from minio import Minio
 from minio.error import S3Error
 
 from core.config.settings import Settings, get_settings
+from core.utils.files import sha256_file
 
 
 class ObjectStore:
@@ -45,6 +46,66 @@ class ObjectStore:
     ) -> str:
         self.ensure_bucket(bucket)
         self.client.fput_object(bucket, object_name, str(path), content_type=content_type)
+        return f"s3://{bucket}/{object_name}"
+
+    @staticmethod
+    def _stat_sha256(stat: object) -> str | None:
+        metadata = getattr(stat, "metadata", None) or {}
+        normalized = {str(key).lower(): str(value).lower() for key, value in metadata.items()}
+        return normalized.get("x-amz-meta-sha256") or normalized.get("sha256")
+
+    def put_file_verified(
+        self,
+        bucket: str,
+        object_name: str,
+        path: Path,
+        *,
+        expected_sha256: str,
+        expected_size: int,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        """Atomically publish a checksum-addressed file and verify the result.
+
+        MinIO exposes a completed PUT atomically; multipart fragments are not
+        visible at ``object_name``.  The SHA-256 metadata and size check make a
+        process/network retry safe: an already published identical object is a
+        success, while an unexpected object at the immutable key fails closed.
+        """
+        path = Path(path)
+        expected_sha256 = expected_sha256.lower()
+        if path.stat().st_size != int(expected_size):
+            raise ValueError("Object-store upload size does not match its manifest")
+        if sha256_file(path).lower() != expected_sha256:
+            raise ValueError("Object-store upload checksum does not match its manifest")
+        self.ensure_bucket(bucket)
+        try:
+            current = self.client.stat_object(bucket, object_name)
+        except S3Error as exc:
+            if exc.code not in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
+                raise
+            current = None
+
+        if current is not None:
+            if (
+                int(getattr(current, "size", -1)) == int(expected_size)
+                and self._stat_sha256(current) == expected_sha256
+            ):
+                return f"s3://{bucket}/{object_name}"
+            raise RuntimeError("Immutable MinIO object conflicts with upload manifest")
+
+        self.client.fput_object(
+            bucket,
+            object_name,
+            str(path),
+            content_type=content_type,
+            metadata={"sha256": expected_sha256},
+        )
+        published = self.client.stat_object(bucket, object_name)
+        if (
+            int(getattr(published, "size", -1)) != int(expected_size)
+            or self._stat_sha256(published) != expected_sha256
+        ):
+            raise RuntimeError("MinIO did not verify the published object's checksum")
         return f"s3://{bucket}/{object_name}"
 
     def put_bytes(

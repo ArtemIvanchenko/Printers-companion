@@ -12,7 +12,7 @@ result is a plain JSON-serializable dict persisted by the runtime repository.
 """
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -173,46 +173,42 @@ def _full_range_sensor_telemetry(
     ]
     if not sensor_files:
         return {}
+    from collections import Counter
+    from random import Random
+    from zoneinfo import ZoneInfo
+    from analytics.log_insights.clocks import seconds
+    from analytics.log_insights.environment import sensor_samples
+    from core.config.settings import get_settings
+
     rows: list[dict[str, Any]] = []
     cols = (
         _OXYGEN_COLUMNS + _TEMPERATURE_COLUMNS + _GAS_TEMPERATURE_COLUMNS
         + _HUMIDITY_COLUMNS + _PRESSURE_COLUMNS + _DIAGNOSTIC_PRESSURE_COLUMNS
     )
-    for file in sorted(sensor_files, key=lambda item: (_sensor_file_date(item) or item.mtime.date(), item.path)):
-        path = Path(file.path)
-        file_date = _sensor_file_date(file)
-        if active_start and active_end and file_date:
-            if not (active_start.date() <= file_date <= active_end.date()):
-                continue
-            start_seconds = (
-                active_start.hour * 3600 + active_start.minute * 60 + active_start.second
-                if file_date == active_start.date() else None
-            )
-            end_seconds = (
-                active_end.hour * 3600 + active_end.minute * 60 + active_end.second
-                if file_date == active_end.date() else None
-            )
-        else:
-            start_seconds = end_seconds = None
-        try:
-            from analytics.telemetry_parser import downsample_full_series
-
-            raw = downsample_full_series(
-                path, cols, time_column=_TIME_COLUMN,
-                max_points=_MAX_TELEMETRY_POINTS,
-                start_clock_seconds=start_seconds,
-                end_clock_seconds=end_seconds,
-            )
-        except Exception as exc:
-            logger.warning("Full-range telemetry failed for %s: %s", path.name, exc)
+    zone = get_settings().log_insights_clock_timezone
+    start_limit, end_limit = seconds(active_start, zone), seconds(active_end, zone)
+    rng, count, first, last = Random(42), 0, None, None
+    diagnostics = Counter()
+    # Reservoir across the complete, dated stream: a file opened on 18 July
+    # can contain 19–21 July too. Preserve both endpoints of the chart.
+    for timestamp, values in sensor_samples(sensor_files, {key: {"high": 0} for key in cols}, diagnostics, zone):
+        if ((start_limit is not None and timestamp < start_limit)
+                or (end_limit is not None and timestamp > end_limit)):
             continue
-        n = max((len(values) for values in raw.values()), default=0)
-        for idx in range(n):
-            row = {col: values[idx] if idx < len(values) else None for col, values in raw.items()}
-            if file_date and row.get(_TIME_COLUMN):
-                row[_TIME_COLUMN] = f"{file_date.strftime('%d.%m')} {row[_TIME_COLUMN]}"
+        moment = datetime.fromtimestamp(timestamp, ZoneInfo(zone)).replace(tzinfo=None)
+        row = {**values, "__timestamp": moment.isoformat(), _TIME_COLUMN: moment.strftime("%d.%m %H:%M:%S")}
+        if first is None or row["__timestamp"] < first["__timestamp"]:
+            first = row
+        if last is None or row["__timestamp"] > last["__timestamp"]:
+            last = row
+        count += 1
+        if len(rows) < _MAX_TELEMETRY_POINTS - 2:
             rows.append(row)
-    rows = _downsample(rows, _MAX_TELEMETRY_POINTS)
+        elif (index := rng.randrange(count)) < len(rows):
+            rows[index] = row
+    if first is not None:
+        rows = sorted({row["__timestamp"]: row for row in [first, *rows, last]}.values(),
+                      key=lambda row: row["__timestamp"])
     col_series = {
         col: [row.get(col) for row in rows]
         for col in cols
@@ -222,7 +218,12 @@ def _full_range_sensor_telemetry(
         return {}
     time_axis = [row.get(_TIME_COLUMN) for row in rows]
     result = _assemble_groups(time_axis, col_series)
+    timestamps = [row.get("__timestamp") for row in rows]
+    if any(value is not None for value in timestamps):
+        result["timestamps"] = timestamps
     result["scope"] = "active_print" if active_start and active_end else "full_sensor_session"
+    result["clock_timezone"] = zone
+    result["timestamp_diagnostics"] = dict(diagnostics)
     return result
 
 
@@ -256,6 +257,10 @@ def _build_telemetry(
     # table sample when the raw file isn't on disk (e.g. re-analysed payloads).
     telemetry = _full_range_sensor_telemetry(files, active_start, active_end) or _sample_telemetry(files)
     telemetry["layer_burn_times"] = _layer_burn_times(files)
+    # Temporary correlation index: health anomalies consume it immediately
+    # and store only their matched layer/range. It is removed before the group
+    # payload is persisted, avoiding thousands of duplicate timestamp rows.
+    telemetry["layer_time_points"] = _layer_time_points(files)
     return telemetry
 
 
@@ -271,6 +276,14 @@ def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
     (Note: payloads are structured dicts — there is no ``raw_text`` field to
     regex; reading the parsed numbers directly is both correct and cheaper.)
     """
+    from analytics.prediction.scan_calibration import _burn_seconds_by_layer
+
+    timing_events = [e for f in files if f.parse_result
+                     and f.parse_result.file_family == SourceFileFamily.time_log
+                     for e in f.parse_result.events]
+    if any(e.event_type == "layer_timing_summary" for e in timing_events):
+        return [{"layer": layer, "duration_sec": round(value, 1)}
+                for layer, value in sorted(_burn_seconds_by_layer(timing_events).items())]
     seen: dict[int, float] = {}
     # NEW_STATS fallback accumulators (used only if OLD_STATS is absent).
     burn_start: dict[int, int] = {}
@@ -343,6 +356,38 @@ def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
     return result
 
 
+def _layer_time_points(files: list[IngestedFile]) -> list[dict[str, Any]]:
+    """Physical layer timestamps from daily burn logs for sensor correlation."""
+    points: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for file in files:
+        if (
+            not file.classification
+            or file.classification.family != SourceFileFamily.burn_log
+            or not file.parse_result
+        ):
+            continue
+        file_date = _sensor_file_date(file)
+        if file_date is None:
+            continue
+        for table in file.parse_result.tables:
+            for row in table.rows:
+                layer = row.get(_LAYER_COLUMN)
+                seconds = _clock_to_seconds(row.get(_TIME_COLUMN))
+                if not isinstance(layer, int) or seconds is None:
+                    continue
+                timestamp = (
+                    datetime.combine(file_date, datetime.min.time())
+                    + timedelta(seconds=seconds)
+                ).isoformat()
+                key = (layer, timestamp)
+                if key not in seen:
+                    points.append({"layer": layer, "timestamp": timestamp})
+                    seen.add(key)
+    points.sort(key=lambda point: point["timestamp"])
+    return points
+
+
 def compute_burn_span(
     files: list[IngestedFile],
 ) -> tuple[datetime | None, datetime | None]:
@@ -400,12 +445,10 @@ def _session_machine_seconds(files: list[IngestedFile]) -> float | None:
     """
     from analytics.prediction.recoat_calibration import machine_seconds_from_events
 
-    by_layer: dict[int, float] = {}
-    for f in files:
-        if f.classification.family != SourceFileFamily.time_log or not f.parse_result:
-            continue
-        for layer, sec in machine_seconds_from_events(f.parse_result.events).items():
-            by_layer.setdefault(layer, sec)
+    by_layer = machine_seconds_from_events([
+        e for f in files if f.classification.family == SourceFileFamily.time_log and f.parse_result
+        for e in f.parse_result.events
+    ])
     return sum(by_layer.values()) if by_layer else None
 
 
@@ -447,6 +490,8 @@ def build_group_overview(
     # Layer count: number of unique printed layers in this session.
     layer_nums = {e.layer for e in events if e.layer is not None}
     layers = len(layer_nums) if layer_nums else 0
+    first_layer = min(layer_nums) if layer_nums else None
+    last_layer = max(layer_nums) if layer_nums else None
 
     # Duration: prefer the monitor100-excluded print span; fall back to group
     # anchors. (raw_features["duration_sec"] spans ALL events incl. monitor100,
@@ -481,6 +526,8 @@ def build_group_overview(
         "total_lines": total_lines,
         "total_events": total_events,
         "layers": layers,
+        "first_layer": first_layer,
+        "last_layer": last_layer,
         "burn_events": burn_events,
         "file_count": len(files),
         "pause_count": raw_features.get("pause_count", 0),
@@ -490,6 +537,7 @@ def build_group_overview(
     burn_start, burn_end = compute_burn_span(files)
     telemetry = _build_telemetry(files, burn_start or span_start, burn_end or span_end)
     health = build_process_health(telemetry)
+    telemetry.pop("layer_time_points", None)
     # Surface the headline readiness score in features for the dashboard cards/table.
     features["atmosphere_readiness"] = (health.get("readiness") or {}).get("score")
     features["process_anomaly_count"] = len(health.get("anomalies", []))
@@ -504,6 +552,9 @@ def build_group_overview(
     from analytics.process_monitoring import build_advanced_monitoring
 
     advanced_monitoring = build_advanced_monitoring(telemetry, events)
+    from analytics.log_insights.pipeline import build_log_insights
+
+    log_insights = build_log_insights(files, events)
     features["soft_sensor_count"] = soft_sensors["available"]
     features["phase_statistics_available"] = phase_statistics["available"]
     features["shadow_algorithm_count"] = advanced_monitoring["successful_algorithms"]
@@ -525,6 +576,7 @@ def build_group_overview(
         "soft_sensors": soft_sensors,
         "phase_statistics": phase_statistics,
         "advanced_monitoring": advanced_monitoring,
+        "log_insights": log_insights,
         "data_quality": data_quality,
         # Timestamps preserved in payload so save_session_payload can populate
         # BuildSession.start_ts / end_ts (dashboard ordering + charts). Use the

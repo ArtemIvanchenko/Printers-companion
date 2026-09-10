@@ -73,6 +73,7 @@ from domain.models.prints import (
     PrintRecordFile,
 )
 from domain.models.jobs import BackgroundJob, ComputeNodeRegistration
+from domain.models.ml import MLModelVersion
 
 __all__ = [
     # Sessions
@@ -126,6 +127,7 @@ __all__ = [
     "MachineParams",
     "BackgroundJob",
     "ComputeNodeRegistration",
+    "MLModelVersion",
 ]
 
 

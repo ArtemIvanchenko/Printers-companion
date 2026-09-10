@@ -71,7 +71,9 @@ class ImportJobRecord(BaseModel):
     ignored_by: str | None = None
     ignored_at: datetime | None = None
     last_stability_check_at: datetime | None = None
-    # Bounded retry budget for local file-stability and mandatory NAS archival.
+    # Local file stability is bounded. Mandatory NAS archival uses this counter
+    # only to calculate a bounded exponential delay and never discards a valid
+    # local batch merely because the NAS stayed offline for a long time.
     stability_check_attempts: int = 0
     file_snapshot: dict[str, dict[str, Any]] = Field(default_factory=dict)
     checksum_manifest: dict[str, str] = Field(default_factory=dict)
@@ -236,18 +238,15 @@ def confirm_import_job(
         job.stability_check_attempts += 1
         job.error = str(exc)
         job.updated_at = now
-        if job.stability_check_attempts >= settings.file_stability_max_retries:
-            job.status = ImportJobStatus.failed
-            job.audit_trail.append(
-                _audit(
-                    "raw_archive_failed_max_retries",
-                    actor="system",
-                    at=now,
-                    details={"error": str(exc), "attempts": job.stability_check_attempts},
-                )
-            )
-            return _result(job, [])
-        retry = settings.file_stability_retry_seconds
+        # A NAS outage is infrastructure downtime, not invalid input.  Keep the
+        # owner-affine job and its local source retryable indefinitely; otherwise
+        # a weekend outage would silently turn a perfectly valid log batch into
+        # a terminal manual-recovery incident.
+        retry = min(
+            settings.nas_sync_retry_max_seconds,
+            settings.nas_sync_retry_min_seconds
+            * (2 ** min(job.stability_check_attempts - 1, 16)),
+        )
         job.status = ImportJobStatus.postponed
         job.postponed_until = now + timedelta(seconds=retry)
         job.audit_trail.append(
@@ -255,7 +254,11 @@ def confirm_import_job(
                 "raw_archive_deferred",
                 actor="system",
                 at=now,
-                details={"error": str(exc), "retry_seconds": retry},
+                details={
+                    "error": str(exc),
+                    "retry_seconds": retry,
+                    "attempt": job.stability_check_attempts,
+                },
             )
         )
         return _result(
@@ -542,8 +545,12 @@ def execute_confirmed_import(
             )
             cleanup = tempfile.TemporaryDirectory(prefix="printer-log-import-")
             work_root = Path(cleanup.name)
-            with zipfile.ZipFile(source_path) as archive:
-                safe_extract_zip(archive, work_root)
+            from domain.services.log_archives import expand_log_inputs
+            expanded_objects, archive_members = expand_log_inputs(
+                source_path, work_root, job.source_objects,
+                lease_check=lambda: _require_current_lease(lease_guard),
+            )
+            job.source_objects.update(expanded_objects)
             job.checksum_manifest = calculate_checksum_manifest(work_root)
         else:
             job.checksum_manifest = calculate_checksum_manifest(work_root)
@@ -554,6 +561,17 @@ def execute_confirmed_import(
                 checksum_manifest=job.checksum_manifest,
                 required=settings.app_env != "test",
             )
+            archive_members = {}
+            if any(path.suffix.lower() == '.zip' for path in work_root.rglob('*') if path.is_file()):
+                from domain.services.log_archives import expand_log_inputs
+                cleanup = tempfile.TemporaryDirectory(prefix="printer-log-import-")
+                work_root = Path(cleanup.name)
+                expanded_objects, archive_members = expand_log_inputs(
+                    source_path, work_root, job.source_objects,
+                    lease_check=lambda: _require_current_lease(lease_guard),
+                )
+                job.source_objects.update(expanded_objects)
+                job.checksum_manifest = calculate_checksum_manifest(work_root)
         job.audit_trail.append(
             _audit(
                 "raw_logs_archived_to_nas",
@@ -573,6 +591,9 @@ def execute_confirmed_import(
         )
 
         ingest_result = IngestionService(registry, profile).parse(work_root)
+        for item in ingest_result.files:
+            if item.relative_path in archive_members:
+                item.metadata['archive_member_path'] = archive_members[item.relative_path]
         _require_current_lease(lease_guard)
         groups = group_files_into_sessions(ingest_result.files)
         sessions: dict[str, dict[str, Any]] = {}
@@ -640,6 +661,7 @@ def execute_confirmed_import(
             stripped_files = [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files]
             sessions[session_id] = {"files": stripped_files, "group": overview}
             report = generate_session_json_report(session_id, group.files)
+            report["log_insights"] = overview.get("log_insights") or {}
             report["markdown"] = generate_markdown_report(report)
             reports[report["report_id"]] = report
             job.session_ids.append(session_id)
@@ -720,10 +742,12 @@ def archive_raw_import(
         try:
             checksum = sha256_file(archive)
             return {
-                "__source_archive__": store.put_file(
+                "__source_archive__": store.put_file_verified(
                     bucket,
                     f"{prefix}/source/{checksum}/{archive.name}",
                     archive,
+                    expected_sha256=checksum,
+                    expected_size=archive.stat().st_size,
                 )
             }
         except Exception as exc:
@@ -744,10 +768,13 @@ def archive_raw_import(
             relative = (
                 path.name if work_root.is_file() else path.relative_to(work_root).as_posix()
             )
-            objects[relative] = store.put_file(
+            checksum = checksums[relative]
+            objects[relative] = store.put_file_verified(
                 bucket,
-                f"{prefix}/files/{checksums[relative]}/{Path(relative).name}",
+                f"{prefix}/files/{checksum}/{Path(relative).name}",
                 path,
+                expected_sha256=checksum,
+                expected_size=path.stat().st_size,
             )
     except Exception as exc:
         raise RawArchiveUnavailableError(
@@ -757,8 +784,9 @@ def archive_raw_import(
 
 
 def safe_extract_zip(archive: zipfile.ZipFile, target_dir: Path) -> None:
+    from domain.services.log_archives import validated_members
     root = target_dir.resolve()
-    for member in archive.infolist():
+    for member in validated_members(archive):
         destination = (root / member.filename).resolve()
         # Use path-relative containment, not str.startswith: a sibling dir that
         # shares the prefix (e.g. root='/tmp/imp', dest='/tmp/imp-evil/x') would
@@ -815,16 +843,14 @@ def _flush_event_batch(
     if not batch:
         return 0
     _require_current_lease(lease_guard)
-    saved = 0
-    for evt in batch:
-        try:
-            repo.save_canonical_event(**evt)
-            saved += 1
-        except Exception as exc:
-            logger.error("Failed to save event: %s", exc)
-            raise ImportPersistenceError(
-                f"Could not persist canonical event: {exc}"
-            ) from exc
+    try:
+        saved = repo.save_canonical_event_batch(batch)
+    except Exception as exc:
+        repo.db.rollback()
+        logger.error("Failed to save event batch: %s", exc)
+        raise ImportPersistenceError(
+            f"Could not persist canonical event batch: {exc}"
+        ) from exc
     try:
         repo.db.commit()
     except Exception as exc:

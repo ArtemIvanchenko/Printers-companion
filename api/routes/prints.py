@@ -9,15 +9,25 @@ import mimetypes
 import os
 import shutil
 import tempfile
-import uuid
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from api.deps.repositories import get_prints_repository
 from api.pagination import LimitParam, PaginatedResponse, SkipParam
@@ -31,6 +41,7 @@ from storage.repositories.prints_repo import (
     PrintSessionLinkConflict,
     PrintsRepository,
 )
+from storage.sync.local_outbox import LocalNasOutbox, OutboxFullError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/prints", tags=["prints"])
@@ -205,6 +216,7 @@ def list_prints(
     material: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    has_logs: bool | None = None,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
     """Paginated list, newest print date first. Filters: q (name), material, date range."""
@@ -213,6 +225,7 @@ def list_prints(
         "material": (material or "").strip().lower() or None,
         "date_from": _parse_iso_datetime(date_from, "date_from"),
         "date_to": _parse_iso_datetime(date_to, "date_to"),
+        "has_logs": has_logs,
     }
     records = repo.list_print_records(skip=skip, limit=limit, **filters)
     files_by_record = repo.list_files_for_records([r["record_id"] for r in records])
@@ -502,7 +515,12 @@ def _combined_prediction(
     # for materials below MIN_PAIRS_FOR_CALIBRATION. A failure here must not
     # sink the whole estimate — it is extra precision info, not the estimate
     # itself.
-    if prediction is not None and db is not None and prediction["source"] in ("calculated", "calibrated"):
+    if (
+        prediction is not None
+        and db is not None
+        and prediction["source"] in ("calculated", "calibrated")
+        and est.layer_overhead_ms is None
+    ):
         try:
             from analytics.prediction.accuracy import calibration_interval_hours
             interval = calibration_interval_hours(
@@ -528,6 +546,8 @@ def _combined_prediction(
         "n_support_bodies": sum(1 for b in est.bodies if b.kind == "support"),
         "method": est.method,
         "build_axis": "Z",
+        "build_origin_z_mm": round(est.build_origin_z_mm, 3),
+        "build_origin_source": est.build_origin_source,
         "layer_count": est.layer_count,
         "height_mm": round(est.height_mm, 2),
         "print_hours": round(est.print_hours, 3),
@@ -539,6 +559,52 @@ def _combined_prediction(
         "recoat_hours": round(est.recoat_hours, 3),
         "cost_total_rub": cost_est.total_rub,
         "scan_source": est.scan_source,
+        "recoat_time_ms": round(est.recoat_time_ms, 1),
+        "recoat_time_source": est.recoat_time_source,
+        "layer_overhead_ms": (
+            round(est.layer_overhead_ms, 1) if est.layer_overhead_ms is not None else None
+        ),
+        "layer_overhead_source": est.layer_overhead_source,
+        "layer_overhead_hours": round(est.layer_overhead_hours, 3),
+        "layer_overhead_n_prints": est.layer_overhead_n_prints,
+        "layer_overhead_n_layers": est.layer_overhead_n_layers,
+        "layer_cycle_n_geometries": est.layer_cycle_n_geometries,
+        "layer_cycle_model_version": est.layer_cycle_model_version,
+        "minimum_layer_cycle_ms": (
+            round(est.minimum_layer_cycle_ms, 1)
+            if est.minimum_layer_cycle_ms is not None else None
+        ),
+        "minimum_layer_cycle_status": est.minimum_layer_cycle_status,
+        "minimum_cycle_active_layers": est.minimum_cycle_active_layers,
+        "minimum_cycle_training_active_layers": est.minimum_cycle_training_active_layers,
+        "minimum_cycle_training_active_prints": est.minimum_cycle_training_active_prints,
+        "machine_cycle_hours": round(est.machine_cycle_hours, 3),
+        "laser_count": int(params.get("laser_count") or 1),
+        "geometry_totals": {
+            name: round(float(value), 1)
+            for name, value in est.geometry_totals.items()
+        },
+        "geometry_regions": [
+            {
+                "name": body.name,
+                "kind": body.kind,
+                "z_min_mm": round(float(body.z_min_mm), 3) if body.z_min_mm is not None else None,
+                "z_max_mm": round(float(body.z_max_mm), 3) if body.z_max_mm is not None else None,
+                "height_mm": round(float(body.height_mm), 3),
+                "scan_share": round(float(body.scan_share), 6),
+                "active_z_intervals_mm": [
+                    [round(float(low), 3), round(float(high), 3)]
+                    for low, high in body.active_z_intervals_mm
+                ],
+                "xy_bounds_mm": {
+                    "x": [round(float(body.x_min_mm), 3), round(float(body.x_max_mm), 3)],
+                    "y": [round(float(body.y_min_mm), 3), round(float(body.y_max_mm), 3)],
+                } if None not in (
+                    body.x_min_mm, body.x_max_mm, body.y_min_mm, body.y_max_mm,
+                ) else None,
+            }
+            for body in est.bodies
+        ],
         "prediction": prediction,
         "cost_prediction": cost_est.prediction.to_dict() if cost_est.prediction else None,
         "warnings": est.warnings + cost_warnings,
@@ -605,6 +671,9 @@ def params_for_record(repo: PrintsRepository, record: dict) -> dict:
     for field in ("layer_thickness_mm", "hatch_distance_mm"):
         if record.get(field):
             params[field] = record[field]
+    origin = (record.get("metadata_json") or {}).get("build_origin_z_mm")
+    if isinstance(origin, (int, float)) and not isinstance(origin, bool):
+        params["build_origin_z_mm"] = float(origin)
     return params
 
 
@@ -658,13 +727,53 @@ def _prepare_prediction_inputs(
         )
     params = effective_params(params)
 
+    # A print card can identify a physical printer through its linked session
+    # (or a forward-compatible metadata field before logs are linked).  The
+    # current deployment has one machine-parameter row, so None honestly means
+    # "the single configured machine", not the operator PC that ran the job.
+    printer_id = None
+    if record.get("session_id"):
+        from domain.models.sessions import BuildSession
+
+        linked_session = repo.db.get(BuildSession, record["session_id"])
+        printer_id = linked_session.printer_id if linked_session is not None else None
+    if not printer_id:
+        candidate = (record.get("metadata_json") or {}).get("printer_id")
+        printer_id = str(candidate) if candidate else None
+
+    # Estimation runs after the DB transaction closes and receives only this
+    # immutable params copy. Carry physical-machine identity with it so scan
+    # and controller-cycle models resolve against NAS-wide machine-scoped keys.
+    params = dict(params)
+    if printer_id:
+        params["printer_id"] = printer_id
+
     return {
         "record": record,
         "platform_files": platform_files,
         "material": material,
         "params": params,
+        "printer_id": printer_id,
         "powder_cost": record.get("powder_cost_rub_per_kg") or repo.last_powder_cost(),
     }
+
+
+def _geometry_fingerprint(platform_files: list[dict[str, Any]]) -> str:
+    """Content identity for leakage-safe model validation across reprints."""
+    identities = sorted(
+        (
+            str(file.get("file_type") or "unknown"),
+            str(
+                file.get("checksum")
+                or f"missing:{file.get('file_name') or ''}:{file.get('size_bytes') or 0}"
+            ),
+        )
+        for file in platform_files
+    )
+    encoded = json.dumps(
+        identities, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    return "files-sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _prediction_input_hash(prepared: dict[str, Any]) -> str:
@@ -674,6 +783,7 @@ def _prediction_input_hash(prepared: dict[str, Any]) -> str:
         "material": prepared["material"],
         "params": prepared["params"],
         "powder_cost": prepared["powder_cost"],
+        "printer_id": prepared.get("printer_id"),
         "files": [
             {
                 "type": f["file_type"],
@@ -745,7 +855,14 @@ def _calculate_prediction_snapshot(
 
     time_prediction = result.get("prediction")
     cost_prediction = result.get("cost_prediction")
-    geometry_quality = _geometry_quality(record)
+    geometry_quality = dict(_geometry_quality(record))
+    if not supports and not geometry_quality:
+        geometry_quality = {
+            "status": "lower_bound",
+            "note": "Support-STL не приложены; время и геометрическая привязка могут быть нижней границей.",
+        }
+    geometry_quality["build_origin_source"] = result.get("build_origin_source")
+    geometry_quality["build_origin_z_mm"] = result.get("build_origin_z_mm")
     quality_status = geometry_quality.get("status") or "standard"
     quality_warning = None
     if quality_status == "lower_bound":
@@ -756,16 +873,33 @@ def _calculate_prediction_snapshot(
     if quality_warning and quality_warning not in prediction_warnings:
         prediction_warnings.append(str(quality_warning))
 
+    from analytics.prediction.layer_engine import scan_model_key
+
+    machine_cycle_hours = float(result.get("machine_cycle_hours") or result["print_hours"])
+    mode_key = scan_model_key(material, float(params["layer_thickness_mm"]))
+    machine_mode_key = (
+        f"{prepared.get('printer_id') or 'configured-machine'}|{mode_key}|"
+        f"lasers={int(result.get('laser_count') or params.get('laser_count') or 1)}"
+    )
+
+    from analytics.log_insights.geometry import scan_reference
+    from core.versioning.provenance import stable_hash
+
     snapshot: dict = {
         "estimated_at": datetime.now(timezone.utc).isoformat(),
         "input_revision": record["revision"],
         "input_hash": _prediction_input_hash(prepared),
+        "geometry_fingerprint": _geometry_fingerprint(platform_files),
         "computed_by": computed_by,
         "app_version": APP_VERSION,
         "analysis_version": ANALYSIS_VERSION,
         "n_parts": len(parts),
         "n_supports": n_supports,
         "material": material,
+        "printer_id": prepared.get("printer_id"),
+        "machine_scope": "printer" if prepared.get("printer_id") else "single_configured_machine",
+        "mode_key": mode_key,
+        "machine_mode_key": machine_mode_key,
         # The two geometry inputs that scale the whole estimate. Recorded so a
         # stored prediction can be read back and checked against the machine
         # log — without them there is no way to tell what a number was computed
@@ -773,10 +907,17 @@ def _calculate_prediction_snapshot(
         # 0.90 mm on the machine.
         "layer_thickness_mm": params.get("layer_thickness_mm"),
         "hatch_distance_mm": params.get("hatch_distance_mm"),
+        "laser_count": result.get("laser_count", params.get("laser_count")),
         "method": result["method"],
         "build_axis": result.get("build_axis", "Z"),
+        "build_origin_z_mm": result.get("build_origin_z_mm"),
+        "build_origin_source": result.get("build_origin_source"),
         "layer_count": result.get("layer_count"),
         "print_hours": result["print_hours"],
+        # Backward-compatible ``print_hours`` remains scan + recoat. The full
+        # machine cycle adds the separately calibrated make-layer residual.
+        "machine_cycle_hours": machine_cycle_hours,
+        "machine_hours": machine_cycle_hours,
         # raw (uncorrected) hours feed the calibration loop, so the learned
         # factor stays absolute and never compounds on itself.
         "raw_print_hours": result.get("raw_print_hours", result["print_hours"]),
@@ -784,10 +925,64 @@ def _calculate_prediction_snapshot(
         "raw_recoat_hours": result.get("raw_recoat_hours"),
         "scan_hours": result.get("scan_hours"),
         "recoat_hours": result.get("recoat_hours"),
+        "recoat_time_ms": result.get("recoat_time_ms"),
+        "recoat_time_source": result.get("recoat_time_source"),
+        "layer_overhead_ms": result.get("layer_overhead_ms"),
+        "layer_overhead_source": result.get("layer_overhead_source"),
+        "layer_overhead_hours": result.get("layer_overhead_hours", 0.0),
+        "layer_overhead_n_prints": result.get("layer_overhead_n_prints", 0),
+        "layer_overhead_n_layers": result.get("layer_overhead_n_layers", 0),
+        "layer_cycle_n_geometries": result.get("layer_cycle_n_geometries", 0),
+        "layer_cycle_model_version": result.get("layer_cycle_model_version"),
+        "minimum_layer_cycle_ms": result.get("minimum_layer_cycle_ms"),
+        "minimum_layer_cycle_status": result.get("minimum_layer_cycle_status"),
+        "minimum_cycle_active_layers": result.get("minimum_cycle_active_layers", 0),
+        "minimum_cycle_training_active_layers": result.get(
+            "minimum_cycle_training_active_layers", 0,
+        ),
+        "minimum_cycle_training_active_prints": result.get(
+            "minimum_cycle_training_active_prints", 0,
+        ),
         "correction_factor": result.get("correction_factor", 1.0),
         "scan_source": result.get("scan_source", "physics"),
+        "scan_timing_reference": scan_reference(params, material, float(params["layer_thickness_mm"]),
+                         float(result.get("correction_factor") or 1.0)),
+        "process_profile_fingerprint": stable_hash({key: params.get(key) for key in (
+            "hatch_speed_mm_s", "hatch_speeds_by_mat", "contour_speed_mm_s", "support_speed_mm_s",
+            "jump_speed_mm_s", "jump_delay_ms", "hatch_distance_mm", "layer_thickness_mm", "laser_count",
+        )}),
         "cost_total_rub": result["cost_total_rub"],
         "scan_geometry": result.get("scan_geometry"),
+        "geometry_totals": result.get("geometry_totals") or {},
+        "geometry_regions": result.get("geometry_regions") or [],
+        "calculation_inputs": {
+            "printer_id": prepared.get("printer_id"),
+            "machine_scope": "printer" if prepared.get("printer_id") else "single_configured_machine",
+            "material": material,
+            "layer_thickness_mm": params.get("layer_thickness_mm"),
+            "hatch_distance_mm": params.get("hatch_distance_mm"),
+            "laser_count": result.get("laser_count", params.get("laser_count")),
+            "layer_overhead_ms": result.get("layer_overhead_ms"),
+            "minimum_layer_cycle_ms": result.get("minimum_layer_cycle_ms"),
+            "geometry_body_count": len(parts) + n_supports,
+            "geometry_layer_count": result.get("layer_count"),
+            "machine_mode_key": machine_mode_key,
+        },
+        "time_breakdown": {
+            "scan_hours": result.get("scan_hours"),
+            "recoat_hours": result.get("recoat_hours"),
+            "layer_overhead_hours": result.get("layer_overhead_hours", 0.0),
+            "machine_hours": machine_cycle_hours,
+            "scan_source": result.get("scan_source", "physics"),
+            "recoat_time_ms_per_layer": result.get("recoat_time_ms"),
+            "recoat_source": result.get("recoat_time_source"),
+            "layer_overhead_source": result.get("layer_overhead_source"),
+            "layer_overhead_n_prints": result.get("layer_overhead_n_prints", 0),
+            "layer_overhead_n_layers": result.get("layer_overhead_n_layers", 0),
+            "layer_cycle_n_geometries": result.get("layer_cycle_n_geometries", 0),
+            "minimum_layer_cycle_ms": result.get("minimum_layer_cycle_ms"),
+            "minimum_cycle_active_layers": result.get("minimum_cycle_active_layers", 0),
+        },
         # Flat, additive fields from the unified prediction contract — kept
         # flat (not nested under a "prediction" key) so they don't collide
         # with this whole snapshot already being metadata_json["prediction"].
@@ -805,6 +1000,11 @@ def _calculate_prediction_snapshot(
 def _enrich_prediction_interval(snapshot: dict, db: Any) -> None:
     """Attach the empirical interval in a short post-compute DB transaction."""
     if snapshot.get("prediction_source") not in ("calculated", "calibrated"):
+        return
+    if snapshot.get("layer_overhead_ms") is not None:
+        # calibration_interval_hours is defined for scan+recoat. Attaching it
+        # to a point that already includes base/floor controller time would mix
+        # two different quantities; wait for a full-cycle interval model.
         return
     try:
         from analytics.prediction.accuracy import calibration_interval_hours
@@ -1074,12 +1274,168 @@ def estimate_print_record(
 
 @router.get("/{record_id}")
 def get_print(record_id: str, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
-    """Full print record with attached files."""
+    """Full print record with files and geometry-aware anomaly locations."""
     record = repo.get_print_record(record_id)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
     record["files"] = repo.list_print_files(record_id)
+    from domain.models.jobs import BackgroundJob
+    estimate_job = repo.db.scalar(
+        select(BackgroundJob).where(
+            BackgroundJob.entity_id == record_id,
+            BackgroundJob.job_type == 'print_estimate',
+            BackgroundJob.status.in_(['pending', 'running', 'postponed']),
+        ).order_by((BackgroundJob.status == 'running').desc(), BackgroundJob.created_at.desc()).limit(1)
+    )
+    record['estimate_job'] = ({'job_id': estimate_job.job_id, 'status': estimate_job.status}
+                              if estimate_job else None)
+    from storage.repositories.runtime import RuntimeRepository
+
+    record["quality_outcomes"] = RuntimeRepository(repo.db).list_quality_outcomes(
+        print_record_id=record_id,
+    )
+    snapshot = ((record.get("metadata_json") or {}).get("prediction") or {})
+    if record.get("session_id") and snapshot.get("scan_geometry"):
+        input_revision = snapshot.get("input_revision")
+        snapshot_is_current = (
+            not isinstance(input_revision, int)
+            or record.get("revision") in {input_revision, input_revision + 1}
+        )
+        if not snapshot_is_current:
+            record["geometry_analysis"] = {
+                "status": "stale_prediction",
+                "reason_ru": (
+                    "Карточка или STL изменились после расчёта; привязка аномалий скрыта "
+                    "до повторного расчёта."
+                ),
+                "items": [],
+            }
+            return record
+        from analytics.geometry_context import map_anomalies_to_geometry
+        from domain.models.sessions import BuildSession
+
+        session = repo.db.get(BuildSession, record["session_id"])
+        group = (
+            (((session.context or {}).get("runtime_payload") or {}).get("group") or {})
+            if session is not None else {}
+        )
+        try:
+            record["geometry_analysis"] = map_anomalies_to_geometry(
+                group.get("health"),
+                snapshot.get("scan_geometry"),
+                geometry_regions=snapshot.get("geometry_regions"),
+                telemetry=group.get("telemetry"),
+                geometry_quality=snapshot.get("geometry_quality"),
+            )
+        except Exception:
+            # This is derived display context over two stored snapshots. A bad
+            # legacy snapshot must not make the print card itself unreadable.
+            logger.exception("prints: geometry anomaly mapping failed for %s", record_id)
+            record["geometry_analysis"] = {
+                "status": "unavailable",
+                "reason_ru": "Не удалось сопоставить старый снимок геометрии с логами",
+                "items": [],
+            }
     return record
+
+
+@router.get("/{record_id}/quality-outcomes")
+def list_print_quality_outcomes(
+    record_id: str,
+    repo: PrintsRepository = Depends(get_prints_repository),
+) -> list[dict]:
+    if not repo.get_print_record(record_id):
+        raise HTTPException(404, "Карточка печати не найдена")
+    from storage.repositories.runtime import RuntimeRepository
+
+    return RuntimeRepository(repo.db).list_quality_outcomes(print_record_id=record_id)
+
+
+@router.post("/{record_id}/quality-outcomes")
+def create_print_quality_outcome(
+    record_id: str,
+    payload: dict,
+    request: Request,
+    repo: PrintsRepository = Depends(get_prints_repository),
+) -> dict:
+    """Append an operator-confirmed good/defect label to a print card.
+
+    Labels are append-only at this endpoint: a correction is another, newer
+    inspection row. This preserves who concluded what and when, and the latest
+    final row becomes the ML ground truth.
+    """
+    record = repo.get_print_record(record_id)
+    if not record:
+        raise HTTPException(404, "Карточка печати не найдена")
+
+    from domain.services.quality import create_final_print_outcome
+    from storage.repositories.runtime import RuntimeRepository
+
+    try:
+        draft = create_final_print_outcome(
+            payload,
+            print_record_id=record_id,
+            session_id=record.get("session_id"),
+            created_by=workstation_id(request, fallback="operator") or "operator",
+        )
+    except ValidationError as exc:
+        raise HTTPException(422, detail=str(exc)) from None
+
+    outcome = draft.model_dump(mode="json")
+    from storage.repositories.runtime import QualityOutcomeConflict
+
+    try:
+        RuntimeRepository(repo.db).save_quality_outcome(outcome)
+    except QualityOutcomeConflict as exc:
+        raise HTTPException(409, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from None
+    from analytics.prediction.retraining import enqueue_retraining
+
+    retraining_job = None
+    if outcome.get("session_id"):
+        retraining_job = enqueue_retraining(
+            repo.db,
+            session_id=str(outcome["session_id"]),
+            outcome_id=str(outcome["outcome_id"]),
+            result=str(outcome["result"]),
+            timestamp=str(outcome["timestamp"]),
+        )
+    # Publish the dependent-row change through the existing multi-workstation
+    # print-card event stream.
+    repo._touch_print_record(record_id)
+    # A previously generated report is a snapshot. Clear the in-process read
+    # cache so its next local regeneration includes the new inspection.
+    if record.get("session_id"):
+        from api.routes.sessions import _invalidate_cache
+
+        _invalidate_cache(record["session_id"])
+    return {**outcome, "model_retraining_job_id": (retraining_job or {}).get("job_id")}
+
+
+@router.get("/{record_id}/operator-report")
+def get_print_operator_report(
+    record_id: str,
+    repo: PrintsRepository = Depends(get_prints_repository),
+) -> dict:
+    """Return a compact report even before a card has linked log files."""
+    record = repo.get_print_record(record_id)
+    if not record:
+        raise HTTPException(404, "Карточка печати не найдена")
+
+    from domain.services.operator_report import build_operator_report
+    from storage.repositories.runtime import RuntimeRepository
+
+    runtime = RuntimeRepository(repo.db)
+    session_id = record.get("session_id")
+    payload = runtime.get_session_payload(session_id) if session_id else None
+    outcomes = runtime.list_quality_outcomes(print_record_id=record_id)
+    return build_operator_report(
+        session_id=session_id,
+        group=(payload or {}).get("group") or {},
+        quality_outcomes=outcomes,
+        print_record=record,
+    )
 
 
 @router.patch("/{record_id}")
@@ -1187,6 +1543,7 @@ def update_print(
     # Manually linking a record to a session creates a new predicted/actual pair
     # (and, if the session has a time_log, a new recoat measurement) → refresh both.
     if values.get("session_id"):
+        from analytics.prediction.retraining import enqueue_retraining_for_session
         from analytics.prediction.accuracy import (
             recalibrate_and_apply,
             try_acquire_calibration_lock,
@@ -1203,6 +1560,10 @@ def update_print(
                 logger.info("calibration already runs on another operator PC; skipped")
         except Exception:
             logger.exception("auto-calibration after manual link failed")
+        try:
+            enqueue_retraining_for_session(repo.db, str(values["session_id"]))
+        except Exception:
+            logger.exception("auto-retraining enqueue after manual link failed")
     return record
 
 
@@ -1257,6 +1618,7 @@ async def upload_print_file(
     record_id: str,
     file: UploadFile,
     background_tasks: BackgroundTasks,
+    response: Response,
     file_type: str = Form(...),
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
@@ -1271,20 +1633,12 @@ async def upload_print_file(
     """
     if file_type not in _FILE_TYPES:
         raise HTTPException(422, f"Недопустимый file_type. Допустимы: {', '.join(sorted(_FILE_TYPES))}")
-    record = repo.get_print_record(record_id)
-    if not record:
-        raise HTTPException(404, "Карточка печати не найдена")
     file_name = (file.filename or "unknown").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if len(file_name) > 300:
         raise HTTPException(422, "Имя файла слишком длинное (макс. 300 символов)")
     # MagicsX support exports use the s_ prefix — classify them automatically
     if file_type == "stl" and file_name.lower().startswith("s_"):
         file_type = "stl_supports"
-    if file_type in ("stl", "stl_supports"):
-        _require_local_print(record)
-    # Do not hold a PostgreSQL snapshot/connection while up to 600 MB is read,
-    # hashed and sent to MinIO. No writes have occurred in this request yet.
-    repo.db.rollback()
 
     with tempfile.TemporaryDirectory(prefix="printer-upload-") as temporary_dir:
         staged_path = Path(temporary_dir) / "payload"
@@ -1298,36 +1652,125 @@ async def upload_print_file(
         if not size_bytes:
             raise HTTPException(422, "Пустой файл")
 
-        existing = repo.find_file_by_checksum(record_id, checksum)
+        # The browser may have opened this card before the whole NAS link went
+        # down. Preserve the upload locally even when PostgreSQL cannot answer;
+        # the sync worker validates existence and compute ownership before it
+        # publishes anything. A reachable DB still fails fast for bad cards.
+        record: dict[str, Any] | None = None
+        try:
+            record = repo.get_print_record(record_id)
+            if not record:
+                raise HTTPException(404, "Карточка печати не найдена")
+            if file_type in ("stl", "stl_supports"):
+                _require_local_print(record)
+            existing = repo.find_file_by_checksum(record_id, checksum)
+        except SQLAlchemyError as exc:
+            logger.warning("prints: PostgreSQL unavailable during upload pre-check: %s", exc)
+            repo.db.rollback()
+            existing = None
         if existing:
             repo.db.rollback()
             return {"duplicate": True, **existing}
-        # The pre-check is complete; release its read transaction before the
-        # network upload. DB uniqueness handles a concurrent winner later.
+        # Do not hold a PostgreSQL snapshot/connection while up to 600 MB is
+        # copied to the outbox and sent to MinIO. DB uniqueness handles a
+        # concurrent winner later.
         repo.db.rollback()
 
+        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        object_bucket = _bucket_for(file_type)
+        settings = get_settings()
+        try:
+            outbox = LocalNasOutbox.from_settings(settings)
+            queued = await asyncio.to_thread(
+                outbox.enqueue_attachment,
+                staged_path,
+                owner_node_id=settings.compute_node_id,
+                record_id=record_id,
+                file_name=file_name,
+                file_type=file_type,
+                bucket=object_bucket,
+                checksum=checksum,
+                size_bytes=size_bytes,
+                content_type=content_type,
+                # The DB pre-check above found no row. A local completion
+                # receipt can be stale after restoring PostgreSQL from backup.
+                reopen_completed=True,
+            )
+        except OutboxFullError as exc:
+            raise HTTPException(
+                507,
+                "Локальная очередь NAS заполнена; освободите место или дождитесь синхронизации",
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                507,
+                "Не удалось сохранить локальную страховочную копию загрузки",
+            ) from exc
+
+    operation_id = str(queued["operation_id"])
+
+    def _postponed(reason: str) -> dict[str, Any]:
+        state = outbox.get(operation_id) or queued
+        response.status_code = 202
+        return {
+            "queued": True,
+            "sync_operation_id": operation_id,
+            "sync_status": state.get("status", "pending"),
+            "file_name": file_name,
+            "file_type": file_type,
+            "checksum": checksum,
+            "size_bytes": size_bytes,
+            "message": reason,
+        }
+
+    claimed = await asyncio.to_thread(outbox.claim, operation_id)
+    if claimed is None:
+        return _postponed("Файл уже находится в локальной очереди синхронизации")
+
+    try:
+        queued_path = await asyncio.to_thread(outbox.verify_claimed, claimed)
         store = ObjectStore()
         if not await asyncio.to_thread(store.is_available):
-            raise HTTPException(503, "Хранилище файлов (MinIO) недоступно")
-        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-        # Immutable per-upload key: full SHA prevents content collisions and
-        # file_id prevents a delayed cleanup from deleting a later re-upload.
-        # The original name remains in PostgreSQL/download headers; excluding
-        # it here also keeps UTF-8 object keys safely below S3's byte limit.
-        file_id = f"prf_{uuid.uuid4().hex}"
-        object_name = f"{record_id}/{file_id}_{checksum}"
-        object_bucket = _bucket_for(file_type)
-        object_uri = await asyncio.to_thread(
-            store.put_file,
-            object_bucket,
-            object_name,
-            staged_path,
-            content_type=content_type,
+            await asyncio.to_thread(
+                outbox.release,
+                operation_id,
+                "Хранилище файлов MinIO недоступно",
+            )
+            return _postponed(
+                "NAS недоступен: файл сохранён на этом ПК и будет отправлен автоматически"
+            )
+
+        verified_put = getattr(store, "put_file_verified", None)
+        if callable(verified_put):
+            object_uri = await asyncio.to_thread(
+                verified_put,
+                claimed["bucket"],
+                claimed["object_name"],
+                queued_path,
+                expected_sha256=checksum,
+                expected_size=size_bytes,
+                content_type=content_type,
+            )
+        else:
+            # Compatible object-store adapters used by tests/integrations; the
+            # local outbox verified checksum and size immediately above.
+            object_uri = await asyncio.to_thread(
+                store.put_file,
+                claimed["bucket"],
+                claimed["object_name"],
+                queued_path,
+                content_type=content_type,
+            )
+    except Exception as exc:
+        await asyncio.to_thread(outbox.release, operation_id, str(exc))
+        logger.warning("prints: upload queued after MinIO failure: %s", exc)
+        return _postponed(
+            "Передача на NAS прервалась: локальная копия сохранена и будет отправлена повторно"
         )
 
     try:
         saved = repo.add_print_file({
-            "file_id": file_id,
+            "file_id": claimed["file_id"],
             "record_id": record_id,
             "object_uri": object_uri,
             "file_name": file_name,
@@ -1342,15 +1785,16 @@ async def upload_print_file(
             if saved["object_uri"] != object_uri:
                 removed = await asyncio.to_thread(
                     store.remove_object,
-                    object_bucket,
-                    object_name,
+                    claimed["bucket"],
+                    claimed["object_name"],
                 )
                 if not removed:
                     logger.warning("prints: duplicate cleanup failed for %s", object_uri)
+            await asyncio.to_thread(outbox.complete, operation_id, saved)
             return saved
 
         # A dated file name pins down the print date when the record has none yet
-        if not record.get("printed_at"):
+        if record is not None and not record.get("printed_at"):
             from_file = _date_from_text(file_name)
             if from_file:
                 repo.update_print_record(record_id, {"printed_at": from_file})
@@ -1367,18 +1811,29 @@ async def upload_print_file(
         # Commit here, rather than after the response dependency unwinds, so a
         # failed DB publication can still remove this request's unique object.
         repo.db.commit()
-    except Exception:
+    except SQLAlchemyError as exc:
+        # The full object may already be on MinIO. Keep the verified local copy
+        # and retry the short catalogue transaction after PostgreSQL returns.
         repo.db.rollback()
-        # This URI is unique to the request, so cleanup cannot remove another
-        # upload. Durable mark-and-sweep remains the fallback for MinIO outage.
+        await asyncio.to_thread(outbox.release, operation_id, str(exc))
+        logger.warning("prints: database publication postponed: %s", exc)
+        return _postponed(
+            "База NAS временно недоступна: файл сохранён локально и будет опубликован автоматически"
+        )
+    except Exception as exc:
+        repo.db.rollback()
+        await asyncio.to_thread(outbox.fail, operation_id, str(exc))
+        # Permanent application failures are quarantined for review and their
+        # unreferenced remote object is removed best-effort.
         removed = await asyncio.to_thread(
             store.remove_object,
-            object_bucket,
-            object_name,
+            claimed["bucket"],
+            claimed["object_name"],
         )
         if not removed:
             logger.warning("prints: orphan cleanup failed for %s", object_uri)
         raise
+    await asyncio.to_thread(outbox.complete, operation_id, saved)
     if should_auto_estimate and get_settings().app_env == "test":
         background_tasks.add_task(_auto_estimate, record_id)
     logger.info(

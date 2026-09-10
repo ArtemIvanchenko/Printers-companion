@@ -253,3 +253,53 @@ class JobsRepository:
         row.updated_at = now
         self.db.flush()
         return _as_dict(row)
+
+    def defer_infrastructure(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        lease_owner: str,
+        lease_generation: int,
+    ) -> dict[str, Any] | None:
+        """Release a fenced job without spending its deterministic-error budget.
+
+        PostgreSQL/MinIO availability is outside the local algorithm's control.
+        Counting an infrastructure interruption as one of three bad-model
+        attempts can permanently strand an otherwise valid estimate. The lease
+        fence is identical to ``fail``; only the attempt is returned to the
+        budget and the job is made available after bounded backoff.
+        """
+        row = self.db.scalar(
+            select(BackgroundJob)
+            .where(BackgroundJob.job_id == job_id)
+            .with_for_update()
+        )
+        if row is None:
+            return None
+        now = _now()
+        if row.lease_owner != lease_owner or row.lease_generation != lease_generation:
+            return None
+        lease_until = row.lease_until
+        if lease_until is None:
+            return None
+        if lease_until.tzinfo is None:
+            lease_until = lease_until.replace(tzinfo=timezone.utc)
+        if lease_until <= now:
+            return None
+        # lease_generation is monotonic even though infrastructure retries give
+        # the algorithm-attempt counter back, so repeated NAS failures still
+        # back off instead of hammering a low-power server every five seconds.
+        infrastructure_attempt = max(1, row.lease_generation)
+        row.attempts = max(0, row.attempts - 1)
+        row.status = "pending"
+        row.error = error[:4000]
+        row.available_at = now + timedelta(
+            seconds=min(300, 5 * 2 ** min(16, infrastructure_attempt - 1))
+        )
+        row.lease_owner = None
+        row.lease_until = None
+        row.finished_at = None
+        row.updated_at = now
+        self.db.flush()
+        return _as_dict(row)

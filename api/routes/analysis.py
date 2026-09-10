@@ -22,6 +22,16 @@ from storage.db.session import session_scope
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
+
+@router.get("/prints/{record_id}/log-insights")
+def get_print_log_insights(record_id: str) -> dict[str, Any]:
+    from domain.services.log_insights import print_log_insights
+
+    result = print_log_insights(record_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Карточка печати не найдена")
+    return result
+
 # Simple in-process cache so repeated dashboard loads don't re-analyze.
 # Guarded by a lock: sync handlers run in a threadpool, so concurrent requests
 # would otherwise race the dict update against the snapshot read.
@@ -203,27 +213,27 @@ def _load_quality_labels(db) -> dict[str, int]:
     """{session_id: 1 defect / 0 good} from operator-entered QualityOutcome rows."""
     from analytics.prediction.defect_risk import outcome_to_label
     from domain.models.quality import QualityOutcome
+    from domain.models.prints import PrintRecord
     labels: dict[str, int] = {}
     rows = db.execute(
-        select(QualityOutcome).order_by(QualityOutcome.timestamp, QualityOutcome.outcome_id)
-    ).scalars().all()
-    for row in rows:
-        if not row.session_id:
+        select(QualityOutcome, PrintRecord.session_id)
+        .outerjoin(PrintRecord, PrintRecord.record_id == QualityOutcome.print_record_id)
+        .order_by(QualityOutcome.timestamp, QualityOutcome.outcome_id)
+    ).all()
+    for row, card_session_id in rows:
+        if not row.is_final:
+            continue
+        session_id = row.session_id or card_session_id
+        if not session_id:
             continue
         lbl = outcome_to_label(row.result)
         if lbl is not None:
-            labels[row.session_id] = lbl  # deterministic latest timestamp wins
+            labels[session_id] = lbl  # deterministic latest timestamp wins
     return labels
 
 
-# Fitting is not cheap (K-fold refits), and every dashboard poll used to redo it
-# from scratch. Keyed on the exact label set, so a new operator verdict
-# invalidates it immediately while repeated reads are free.
-_MODEL_CACHE: dict[str, Any] = {}
-_MODEL_LOCK = threading.Lock()
-
-
 def _training_fingerprint(labelled: list[tuple[dict[str, Any], int]]) -> str:
+    """Compatibility helper used by tests/clients that inspect dataset changes."""
     import hashlib
 
     from analytics.prediction.defect_risk import build_feature_row
@@ -241,30 +251,6 @@ def _training_fingerprint(labelled: list[tuple[dict[str, Any], int]]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _get_model(sessions: list[dict[str, Any]], labels: dict[str, int]) -> tuple[Any, int]:
-    """Trained model (or None) for the current label set, plus the label count."""
-    from analytics.prediction.defect_risk import train_defect_model
-
-    labelled = sorted(
-        [(session, labels[session["session_id"]])
-         for session in sessions if session["session_id"] in labels],
-        key=lambda item: item[0].get("start_ts") or "",
-    )
-    key = _training_fingerprint(labelled)
-
-    with _MODEL_LOCK:
-        if _MODEL_CACHE.get("key") == key:
-            return _MODEL_CACHE.get("model"), len(labelled)
-
-    model = train_defect_model(
-        [(session["group"], label) for session, label in labelled]
-    )
-    with _MODEL_LOCK:
-        _MODEL_CACHE["key"] = key
-        _MODEL_CACHE["model"] = model
-    return model, len(labelled)
-
-
 def _risk_row(session: dict[str, Any], labels: dict[str, int], model: Any) -> dict[str, Any]:
     from analytics.prediction.defect_risk import predict_defect_risk
 
@@ -278,7 +264,11 @@ def _risk_row(session: dict[str, Any], labels: dict[str, int], model: Any) -> di
         # This session's outcome was part of the training set, so its score is
         # a fit to a known answer, not a prediction. Callers must not present
         # in-sample scores as evidence that the model works.
-        "in_sample": bool(model) and label is not None,
+        "in_sample": (
+            bool(model)
+            and label is not None
+            and session_id in set((model or {}).get("training_session_ids") or [])
+        ),
         **pred,
     }
 
@@ -291,12 +281,20 @@ def defect_risk_all() -> dict[str, Any]:
     with session_scope() as db:
         sessions = _load_session_groups(db)
         labels = _load_quality_labels(db)
+        from analytics.prediction.retraining import active_model
+        from storage.repositories.model_registry import ModelRegistryRepository
 
-    model, n_labelled = _get_model(sessions, labels)
+        model = active_model(db)
+        registry = ModelRegistryRepository(db)
+        active = registry.get_active("defect_risk", include_artifact=False)
+        shadow = registry.get_shadow("defect_risk", include_artifact=False)
+    n_labelled = sum(1 for session in sessions if session["session_id"] in labels)
     return {
         "model_trained": model is not None,
         "model_quality": {"cv_auc": (model or {}).get("cv_auc"),
                           "cv_folds": (model or {}).get("cv_folds")},
+        "active_model_version_id": (active or {}).get("model_version_id"),
+        "shadow_model": shadow,
         "n_sessions": len(sessions),
         "n_labeled": n_labelled,
         "sessions": [_risk_row(s, labels, model) for s in sessions],
@@ -309,11 +307,13 @@ def defect_risk_one(session_id: str) -> dict[str, Any]:
     with session_scope() as db:
         sessions = _load_session_groups(db)
         labels = _load_quality_labels(db)
+        from analytics.prediction.retraining import active_model
+
+        model = active_model(db)
 
     target = next((s for s in sessions if s["session_id"] == session_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-    model, _ = _get_model(sessions, labels)
     return {"model_trained": model is not None, **_risk_row(target, labels, model)}
 
 

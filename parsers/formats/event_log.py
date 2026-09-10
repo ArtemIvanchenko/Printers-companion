@@ -89,7 +89,7 @@ def classify_event(text: str) -> tuple[str, str | None, dict]:
         return "resume", "restart_attempts", {}
     if any(t in lower for t in ("restart", "перезапуск", "рестарт")):
         return "restart_attempt", "restart_attempts", {}
-    if any(t in lower for t in ("finish", "end", "заверш", "конец")):
+    if any(t in lower for t in ("finish", "end", "заверш", "конец", "оконч")):
         return "finish", "finish", {}
     if any(t in lower for t in ("burn", "спек", "плав", "прожиг")):
         return "burn_event", "burn", {}
@@ -104,7 +104,7 @@ def classify_event(text: str) -> tuple[str, str | None, dict]:
 
 class EventLogParser(BaseParser):
     name = "main_event_log"
-    version = "0.3.0"
+    version = "0.3.1"
     file_family = SourceFileFamily.main_event_log
     role = FileRole.primary
 

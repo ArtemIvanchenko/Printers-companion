@@ -96,6 +96,7 @@ def get_machine_params(repo: PrintsRepository = Depends(get_prints_repository)) 
         params["time_correction_by_mat"] = {}
         params["recoat_time_by_mat"] = {}
         params["scan_model_by_mat"] = {}
+        params["layer_cycle_model_by_mode"] = {}
         params["correction_locked"] = False
         params["updated_at"] = None
     return {"params": params, "configured": params_configured(params)}

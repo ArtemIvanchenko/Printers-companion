@@ -50,6 +50,7 @@ from analytics.prediction.accuracy import (
 )
 from domain.enums.common import SourceFileFamily
 from domain.models.prints import MachineParams
+from analytics.prediction.timing_validation import calibration_timing_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -64,20 +65,13 @@ RECOAT_MIN_MS, RECOAT_MAX_MS = 1_000.0, 60_000.0
 def _pour_seconds_from_events(events: list[Any]) -> list[float]:
     """Per-layer recoat seconds from a list of parsed ``time_log`` events.
 
-    First-wins per layer (matches ``session_overview._layer_burn_times``'s
-    convention: a duplicated/rotated log must not double-count a layer).
+    Equivalent boundary copies count once; conflicting attempts are excluded.
     Accepts anything with ``event_type``/``payload`` attributes or dict keys —
     real ``CanonicalEventDraft`` objects and their ``.model_dump()`` alike, so
     the function is testable without constructing full parser output.
     """
     seen: dict[int, float] = {}
-    for event in events:
-        event_type = getattr(event, "event_type", None) if not isinstance(event, dict) else event.get("event_type")
-        if event_type != "layer_timing_summary":
-            continue
-        payload = getattr(event, "payload", None) if not isinstance(event, dict) else event.get("payload")
-        payload = payload or {}
-        layer = payload.get("layer")
+    for layer, payload in calibration_timing_payloads(events).items():
         pour_ms = payload.get("pour_ms")
         if not isinstance(layer, int) or not isinstance(pour_ms, (int, float)):
             continue
@@ -96,13 +90,7 @@ def layer_seconds_from_events(events: list) -> dict[int, tuple[float, float]]:
     makes the two independent calibration loops contaminate each other.
     """
     out: dict[int, tuple[float, float]] = {}
-    for event in events:
-        event_type = getattr(event, "event_type", None) if not isinstance(event, dict) else event.get("event_type")
-        if event_type != "layer_timing_summary":
-            continue
-        payload = getattr(event, "payload", None) if not isinstance(event, dict) else event.get("payload")
-        payload = payload or {}
-        layer = payload.get("layer")
+    for layer, payload in calibration_timing_payloads(events).items():
         burn_ms, pour_ms = payload.get("burn_ms"), payload.get("pour_ms")
         if not isinstance(layer, int):
             continue
@@ -115,11 +103,10 @@ def layer_seconds_from_events(events: list) -> dict[int, tuple[float, float]]:
 
 
 def machine_seconds_from_events(events: list) -> dict[int, float]:
-    """{layer: burn+pour seconds} — полное машинное время слоя, без пауз.
+    """{layer: burn+pour seconds} — сумма прожига и нанесения порошка.
 
-    Использует burn_ms + pour_ms (а не make_layer_ms): make_layer_ms на части
-    прошивок включает межслойные ожидания, а политика проекта — только чистое
-    машинное время (см. базу знаний в plate_estimator.py, п.1).
+    Не включает штатную межфазную задержку и минимальный цикл. Для полного
+    нормального времени требуется отдельно применить модель машинного цикла.
     """
     return {
         layer: burn_s + pour_s
@@ -143,15 +130,14 @@ def session_layer_seconds_by_layer(
     files = _time_log_files(session_id, db)
     if not files:
         return None
-    out: dict[int, tuple[float, float]] = {}
-    for f in files:
-        for layer, values in layer_seconds_from_events(f.parse_result.events).items():
-            out.setdefault(layer, values)
+    out = layer_seconds_from_events([
+        event for f in files for event in f.parse_result.events
+    ])
     return out or None
 
 
 def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
-    """Полное машинное время (burn+pour) по слоям одной сессии.
+    """Сумма прожига и нанесения порошка (burn+pour) по слоям сессии.
 
     Читает сохранённые послойные выводы из БД; к сырому логу обращается только
     как к запасному пути, для сессий, импортированных до появления хранения

@@ -14,6 +14,7 @@ atmospheric oxygen is not a healthy inert chamber.
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from statistics import fmean, median
 from typing import Any
 
@@ -54,6 +55,41 @@ def _clean_signal(signal: str, values: list[Any]) -> list[float]:
     # are ignored instead of erasing data.
     rejected_fraction = 1.0 - len(accepted) / len(cleaned)
     return accepted if should_apply_valid_range(rng, rejected_fraction) else cleaned
+
+
+def _clean_signal_indexed(signal: str, values: list[Any]) -> list[tuple[int, float]]:
+    """The same physical filtering as :func:`_clean_signal`, retaining row ids.
+
+    An anomaly without its source row cannot later be associated with print
+    progress, layer height or an STL region.  The legacy helper remains intact
+    for callers that only need values; this indexed variant is used by anomaly
+    detection and adds provenance without changing any existing result keys.
+    """
+    candidates = [
+        (index, float(value))
+        for index, value in enumerate(values)
+        if isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and abs(float(value)) <= 1e7
+    ]
+    if not candidates:
+        return []
+    from analytics.thresholds import (
+        load_valid_ranges,
+        should_apply_valid_range,
+        value_in_valid_range,
+        value_is_explicitly_invalid,
+    )
+
+    rng = load_valid_ranges().get(signal) or {}
+    if not rng:
+        return candidates
+    candidates = [pair for pair in candidates if not value_is_explicitly_invalid(pair[1], rng)]
+    if not candidates:
+        return []
+    accepted = [pair for pair in candidates if value_in_valid_range(pair[1], rng)]
+    rejected_fraction = 1.0 - len(accepted) / len(candidates)
+    return accepted if should_apply_valid_range(rng, rejected_fraction) else candidates
 
 
 def _pstdev(values: list[float]) -> float:
@@ -114,7 +150,7 @@ def _coefficient_of_variation(values: list[float]) -> float:
 
 
 def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5) -> list[dict[str, Any]]:
-    """Flag oxygen, humidity and temperature excursions in the telemetry series.
+    """Flag oxygen, pressure, humidity and temperature telemetry excursions.
 
     Spike detection uses a robust modified z-score (median/MAD), unit-agnostic.
     Returns anomaly dicts: {signal, semantic, severity, kind, value, z_score, detail}.
@@ -123,10 +159,88 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
     from analytics.thresholds import load_alarm_thresholds
 
     thresholds = load_alarm_thresholds()
+    time_axis = telemetry.get("time") or []
+    timestamp_axis = telemetry.get("timestamps") or []
+    layer_time_points: list[tuple[datetime, int]] = []
+    for point in telemetry.get("layer_time_points") or []:
+        if not isinstance(point, dict) or not isinstance(point.get("layer"), int):
+            continue
+        try:
+            layer_time_points.append((datetime.fromisoformat(point["timestamp"]), point["layer"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    layer_time_points.sort()
+    layer_steps = [
+        (layer_time_points[index][0] - layer_time_points[index - 1][0]).total_seconds()
+        for index in range(1, len(layer_time_points))
+        if layer_time_points[index][0] > layer_time_points[index - 1][0]
+    ]
+    typical_layer_step = median(layer_steps) if layer_steps else None
+
+    def _layer_location(timestamp: Any) -> dict[str, Any]:
+        if not isinstance(timestamp, str) or not layer_time_points:
+            return {}
+        try:
+            moment = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return {}
+        nearest_time, nearest_layer = min(
+            layer_time_points, key=lambda point: abs((point[0] - moment).total_seconds())
+        )
+        distance = abs((nearest_time - moment).total_seconds())
+        tolerance = max(300.0, (typical_layer_step or 0.0) * 2.5)
+        if distance <= tolerance:
+            return {
+                "layer": nearest_layer,
+                "layer_mapping_precision": "nearest_burn_log_timestamp",
+                "layer_time_distance_sec": round(distance, 1),
+            }
+        before = [layer for ts, layer in layer_time_points if ts <= moment]
+        after = [layer for ts, layer in layer_time_points if ts >= moment]
+        if before and after:
+            return {
+                "layer_range": [min(before[-1], after[0]), max(before[-1], after[0])],
+                "layer_mapping_precision": "timestamp_gap_range",
+                "layer_time_distance_sec": round(distance, 1),
+            }
+        return {}
+
+    def _location(source_index: int, sample_count: int) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "sample_index": source_index,
+            "sample_count": sample_count,
+        }
+        if source_index < len(time_axis) and time_axis[source_index] is not None:
+            result["time"] = time_axis[source_index]
+        if source_index < len(timestamp_axis) and timestamp_axis[source_index] is not None:
+            result["timestamp"] = timestamp_axis[source_index]
+            result.update(_layer_location(timestamp_axis[source_index]))
+        return result
+
+    def _alarm_ranges(samples: list[tuple[int, float]], sample_count: int) -> list[dict[str, Any]]:
+        """Contiguous source ranges; a long alarm is not one point anomaly."""
+        if not samples:
+            return []
+        ranges: list[dict[str, Any]] = []
+        start = previous = samples[0][0]
+        for index, _ in samples[1:]:
+            if index > previous + 1:
+                ranges.append({
+                    "start": _location(start, sample_count),
+                    "end": _location(previous, sample_count),
+                })
+                start = index
+            previous = index
+        ranges.append({
+            "start": _location(start, sample_count),
+            "end": _location(previous, sample_count),
+        })
+        return ranges[:20]
 
     def _scan(group: str, semantic: str, severity: str):
         for col, raw in (telemetry.get(group) or {}).items():
-            values = _clean_signal(col, raw)
+            indexed = _clean_signal_indexed(col, raw)
+            values = [value for _, value in indexed]
             if not values:
                 continue
             peak = _robust_spike(values)
@@ -143,18 +257,25 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
                     "value": round(values[peak_idx], 4),
                     "z_score": round(z, 2),
                     "detail": f"{semantic} '{col}' отклонение {z:+.1f} (макс {max(values):.3g})",
+                    **_location(indexed[peak_idx][0], len(raw)),
                 })
 
             thr = thresholds.get(col) or {}
             high = thr.get("alarm_high")
             low = thr.get("alarm_low")
-            alarm_values = [
-                value for value in values
-                if (high is not None and value > high) or (low is not None and value < low)
+            directional_alarms = [
+                ("выше", high, [pair for pair in indexed if high is not None and pair[1] > high]),
+                ("ниже", low, [pair for pair in indexed if low is not None and pair[1] < low]),
             ]
-            if alarm_values:
-                direction = "выше" if high is not None and max(alarm_values) > high else "ниже"
-                boundary = high if direction == "выше" else low
+            for direction, boundary, alarm_samples in directional_alarms:
+                if not alarm_samples or boundary is None:
+                    continue
+                alarm_values = [value for _, value in alarm_samples]
+                located = (
+                    max(alarm_samples, key=lambda pair: pair[1])
+                    if direction == "выше" else
+                    min(alarm_samples, key=lambda pair: pair[1])
+                )
                 anomalies.append({
                     "signal": col,
                     "semantic": semantic,
@@ -166,10 +287,13 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
                         f"{semantic} '{col}': {len(alarm_values)}/{len(values)} измерений "
                         f"{direction} порога {boundary:g}"
                     ),
+                    "sample_ranges": _alarm_ranges(alarm_samples, len(raw)),
+                    **_location(located[0], len(raw)),
                 })
 
     # Oxygen excursions are the most safety-relevant for metal AM (oxidation).
     _scan("oxygen", "кислород", "high")
+    _scan("pressure", "давление", "medium")
     _scan("humidity", "влажность", "medium")
     _scan("temperatures", "температура", "medium")
     return anomalies

@@ -16,7 +16,7 @@ def _layer(layer: int, pour_ms: int, burn_ms: int, make_ms: int) -> CanonicalEve
     )
 
 
-def test_phase_statistics_use_machine_layer_truth_and_first_duplicate():
+def test_phase_statistics_exclude_a_layer_with_conflicting_attempts():
     events = [
         _layer(1, 9000, 21000, 32000),
         _layer(1, 999999, 999999, 999999),
@@ -26,8 +26,8 @@ def test_phase_statistics_use_machine_layer_truth_and_first_duplicate():
     result = compute_layer_phase_statistics(events)
 
     assert result["available"] is True
-    assert result["layer_count"] == 3
-    assert result["phases"]["laser_scan"]["total_sec"] == 66
-    assert result["phases"]["powder_recoat"]["total_sec"] == 30
-    assert result["phases"]["controller_overhead"]["total_sec"] == 10
-    assert result["phases"]["full_layer_cycle"]["total_sec"] == 106
+    assert result["layer_count"] == 2
+    assert result["phases"]["laser_scan"]["total_sec"] == 45
+    assert result["phases"]["powder_recoat"]["total_sec"] == 21
+    assert result["phases"]["controller_overhead"]["total_sec"] == 8
+    assert result["phases"]["full_layer_cycle"]["total_sec"] == 74

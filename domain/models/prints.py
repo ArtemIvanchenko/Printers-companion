@@ -57,10 +57,10 @@ class PrintRecord(Base):
     # "material@thickness" — they do not transfer across thicknesses.
     layer_thickness_mm: Mapped[float | None] = mapped_column(Float)
     # Hatch distance this print was run at. NULL = not specified, fall back to
-    # the material preset. Per-print for the same reason as thickness: the
-    # machine's own Monitor100 log shows this moving 0.16 -> 0.10 -> 0.90 mm
-    # between steel jobs, and scan length goes as ~1/hatch, so a per-material
-    # constant mis-scales the whole estimate.
+    # the material preset. It remains per-print because it is a slicer/process
+    # strategy parameter and scan length scales approximately as 1/hatch.
+    # Monitor100 ``|P|`` positions are not mapped here: their firmware schema
+    # is not yet known well enough to label a numeric cell as hatch distance.
     hatch_distance_mm: Mapped[float | None] = mapped_column(Float)
     session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     status: Mapped[str] = mapped_column(String(40), default="draft")
@@ -211,9 +211,15 @@ class MachineParams(Base):
     # Per-material time-correction factors: {"steel": 1.15, "aluminum": 1.08, ...}
     # Auto-calibrated from predicted-vs-actual history per material.
     time_correction_by_mat: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
-    # Fitted scan-time models keyed "material@thickness" ("steel@0.060"),
-    # calibrated from real per-layer burn_ms logs — see
-    # analytics.prediction.scan_calibration. Applied only on an exact mode match.
+    # Fitted scan-time models. New keys include physical printer, material,
+    # thickness and laser count; legacy "material@thickness" keys remain
+    # readable for single-machine installations.
     scan_model_by_mat: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
+    # Normal controller-cycle models keyed by physical machine + material +
+    # thickness + laser count. Kept separate from scan NNLS because a valid
+    # make_layer_ms cycle can be learned even when STL geometry is incomplete.
+    layer_cycle_model_by_mode: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=_json_default_dict,
+    )
     build_area_cm2: Mapped[float | None] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

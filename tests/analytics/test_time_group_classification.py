@@ -248,6 +248,19 @@ def _time_log(day: str, first: int, last: int) -> IngestedFile:
     return file
 
 
+def _main_log(day: str, layer_positions: list[tuple[int, int]]) -> IngestedFile:
+    file = _file(f"{day}.log", "main_event_log", "primary")
+    file.parse_result.events = [
+        CanonicalEventDraft(
+            event_type="burn_event",
+            layer=layer,
+            payload={"table_position": position},
+        )
+        for layer, position in layer_positions
+    ]
+    return file
+
+
 class TestRestartedPrintsAreOneSession:
     """Stopping and restarting a print opens a log named by the restart date
     while the layer counter carries on. Those runs are one print: left apart,
@@ -287,6 +300,36 @@ class TestRestartedPrintsAreOneSession:
             [_time_log("08.06.2026", 2, 1133), _time_log("09.06.2026", 1134, 1983)]
         )
         assert len(groups) == 1
+
+    def test_one_missing_timing_layer_joins_when_table_position_proves_continuity(self):
+        # USB print 17→18.07: time.log stops at 298, while the main log records
+        # layer 299 at -62690. The next run opens at layer 301 at -62810, exactly
+        # two 60-unit Z steps later. Layer 300 was lost by logging, not a new job.
+        groups = group_files_into_sessions([
+            _time_log("17.07.2026", 1, 298),
+            _main_log("17.07.2026", [(297, -62570), (298, -62630), (299, -62690)]),
+            _time_log("18.07.2026", 301, 1350),
+            _main_log("18.07.2026", [(301, -62810), (302, -62870), (303, -62930)]),
+        ])
+        assert len(groups) == 1
+        assert "resumed_run" in groups[0].reasons
+        assert "resumed_run_position_continuity" in groups[0].reasons
+
+    def test_missing_timing_layer_without_position_proof_stays_separate(self):
+        groups = group_files_into_sessions([
+            _time_log("17.07.2026", 1, 299),
+            _time_log("18.07.2026", 301, 1350),
+        ])
+        assert len(groups) == 2
+
+    def test_inconsistent_table_position_does_not_bridge_logger_hole(self):
+        groups = group_files_into_sessions([
+            _time_log("17.07.2026", 1, 298),
+            _main_log("17.07.2026", [(297, -62570), (298, -62630), (299, -62690)]),
+            _time_log("18.07.2026", 301, 1350),
+            _main_log("18.07.2026", [(301, -70000), (302, -70060), (303, -70120)]),
+        ])
+        assert len(groups) == 2
 
     def test_a_reprint_of_the_same_plate_stays_separate(self):
         # 29.05 reran the 27-28.05 plate: same final layer 950, but it opens at

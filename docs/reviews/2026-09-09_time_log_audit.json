@@ -1,0 +1,541 @@
+{
+  "parser_version": "0.5.0",
+  "scope": "Individual unique files; counts are not confirmed unique print sessions.",
+  "files_found": 30,
+  "unique_files": 14,
+  "missing_roots": [],
+  "totals": {
+    "summary_count": 16639,
+    "detailed_count": 16639,
+    "paired_layers": 16639,
+    "unpaired_summaries": 0,
+    "unpaired_details": 0,
+    "equivalent_layer_duplicates": 1,
+    "conflicting_layer_duplicates": 39,
+    "impossible_cycle_count": 0,
+    "duration_mismatches": 0,
+    "unparsed_summary_lines": 0,
+    "calibration_layers": 16559,
+    "files_without_summaries": 3
+  },
+  "files": [
+    {
+      "sha256": "53184ea7c356d2cca4f7ea5baded172cd96e4a07b77f1882255c5f3911dfe7de",
+      "copies": [
+        "/Users/admin/Desktop/Логи/03.06.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/06_SIU_первый_03.06 (steel 0.06мм)/logs/03.06.2026_time.log"
+      ],
+      "raw_summary_lines": 833,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 5831,
+        "summary_count": 833,
+        "detailed_count": 833,
+        "paired_layers": 833,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 833
+    },
+    {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "copies": [
+        "/Users/admin/Desktop/Логи/04.05.2026_time.log",
+        "/Users/admin/Desktop/Логи/11.04.2026_time.log",
+        "/Users/admin/Desktop/Логи/29.04.2026_time.log"
+      ],
+      "raw_summary_lines": 0,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 0,
+        "summary_count": 0,
+        "detailed_count": 0,
+        "paired_layers": 0,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": null,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 0
+    },
+    {
+      "sha256": "f94ae1765a168a4379463055408c74ab89ad60f83c80da60caef928dcbb23e22",
+      "copies": [
+        "/Users/admin/Desktop/Логи/04.06.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/07_SIU_основной_04.06 (steel 0.06мм) — ГЕОМЕТРИЯ НЕПОЛНАЯ/logs/04.06.2026_time.log"
+      ],
+      "raw_summary_lines": 1983,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 13881,
+        "summary_count": 1983,
+        "detailed_count": 1983,
+        "paired_layers": 1983,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 1982
+    },
+    {
+      "sha256": "bb9187d24b5a282d61c81c1db1304dc5f263ef4bde47fdd3727fe568fef03fef",
+      "copies": [
+        "/Users/admin/Desktop/Логи/06.04.2026_time.log"
+      ],
+      "raw_summary_lines": 0,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 0,
+        "summary_count": 0,
+        "detailed_count": 0,
+        "paired_layers": 0,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": null,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 0
+    },
+    {
+      "sha256": "7be8cbf9e00085794d540b0639ed70159eb29876023bf8474099c192d3a098de",
+      "copies": [
+        "/Users/admin/Desktop/Логи/06.06.2026_time.log",
+        "/Users/admin/Desktop/Логи/21.05.2026_time.log",
+        "/Users/admin/Desktop/Логи/25.05.2026_time.log",
+        "/Users/admin/Desktop/Логи/30.05.2026_time.log"
+      ],
+      "raw_summary_lines": 0,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 0,
+        "summary_count": 0,
+        "detailed_count": 0,
+        "paired_layers": 0,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": null,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 0
+    },
+    {
+      "sha256": "af3a36df734ad5d8adf18f987fe8e2e9ae148e9fe95a467f4cea3251b26d38ed",
+      "copies": [
+        "/Users/admin/Desktop/Логи/08.06.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/08_Образцы_ГОСТ_08.06-09.06 (steel 0.125мм, стыкована)/logs/08.06.2026_time.log"
+      ],
+      "raw_summary_lines": 1132,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 7924,
+        "summary_count": 1132,
+        "detailed_count": 1132,
+        "paired_layers": 1132,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 1132
+    },
+    {
+      "sha256": "6fabef3f5cbca9d0954fbfe6fe4686a27e182692a4828b650325cc5fa59c02d3",
+      "copies": [
+        "/Users/admin/Desktop/Логи/09.06.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/08_Образцы_ГОСТ_08.06-09.06 (steel 0.125мм, стыкована)/logs/09.06.2026_time.log"
+      ],
+      "raw_summary_lines": 850,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 5950,
+        "summary_count": 850,
+        "detailed_count": 850,
+        "paired_layers": 850,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 850
+    },
+    {
+      "sha256": "c818d5b6e037b7c3d1399254c66670cc1278d5f2c347c3f8445d30b1402f148a",
+      "copies": [
+        "/Users/admin/Desktop/Логи/19.05.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/02_Труба+пластина_19.05 (aluminum 0.06мм)/logs/19.05.2026_time.log"
+      ],
+      "raw_summary_lines": 2505,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 17535,
+        "summary_count": 2505,
+        "detailed_count": 2505,
+        "paired_layers": 2505,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 40,
+        "equivalent_layer_duplicates": 1,
+        "conflicting_layer_duplicates": 39,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [
+        {
+          "severity": "info",
+          "code": "time_log_duplicate_layers",
+          "message": "Found 40 repeated layer summary records: 1 equivalent boundary copies and 39 possible repeat attempts.",
+          "source_line": null,
+          "source_offset": null,
+          "context": {
+            "count": 40,
+            "equivalent": 1,
+            "conflicting": 39,
+            "conflicting_layers": [
+              40,
+              41,
+              42,
+              43,
+              44,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54,
+              55,
+              56,
+              57,
+              58,
+              59,
+              60,
+              61,
+              63,
+              64,
+              65,
+              66,
+              67,
+              68,
+              69,
+              70,
+              71,
+              72,
+              73,
+              74,
+              75,
+              76,
+              77,
+              78,
+              79
+            ]
+          }
+        }
+      ],
+      "calibration_layer_count": 2426
+    },
+    {
+      "sha256": "3f027c424bff39f85cf40a3cf5686bc0b5b7929ad7738c2c7f92f141e1409f2e",
+      "copies": [
+        "/Users/admin/Desktop/Логи/23.03.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/01_ВИАМ_23.03-27.03 (steel 0.03мм)/logs/23.03.2026_time.log"
+      ],
+      "raw_summary_lines": 6842,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 47894,
+        "summary_count": 6842,
+        "detailed_count": 6842,
+        "paired_layers": 6842,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 6842
+    },
+    {
+      "sha256": "93478ede12bef014ea931322f1b1f4fe588dfe800373116e3b691ddfa6615e61",
+      "copies": [
+        "/Users/admin/Desktop/Логи/26.05.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/03_RS320_партия1_26.05 (steel 0.125мм)/logs/26.05.2026_time.log"
+      ],
+      "raw_summary_lines": 422,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "cp1251",
+        "event_count": 2954,
+        "summary_count": 422,
+        "detailed_count": 422,
+        "paired_layers": 422,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 422
+    },
+    {
+      "sha256": "f483ae5cc0b2ce8c0c0e048be9f2e4dd88d4b0a35c46175e5d45b3b8d2f19287",
+      "copies": [
+        "/Users/admin/Desktop/Логи/27.03.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/01_ВИАМ_23.03-27.03 (steel 0.03мм)/logs/27.03.2026_time.log"
+      ],
+      "raw_summary_lines": 174,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 1218,
+        "summary_count": 174,
+        "detailed_count": 174,
+        "paired_layers": 174,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 174
+    },
+    {
+      "sha256": "67cda65a239dde21b74fe061c9951f42d97f1518b7648cb675023e419467a063",
+      "copies": [
+        "/Users/admin/Desktop/Логи/27.05.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/04_RS320_партия2_27.05 (steel 0.06мм, стыкована с 28.05)/logs/27.05.2026_time.log"
+      ],
+      "raw_summary_lines": 383,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 2681,
+        "summary_count": 383,
+        "detailed_count": 383,
+        "paired_layers": 383,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 383
+    },
+    {
+      "sha256": "d12b93bdea073650957663335ce8cbd4eba559af0580d10669448d1519f14cf6",
+      "copies": [
+        "/Users/admin/Desktop/Логи/28.05.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/04_RS320_партия2_27.05 (steel 0.06мм, стыкована с 28.05)/logs/28.05.2026_time.log"
+      ],
+      "raw_summary_lines": 566,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 3962,
+        "summary_count": 566,
+        "detailed_count": 566,
+        "paired_layers": 566,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 566
+    },
+    {
+      "sha256": "35fd716ad36fbba2f9a10000bb5c9baeab9a1b81ed7e601aa52a8a9c60422075",
+      "copies": [
+        "/Users/admin/Desktop/Логи/29.05.2026_time.log",
+        "/Users/admin/Desktop/Подтверждённые печати/05_RS320_повтор_29.05 (steel 0.06мм, повтор плиты 27.05)/logs/29.05.2026_time.log"
+      ],
+      "raw_summary_lines": 949,
+      "unparsed_summary_lines": 0,
+      "metadata": {
+        "encoding": "utf-8",
+        "event_count": 6643,
+        "summary_count": 949,
+        "detailed_count": 949,
+        "paired_layers": 949,
+        "unpaired_summaries": 0,
+        "unpaired_details": 0,
+        "duration_mismatch_counts": {
+          "pour": 0,
+          "burn": 0,
+          "make_layer": 0
+        },
+        "duration_consistency_score": 100.0,
+        "duplicate_layer_summaries": 0,
+        "equivalent_layer_duplicates": 0,
+        "conflicting_layer_duplicates": 0,
+        "impossible_cycle_count": 0
+      },
+      "quality": [
+        "ok"
+      ],
+      "diagnostics": [],
+      "calibration_layer_count": 949
+    }
+  ]
+}

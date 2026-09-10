@@ -233,3 +233,36 @@ def test_only_current_unexpired_generation_can_renew_lease():
             lease_generation=claimed["lease_generation"],
             now=now + timedelta(seconds=1),
         )
+
+
+def test_infrastructure_deferral_does_not_consume_algorithm_retry_budget():
+    with SessionLocal() as db:
+        repo = JobsRepository(db)
+        queued = repo.enqueue(
+            job_type="print_estimate",
+            owner_node_id="operator-01",
+            entity_type="print_record",
+            entity_id="pr_nas_retry",
+            idempotency_key="print_estimate:operator-01:pr_nas_retry:1",
+            payload={"record_id": "pr_nas_retry"},
+            max_attempts=1,
+        )
+        claimed = repo.claim_next(
+            "print_estimate",
+            owner_node_id="operator-01",
+            lease_owner="worker-current",
+        )
+        assert claimed is not None and claimed["attempts"] == 1
+
+        deferred = repo.defer_infrastructure(
+            queued["job_id"],
+            "NAS database unavailable",
+            lease_owner="worker-current",
+            lease_generation=claimed["lease_generation"],
+        )
+
+        assert deferred is not None
+        assert deferred["status"] == "pending"
+        assert deferred["attempts"] == 0
+        assert deferred["lease_owner"] is None
+        assert deferred["available_at"] is not None

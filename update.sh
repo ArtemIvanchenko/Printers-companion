@@ -23,7 +23,7 @@ FROM="${LAST_DEPLOYED:-$LOCAL}"
 
 if [ "$LOCAL" != "$REMOTE" ]; then
     echo "[$(date '+%Y-%m-%d %H:%M')] Обновление: ${LOCAL:0:8} → ${REMOTE:0:8}" >> "$LOG"
-    git pull origin main -q
+    git pull --ff-only origin main -q
 fi
 
 # Rebuild base image if base-layer files changed (new deps won't appear otherwise).
@@ -34,7 +34,19 @@ fi
 
 # Rebuild and restart all currently running app services (dynamic — respects active profiles).
 RUNNING=$(docker compose ps --services --filter status=running 2>/dev/null | tr '\n' ' ')
-SERVICES="${RUNNING:-api worker watcher scheduler}"
+SERVICES="${RUNNING:-api worker estimator nas-sync watcher scheduler}"
+# An older installation cannot list newly introduced workers as running.
+# Keep storage-only deployments untouched, but complete an operator stack.
+case " $SERVICES " in
+    *" api "*|*" worker "*)
+        for REQUIRED in estimator nas-sync; do
+            case " $SERVICES " in
+                *" $REQUIRED "*) ;;
+                *) SERVICES="$SERVICES $REQUIRED" ;;
+            esac
+        done
+        ;;
+esac
 NEW_GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 # shellcheck disable=SC2086
 GIT_COMMIT="$NEW_GIT_COMMIT" docker compose up -d --build $SERVICES >> "$LOG" 2>&1

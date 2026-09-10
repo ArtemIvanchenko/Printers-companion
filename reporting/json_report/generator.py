@@ -5,11 +5,11 @@ from analytics.features.extraction import extract_layer_features, extract_sessio
 from analytics.normalization.deduplication import deduplicate_events
 from analytics.segmentation.phase_segmenter import segment_phases
 from core.versioning.constants import (
-    ANALYSIS_VERSION,
     CAUSAL_MODEL_VERSION,
     RULE_PACK_VERSION,
     SIGNAL_DICTIONARY_VERSION,
 )
+from core.versioning.provenance import build_provenance
 from domain.services.ingestion import IngestedFile
 from domain.services.session_classification import classify_session
 from profiles.m350.profile import get_profile
@@ -79,6 +79,17 @@ def generate_session_json_report(
     }
     input_hashes = {file.relative_path: file.checksum for file in files}
     data_quality = summarize_data_quality(files, dedupe_diagnostics)
+    provenance = build_provenance(
+        "session_report",
+        inputs=input_hashes,
+        config={
+            "profile_version": profile.version,
+            "signal_dictionary_version": SIGNAL_DICTIONARY_VERSION,
+            "rule_pack_version": RULE_PACK_VERSION,
+            "causal_model_version": CAUSAL_MODEL_VERSION,
+        },
+        parser_versions=parser_versions,
+    )
     return {
         "report_id": f"report_{uuid4().hex}",
         "session_id": session_id,
@@ -122,14 +133,12 @@ def generate_session_json_report(
         ],
         "deduplication_diagnostics": dedupe_diagnostics,
         "version_metadata": {
+            **provenance,
             "input_file_hashes": input_hashes,
-            "parser_versions": parser_versions,
             "profile_version": profile.version,
             "signal_dictionary_version": SIGNAL_DICTIONARY_VERSION,
             "rule_pack_version": RULE_PACK_VERSION,
-            "analysis_version": ANALYSIS_VERSION,
             "causal_model_version": CAUSAL_MODEL_VERSION,
-            "generated_by": "system",
         },
     }
 
@@ -168,4 +177,3 @@ def summarize_data_quality(files: list[IngestedFile], dedupe_diagnostics: list[d
             "Unknown fields and unmapped states are preserved for future enrichment.",
         ],
     }
-

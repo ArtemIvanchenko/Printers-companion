@@ -23,6 +23,7 @@ from api.routes import (
     llm,
     machine_settings,
     maintenance,
+    models,
     operator_events,
     operator_journal,
     powder,
@@ -31,6 +32,7 @@ from api.routes import (
     quality,
     realtime,
     sessions,
+    sync,
     test_metrics,
     uploads,
     web,
@@ -257,6 +259,7 @@ def health_ready() -> JSONResponse:
 
 
 app.include_router(sessions.router)
+app.include_router(sync.router)
 app.include_router(imports.router)
 app.include_router(anomalies.router)
 app.include_router(profiles.router)
@@ -274,6 +277,7 @@ app.include_router(web.router)
 app.include_router(dashboard.router)
 app.include_router(realtime.router)
 app.include_router(maintenance.router)
+app.include_router(models.router)
 app.include_router(powder.router)
 app.include_router(analysis.router)
 app.include_router(updater.router)

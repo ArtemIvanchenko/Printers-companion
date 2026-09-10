@@ -4,16 +4,17 @@ Revision ID: 0012_print_hatch_distance
 Revises: 0011_plate_geometry_cache
 Create Date: 2026-08-05
 
-Hatch distance was only ever available per material, from the machine preset, so
-every print of a given material was hatched at whatever that preset held. The
-machine logs say that is wrong: ``*_Monitor100.log`` records the applied
-parameter set on ``|P|`` lines, and its hatch field moved 0.16 -> 0.10 -> 0.90 mm
-across steel jobs on this machine — a 9x span, while the preset claimed a fixed
-0.12 mm for every one of them. Scan length is ~1/hatch, so that single number
-dominates the whole time estimate.
+Hatch distance was only available per material, from the machine preset, so
+every print of a given material was estimated as if it shared one value. It is
+actually a slicer/process-strategy parameter and may vary per job. Scan length
+scales approximately as 1/hatch, so the value materially affects time.
 
-This mirrors 0009_print_layer_thickness exactly: the parameter belongs to the
-print, not to the machine. NULL means "not specified" — the estimate falls back
+The firmware schema of Monitor100 ``|P|`` records is not documented in this
+project. Their unlabelled numeric positions must not be treated as hatch
+distance until independently decoded and verified against a known job export.
+
+This mirrors 0009_print_layer_thickness: the effective parameter belongs to the
+job strategy, not only to the machine. NULL means "not specified" — the estimate falls back
 to the preset/machine value, so existing records keep behaving as before.
 """
 

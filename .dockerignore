@@ -17,3 +17,12 @@ build
 venv
 htmlcov
 .coverage
+.operator-state/
+.codex-tmp/
+.claude/
+CLAUDE.md
+backups/
+raw_logs/
+control/
+update.log
+.last_deployed

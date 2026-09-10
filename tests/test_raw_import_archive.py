@@ -1,8 +1,16 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from domain.services.import_jobs import ImportJobRecord, archive_raw_import
+from core.config.settings import Settings
+from domain.enums.common import ImportJobStatus
+from domain.services.import_jobs import (
+    ImportJobRecord,
+    RawArchiveUnavailableError,
+    archive_raw_import,
+    confirm_import_job,
+)
 
 
 class _Store:
@@ -18,9 +26,22 @@ class _Store:
     def is_available(self) -> bool:
         return self.available
 
-    def put_file(self, bucket: str, object_name: str, path: Path) -> str:
+    def put_file_verified(
+        self,
+        bucket: str,
+        object_name: str,
+        path: Path,
+        *,
+        expected_sha256: str,
+        expected_size: int,
+    ) -> str:
         assert bucket == "raw-logs"
-        self.objects[object_name] = path.read_bytes()
+        payload = path.read_bytes()
+        assert len(payload) == expected_size
+        import hashlib
+
+        assert hashlib.sha256(payload).hexdigest() == expected_sha256
+        self.objects.setdefault(object_name, payload)
         return f"s3://{bucket}/{object_name}"
 
 
@@ -69,3 +90,38 @@ def test_nas_unavailable_blocks_a_required_archive(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="NAS object storage is unavailable"):
         archive_raw_import(_job(batch), batch, required=True)
+
+
+def test_nas_archive_outage_is_retried_without_terminal_limit(tmp_path, monkeypatch):
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    (batch / "main.log").write_bytes(b"main")
+    now = datetime.now(timezone.utc)
+    job = _job(batch)
+    job.stability_check_attempts = 50
+
+    def _unavailable(*args, **kwargs):
+        raise RawArchiveUnavailableError("NAS unavailable")
+
+    monkeypatch.setattr(
+        "domain.services.import_jobs.execute_confirmed_import",
+        _unavailable,
+    )
+    settings = Settings(
+        file_stability_seconds=0,
+        nas_sync_retry_min_seconds=5,
+        nas_sync_retry_max_seconds=300,
+    )
+
+    result = confirm_import_job(
+        job,
+        registry=object(),
+        settings=settings,
+        now=now,
+    )
+
+    assert result.job.status == ImportJobStatus.postponed
+    assert result.job.stability_check_attempts == 51
+    assert result.job.postponed_until is not None
+    assert (result.job.postponed_until - now).total_seconds() == 300
+    assert result.job.audit_trail[-1]["action"] == "raw_archive_deferred"

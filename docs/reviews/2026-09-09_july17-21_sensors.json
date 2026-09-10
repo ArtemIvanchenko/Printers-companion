@@ -1,0 +1,412 @@
+{
+  "scope": "full_sensor_recording_not_burn_only",
+  "files": [
+    {
+      "path": "/Users/admin/Desktop/M350 Logs/17.07.2026_sensors.log",
+      "sha256": "ed0592ee770aa943b82dee78a2fb232c23cb6eacd24533a8f86f5410648efebb",
+      "rows": 59739,
+      "start_utc": "2026-07-17T14:52:24+00:00",
+      "end_utc": "2026-07-18T07:28:35+00:00",
+      "elapsed_hours": 16.603055555555557,
+      "gaps_over_5s": 0,
+      "max_gap_seconds": 5.0,
+      "timestamp_diagnostics": {
+        "midnight_rollovers": 1
+      },
+      "signals": {
+        "SO1": {
+          "valid_rows": 59721,
+          "invalid_rows": 18,
+          "min": 0.01,
+          "median": 0.01,
+          "p05": 0.01,
+          "p95": 0.01,
+          "max": 0.11,
+          "last": 0.01,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:33+00:00",
+            "value": 0.09
+          },
+          "first_at_or_below_0_1": "2026-07-17T14:52:33+00:00",
+          "observed_seconds_at_or_below_0_1": 59350.0,
+          "descriptive_threshold_note": "0.1 is a descriptive oxygen level, not a validated process limit."
+        },
+        "SO2": {
+          "valid_rows": 59721,
+          "invalid_rows": 18,
+          "min": 0.01,
+          "median": 0.01,
+          "p05": 0.01,
+          "p95": 0.38,
+          "max": 0.67,
+          "last": 0.01,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:33+00:00",
+            "value": 0.65
+          },
+          "first_at_or_below_0_1": "2026-07-17T16:37:09+00:00",
+          "observed_seconds_at_or_below_0_1": 53466.0,
+          "descriptive_threshold_note": "0.1 is a descriptive oxygen level, not a validated process limit."
+        },
+        "ST3": {
+          "valid_rows": 59739,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 25.0,
+          "p05": 25.0,
+          "p95": 25.0,
+          "max": 25.0,
+          "last": 25.0,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:24+00:00",
+            "value": 0.0
+          }
+        },
+        "ST4": {
+          "valid_rows": 59739,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 0.0,
+          "p05": 0.0,
+          "p95": 0.0,
+          "max": 0.0,
+          "last": 0.0,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:24+00:00",
+            "value": 0.0
+          }
+        },
+        "ST5": {
+          "valid_rows": 59739,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 150.3,
+          "p05": 149.5,
+          "p95": 151.3,
+          "max": 154.7,
+          "last": 149.5,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:24+00:00",
+            "value": 0.0
+          }
+        },
+        "Flow T": {
+          "valid_rows": 42058,
+          "invalid_rows": 17681,
+          "min": 0.0,
+          "median": 62.9,
+          "p05": 32.2,
+          "p95": 63.3,
+          "max": 78.6,
+          "last": 62.9,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:55:13+00:00",
+            "value": 27.2
+          }
+        },
+        "Flow H": {
+          "valid_rows": 59739,
+          "invalid_rows": 0,
+          "min": -0.0,
+          "median": 5.18,
+          "p05": 2.42,
+          "p95": 12.49,
+          "max": 99.99,
+          "last": 5.29,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:24+00:00",
+            "value": 0.0
+          }
+        },
+        "SP4": {
+          "valid_rows": 59721,
+          "invalid_rows": 18,
+          "min": 0.9888,
+          "median": 1.0036,
+          "p05": 1.0032,
+          "p95": 1.0045,
+          "max": 1.008,
+          "last": 1.003,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:33+00:00",
+            "value": 1.007
+          }
+        },
+        "SF1": {
+          "valid_rows": 59739,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 953.0,
+          "p05": 952.9,
+          "p95": 953.6,
+          "max": 956.4,
+          "last": 952.9,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:24+00:00",
+            "value": 0.0
+          }
+        },
+        "LIR": {
+          "valid_rows": 59721,
+          "invalid_rows": 18,
+          "min": -63683.0,
+          "median": -56270.0,
+          "p05": -62151.0,
+          "p95": -45530.0,
+          "max": -44748.0,
+          "last": -62690.0,
+          "first_valid": {
+            "timestamp": "2026-07-17T14:52:33+00:00",
+            "value": -44850.0
+          }
+        }
+      },
+      "most_common_nonzero_lir_steps": [
+        [
+          1.0,
+          1232
+        ],
+        [
+          -1.0,
+          967
+        ],
+        [
+          2.0,
+          167
+        ],
+        [
+          3.0,
+          80
+        ],
+        [
+          8.0,
+          56
+        ],
+        [
+          9.0,
+          55
+        ],
+        [
+          4.0,
+          53
+        ],
+        [
+          7.0,
+          44
+        ],
+        [
+          10.0,
+          34
+        ],
+        [
+          -2.0,
+          33
+        ]
+      ]
+    },
+    {
+      "path": "/Users/admin/Desktop/M350 Logs/18.07.2026_sensors.log",
+      "sha256": "9fc347aeba12e65b0a19b236d46ff3e0b0f353574789336ae114a0893fd06d1d",
+      "rows": 222290,
+      "start_utc": "2026-07-18T07:28:41+00:00",
+      "end_utc": "2026-07-20T21:15:29+00:00",
+      "elapsed_hours": 61.78,
+      "gaps_over_5s": 0,
+      "max_gap_seconds": 5.0,
+      "timestamp_diagnostics": {
+        "midnight_rollovers": 3
+      },
+      "signals": {
+        "SO1": {
+          "valid_rows": 222265,
+          "invalid_rows": 25,
+          "min": 0.01,
+          "median": 0.01,
+          "p05": 0.01,
+          "p95": 0.01,
+          "max": 0.01,
+          "last": 0.01,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:53+00:00",
+            "value": 0.01
+          },
+          "first_at_or_below_0_1": "2026-07-18T07:28:53+00:00",
+          "observed_seconds_at_or_below_0_1": 222378.0,
+          "descriptive_threshold_note": "0.1 is a descriptive oxygen level, not a validated process limit."
+        },
+        "SO2": {
+          "valid_rows": 222265,
+          "invalid_rows": 25,
+          "min": 0.01,
+          "median": 0.01,
+          "p05": 0.01,
+          "p95": 0.01,
+          "max": 0.01,
+          "last": 0.01,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:53+00:00",
+            "value": 0.01
+          },
+          "first_at_or_below_0_1": "2026-07-18T07:28:53+00:00",
+          "observed_seconds_at_or_below_0_1": 222378.0,
+          "descriptive_threshold_note": "0.1 is a descriptive oxygen level, not a validated process limit."
+        },
+        "ST3": {
+          "valid_rows": 222290,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 25.0,
+          "p05": 25.0,
+          "p95": 25.0,
+          "max": 25.0,
+          "last": 25.0,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:41+00:00",
+            "value": 0.0
+          }
+        },
+        "ST4": {
+          "valid_rows": 222290,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 0.0,
+          "p05": 0.0,
+          "p95": 0.0,
+          "max": 0.0,
+          "last": 0.0,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:41+00:00",
+            "value": 0.0
+          }
+        },
+        "ST5": {
+          "valid_rows": 222290,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 151.1,
+          "p05": 150.1,
+          "p95": 153.0,
+          "max": 157.7,
+          "last": 151.0,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:41+00:00",
+            "value": 0.0
+          }
+        },
+        "Flow T": {
+          "valid_rows": 159022,
+          "invalid_rows": 63268,
+          "min": 0.0,
+          "median": 63.3,
+          "p05": 47.7,
+          "p95": 64.1,
+          "max": 73.4,
+          "last": 61.2,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:41+00:00",
+            "value": 0.0
+          }
+        },
+        "Flow H": {
+          "valid_rows": 222290,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 5.94,
+          "p05": 5.68,
+          "p95": 12.49,
+          "max": 99.99,
+          "last": 5.45,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:41+00:00",
+            "value": 0.0
+          }
+        },
+        "SP4": {
+          "valid_rows": 222265,
+          "invalid_rows": 25,
+          "min": 0.9909,
+          "median": 1.003,
+          "p05": 1.0021,
+          "p95": 1.0038,
+          "max": 1.0053,
+          "last": 0.9922,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:53+00:00",
+            "value": 1.0034
+          }
+        },
+        "SF1": {
+          "valid_rows": 222290,
+          "invalid_rows": 0,
+          "min": 0.0,
+          "median": 952.5,
+          "p05": 952.3,
+          "p95": 952.7,
+          "max": 955.0,
+          "last": 0.0,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:41+00:00",
+            "value": 0.0
+          }
+        },
+        "LIR": {
+          "valid_rows": 222265,
+          "invalid_rows": 25,
+          "min": -126742.0,
+          "median": -88790.0,
+          "p05": -113570.0,
+          "p95": -65930.0,
+          "max": -62689.0,
+          "last": -125750.0,
+          "first_valid": {
+            "timestamp": "2026-07-18T07:28:53+00:00",
+            "value": -62690.0
+          }
+        }
+      },
+      "most_common_nonzero_lir_steps": [
+        [
+          1.0,
+          4115
+        ],
+        [
+          -1.0,
+          3116
+        ],
+        [
+          4.0,
+          361
+        ],
+        [
+          3.0,
+          336
+        ],
+        [
+          2.0,
+          323
+        ],
+        [
+          5.0,
+          170
+        ],
+        [
+          12.0,
+          112
+        ],
+        [
+          11.0,
+          111
+        ],
+        [
+          9.0,
+          100
+        ],
+        [
+          13.0,
+          98
+        ]
+      ]
+    }
+  ],
+  "limitation_ru": "Основной журнал и time.log недоступны: фазы прожига, точные слои и паузы не восстанавливаются из одной телеметрии."
+}

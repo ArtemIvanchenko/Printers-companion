@@ -61,7 +61,7 @@ try {
 # 3. Start services
 Write-Step "[3/4] Starting services..." Yellow
 $running = docker compose ps --services --filter status=running 2>$null
-$allServices = @("api", "worker", "watcher", "scheduler")
+$allServices = @("api", "worker", "estimator", "nas-sync", "watcher", "scheduler")
 $missingServices = $allServices | Where-Object { $running -notcontains $_ }
 
 if ($missingServices) {

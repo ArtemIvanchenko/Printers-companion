@@ -6,6 +6,8 @@ from background_reanalysis.hypothesis_generator import generate_hypotheses_from_
 from background_reanalysis.insight_repository import create_pattern_insight_draft
 from background_reanalysis.job_planner import HistoricalReanalysisPlan
 from background_reanalysis.pattern_mining import mine_repeated_patterns
+from core.versioning.constants import ANALYSIS_VERSION
+from core.versioning.provenance import build_provenance
 
 
 ITERATION_NAMES = [
@@ -89,7 +91,19 @@ def _verdict(
         "missing_data": [],
         "recommended_actions": ["Review draft insights before confirmation."] if insights else [],
         "affected_sessions": sorted({session for insight in insights for session in insight.get("supporting_sessions", [])}),
-        "analysis_version": "0.1.0",
+        "analysis_version": ANALYSIS_VERSION,
+        "version_metadata": build_provenance(
+            "historical_reanalysis",
+            inputs={
+                "window": [plan.start.isoformat(), plan.end.isoformat()],
+                "session_ids": sorted(
+                    str(row.get("session_id")) for row in intermediate if row.get("session_id")
+                ),
+            },
+            config={
+                "max_iterations": plan.max_iterations,
+                "compute_budget_seconds": plan.compute_budget_seconds,
+            },
+        ),
         "evidence_links": intermediate,
     }
-

@@ -42,17 +42,35 @@ def test_latest_quality_outcome_wins_deterministically():
         # Insert newest first to prove row/insertion order is irrelevant.
         db.add(QualityOutcome(
             outcome_id="q_new", session_id="s_quality", timestamp=start + timedelta(days=1),
-            inspection_type="visual", result="rejected",
+            inspection_type="visual", result="rejected", is_final=True,
         ))
         db.add(QualityOutcome(
             outcome_id="q_old", session_id="s_quality", timestamp=start,
-            inspection_type="visual", result="accepted",
+            inspection_type="visual", result="accepted", is_final=True,
         ))
         db.flush()
 
         labels = _load_quality_labels(db)
 
     assert labels["s_quality"] == 1
+
+
+def test_generic_quality_observation_is_not_ml_ground_truth():
+    start = datetime(2027, 2, 1, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        db.add(BuildSession(session_id="s_observation", start_ts=start))
+        db.add(QualityOutcome(
+            outcome_id="q_observation",
+            session_id="s_observation",
+            timestamp=start,
+            inspection_type="visual",
+            result="rejected",
+            is_final=False,
+        ))
+        db.flush()
+        labels = _load_quality_labels(db)
+
+    assert "s_observation" not in labels
 
 
 def test_model_cache_fingerprint_includes_feature_values():

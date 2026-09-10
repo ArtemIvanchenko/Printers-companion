@@ -1,0 +1,702 @@
+{
+  "method_version": "log-insights-1.0.0",
+  "source": "calculated",
+  "environment": {
+    "status": "ok",
+    "source": "calculated",
+    "sample_count": 537746,
+    "metrics": [
+      {
+        "signal": "SO1",
+        "name_ru": "Кислород в рабочей камере — датчик 1",
+        "observed_seconds": 7334.061997652054,
+        "exceedance_seconds": 0.0,
+        "excess_integral": 0.0,
+        "value_integral": 73.34061997652078,
+        "sample_segments": 7722,
+        "time_weighted_mean": 0.010000000000000033,
+        "threshold": {
+          "high": 2.0,
+          "unit": "percent",
+          "confirmed": false,
+          "origin": "machine_profile_candidate"
+        },
+        "integral_unit": "percent·s",
+        "coverage_ratio": 1.0
+      },
+      {
+        "signal": "SO2",
+        "name_ru": "Кислород в рабочей камере — датчик 2",
+        "observed_seconds": 7334.061997652054,
+        "exceedance_seconds": 0.0,
+        "excess_integral": 0.0,
+        "value_integral": 73.34061997652078,
+        "sample_segments": 7722,
+        "time_weighted_mean": 0.010000000000000033,
+        "threshold": {
+          "high": 2.0,
+          "unit": "percent",
+          "confirmed": false,
+          "origin": "machine_profile_candidate"
+        },
+        "integral_unit": "percent·s",
+        "coverage_ratio": 1.0
+      },
+      {
+        "signal": "ST3",
+        "name_ru": "Температура в нижней части камеры",
+        "observed_seconds": 7334.061997652054,
+        "exceedance_seconds": 0.0,
+        "excess_integral": 0.0,
+        "value_integral": 183351.54994130135,
+        "sample_segments": 7722,
+        "time_weighted_mean": 25.0,
+        "threshold": {
+          "high": 200,
+          "unit": "degC",
+          "confirmed": false,
+          "origin": "machine_profile_candidate"
+        },
+        "integral_unit": "degC·s",
+        "coverage_ratio": 1.0
+      },
+      {
+        "signal": "ST4",
+        "name_ru": "Температура в верхней части камеры",
+        "observed_seconds": 7334.061997652054,
+        "exceedance_seconds": 0.0,
+        "excess_integral": 0.0,
+        "value_integral": 0.0,
+        "sample_segments": 7722,
+        "time_weighted_mean": 0.0,
+        "threshold": {
+          "high": 200,
+          "unit": "degC",
+          "confirmed": false,
+          "origin": "machine_profile_candidate"
+        },
+        "integral_unit": "degC·s",
+        "coverage_ratio": 1.0
+      },
+      {
+        "signal": "ST5",
+        "name_ru": "Температура платформы построения",
+        "observed_seconds": 7334.061997652054,
+        "exceedance_seconds": 0.0,
+        "excess_integral": 0.0,
+        "value_integral": 1111768.7233930866,
+        "sample_segments": 7722,
+        "time_weighted_mean": 151.5897634556418,
+        "threshold": {
+          "high": 200,
+          "unit": "degC",
+          "confirmed": false,
+          "origin": "machine_profile_candidate"
+        },
+        "integral_unit": "degC·s",
+        "coverage_ratio": 1.0
+      },
+      {
+        "signal": "Flow H",
+        "name_ru": "Влажность продувочного газа",
+        "observed_seconds": 7334.061997652054,
+        "exceedance_seconds": 5.9195812560407495,
+        "excess_integral": 297.53783977494226,
+        "value_integral": 38327.245273799585,
+        "sample_segments": 7722,
+        "time_weighted_mean": 5.225923272269824,
+        "threshold": {
+          "high": 40,
+          "unit": "percent",
+          "confirmed": false,
+          "origin": "machine_profile_candidate"
+        },
+        "integral_unit": "percent·s",
+        "coverage_ratio": 1.0
+      }
+    ],
+    "layer_items": [
+      {
+        "layer": 1395,
+        "signals": {
+          "SO1": {
+            "observed_seconds": 9.296000003814697,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 0.09296000003814697
+          },
+          "SO2": {
+            "observed_seconds": 9.296000003814697,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 0.09296000003814697
+          },
+          "ST3": {
+            "observed_seconds": 9.296000003814697,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 232.40000009536743
+          },
+          "ST4": {
+            "observed_seconds": 9.296000003814697,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 0.0
+          },
+          "ST5": {
+            "observed_seconds": 9.296000003814697,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 1409.0440005779265
+          },
+          "Flow H": {
+            "observed_seconds": 9.296000003814697,
+            "exceedance_seconds": 4.29088706195146,
+            "excess_integral": 218.690157423234,
+            "value_integral": 433.8616000175477
+          }
+        }
+      },
+      {
+        "layer": 1180,
+        "signals": {
+          "SO1": {
+            "observed_seconds": 8.984999895095825,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 0.08984999895095826
+          },
+          "SO2": {
+            "observed_seconds": 8.984999895095825,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 0.08984999895095826
+          },
+          "ST3": {
+            "observed_seconds": 8.984999895095825,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 224.62499737739563
+          },
+          "ST4": {
+            "observed_seconds": 8.984999895095825,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 0.0
+          },
+          "ST5": {
+            "observed_seconds": 8.984999895095825,
+            "exceedance_seconds": 0.0,
+            "excess_integral": 0.0,
+            "value_integral": 1359.0789953676654
+          },
+          "Flow H": {
+            "observed_seconds": 8.984999895095825,
+            "exceedance_seconds": 1.6286941940892894,
+            "excess_integral": 78.84768235170823,
+            "value_integral": 184.12659952163696
+          }
+        }
+      }
+    ],
+    "affected_layer_count": 2,
+    "details_truncated": false,
+    "burn_window_count": 850,
+    "burn_window_seconds": 7334.061997652054,
+    "approximate_window_count": 850,
+    "rejected_gaps": 0,
+    "out_of_order_rows": 965,
+    "limitations_ru": [
+      "Интеграл рассчитан линейно между соседними отсчётами; большие пропуски исключены.",
+      "Порог профиля не является подтверждённым режимом материала, пока не отмечен как confirmed.",
+      "Привязка по общей метке прожига приблизительна; причина отклонения и брак не устанавливаются."
+    ]
+  },
+  "recovery": {
+    "items": [],
+    "count": 0,
+    "stable_window_seconds": 30.0,
+    "source": "calculated",
+    "sample_count": 0,
+    "limitations_ru": [
+      "Стабильность показаний не подтверждает исправность датчиков; проверяются доступные каналы либо весь явно заданный набор."
+    ],
+    "layer_comparison": {
+      "source": "calculated",
+      "status": "no_resumes",
+      "sample_count": 0,
+      "items": [],
+      "limitations_ru": [
+        "Изменение времени после возобновления может объясняться геометрией; причинность не установлена."
+      ]
+    }
+  },
+  "time_accounting": {
+    "status": "ok",
+    "source": "calculated",
+    "sample_count": 850,
+    "components": [
+      {
+        "key": "laser_scan",
+        "name_ru": "Прожиг всех записанных попыток",
+        "seconds": 7334.0620000000035
+      },
+      {
+        "key": "powder_recoat",
+        "name_ru": "Нанесение порошка всех попыток",
+        "seconds": 8190.950999999978
+      },
+      {
+        "key": "base_overhead",
+        "name_ru": "Штатная межфазная задержка",
+        "seconds": 0.0
+      },
+      {
+        "key": "minimum_cycle_wait",
+        "name_ru": "Ожидание минимального цикла",
+        "seconds": 0.0
+      },
+      {
+        "key": "unexplained_residual",
+        "name_ru": "Необъяснённый остаток цикла",
+        "seconds": 321.03399999999965
+      }
+    ],
+    "observed_attempt_cycle_seconds": 15846.047,
+    "normal_unique_layer_seconds": null,
+    "normal_layer_count": 850,
+    "repeat_attempt_seconds": 0.0,
+    "repeat_attempt_count": 0,
+    "ambiguous_layer_count": 0,
+    "explicit_pause_seconds": 0,
+    "open_pause_count": 0,
+    "largest_residuals": [
+      {
+        "layer": 1400,
+        "unexplained_seconds": 1.141
+      },
+      {
+        "layer": 1519,
+        "unexplained_seconds": 0.453
+      },
+      {
+        "layer": 1136,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1139,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1142,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1146,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1150,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1152,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1161,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1165,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1168,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1171,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1188,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1193,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1198,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1207,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1222,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1240,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1251,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1253,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1261,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1275,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1277,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1300,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1301,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1308,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1311,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1321,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1338,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1358,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1361,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1365,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1370,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1372,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1375,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1381,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1382,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1387,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1388,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1392,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1396,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1397,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1401,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1407,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1413,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1420,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1426,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1429,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1433,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1434,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1446,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1448,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1458,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1474,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1476,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1478,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1482,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1486,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1492,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1496,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1498,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1499,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1501,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1510,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1513,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1529,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1532,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1535,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1538,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1539,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1546,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1551,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1556,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1560,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1568,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1569,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1583,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1587,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1592,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1600,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1602,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1606,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1627,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1650,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1659,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1661,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1666,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1667,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1688,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1695,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1697,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1702,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1709,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1725,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1729,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1737,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1746,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1756,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1766,
+        "unexplained_seconds": 0.438
+      },
+      {
+        "layer": 1793,
+        "unexplained_seconds": 0.438
+      }
+    ],
+    "limitations_ru": [
+      "Компоненты складываются в записанное время всех попыток; время пауз и повторов показано отдельно и не прибавляется повторно.",
+      "Необъяснённый остаток не объявляется паузой без события в журнале.",
+      "Без калибровки минимального цикла нормальное полное время не определяется.",
+      "Разные попытки установлены по различию записей; одинаковые длительности сами по себе не доказывают отсутствие повтора."
+    ]
+  },
+  "read_diagnostics": {
+    "invalid_cells:SO1": 33,
+    "invalid_cells:SO2": 461683,
+    "midnight_rollovers": 6
+  },
+  "provenance": {
+    "component": "log_insights",
+    "app_version": "1.5.0",
+    "analysis_version": "0.4.0",
+    "git_sha": null,
+    "input_fingerprint": "94425f57899d79871529eae98744f273e84369ff679347ef2fdfd5d3ee188422",
+    "config_hash": "e6a69d37c6ee616093665bd31fb68c41c2a4fb5be45a272d4823a0d8405fcca7",
+    "parser_versions": {
+      "main_event_log": "0.3.1",
+      "time_log": "0.5.0"
+    },
+    "model_versions": {},
+    "generated_by": "local-operator",
+    "generated_at": "2026-09-09T10:47:07.909538+00:00"
+  }
+}

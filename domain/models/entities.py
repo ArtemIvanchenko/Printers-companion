@@ -67,6 +67,7 @@ from domain.models.prints import (
     PrintRecordFile,
 )
 from domain.models.jobs import BackgroundJob, ComputeNodeRegistration
+from domain.models.ml import MLModelVersion
 
 from domain.models.insights import (
     CausalLink,
@@ -125,6 +126,7 @@ __all__ = [
     "MachinePreset",
     "BackgroundJob",
     "ComputeNodeRegistration",
+    "MLModelVersion",
 ]
 
 

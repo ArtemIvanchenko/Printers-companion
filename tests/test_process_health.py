@@ -7,11 +7,16 @@ from analytics.process_health import (
 
 
 def test_oxygen_spike_is_flagged():
-    telemetry = {"oxygen": {"SO1": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 10]}}
+    telemetry = {
+        "time": [f"10:00:0{i}" for i in range(8)],
+        "oxygen": {"SO1": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 10]},
+    }
     anomalies = detect_process_anomalies(telemetry)
     assert any(a["signal"] == "SO1" and a["kind"] == "spike" for a in anomalies)
     assert anomalies[0]["semantic"] == "кислород"
     assert anomalies[0]["severity"] == "high"
+    assert anomalies[0]["sample_index"] == 7
+    assert anomalies[0]["time"] == "10:00:07"
 
 
 def test_stable_series_has_no_anomalies():
@@ -72,6 +77,21 @@ def test_stable_but_unsafe_oxygen_is_poor_and_flagged():
     assert readiness["score"] < 50
     assert readiness["grade"] == "poor"
     assert any(item["kind"] == "threshold" for item in anomalies)
+
+
+def test_low_and_high_threshold_excursions_are_separate(monkeypatch):
+    monkeypatch.setattr(
+        "analytics.thresholds.load_alarm_thresholds",
+        lambda: {"DUAL": {"alarm_low": -1.0, "alarm_high": 1.0}},
+    )
+    anomalies = detect_process_anomalies({
+        "pressure": {"DUAL": [-2.0, -2.0, 0.0, 0.0, 2.0, 2.0]},
+    })
+    thresholds = [item for item in anomalies if item["kind"] == "threshold"]
+
+    assert len(thresholds) == 2
+    assert any("ниже порога" in item["detail"] for item in thresholds)
+    assert any("выше порога" in item["detail"] for item in thresholds)
 
 
 def test_build_process_health_bundle_and_empty():

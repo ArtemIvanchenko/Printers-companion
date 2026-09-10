@@ -13,6 +13,27 @@ def generate_markdown_report(report: dict[str, Any]) -> str:
         "",
         "## File Inventory",
     ]
+    operator_report = report.get("operator_report") or {}
+    if operator_report:
+        state = operator_report.get("state") or {}
+        confidence = operator_report.get("confidence") or {}
+        lines[6:6] = [
+            "## Итог для оператора",
+            f"- Состояние: {state.get('label_ru') or 'нет вывода'}",
+            f"- Уверенность анализа: {confidence.get('level_ru') or 'не определена'} "
+            f"({confidence.get('score')})",
+            "- Возможные причины являются гипотезами и требуют проверки.",
+            "",
+            "### Отклонения",
+            *(
+                [f"- {item.get('title')}: {item.get('detail')}" for item in operator_report.get("deviations", [])]
+                or ["- Существенных отклонений не обнаружено."]
+            ),
+            "",
+            "### Рекомендации",
+            *[f"- {item}" for item in operator_report.get("recommendations", [])],
+            "",
+        ]
     for item in report.get("file_inventory", []):
         lines.append(
             f"- {item['path']}: {item['family']} / {item['role']}, {item['size_bytes']} bytes, quality={item['data_quality_status']}"
@@ -52,5 +73,16 @@ def generate_markdown_report(report: dict[str, Any]) -> str:
     for key, value in version_metadata.items():
         if key != "input_file_hashes":
             lines.append(f"- {key}: {value}")
+    insights = report.get("log_insights") or {}
+    if insights:
+        lines.extend(["", "## Послойная диагностика"])
+        for metric in (insights.get("environment") or {}).get("metrics", []):
+            lines.append(
+                f"- {metric['name_ru']}: превышение порога {metric['exceedance_seconds']:.2f} с; "
+                f"интеграл {metric['excess_integral']:.3f} {metric['integral_unit']}; "
+                f"покрытие {(metric.get('coverage_ratio') or 0)*100:.1f}%."
+            )
+        for item in (insights.get("time_accounting") or {}).get("components", []):
+            lines.append(f"- {item['name_ru']}: {item['seconds']:.2f} с.")
+        lines.append("- Превышение порога не доказывает дефект; необъяснённая задержка не считается подтверждённой паузой.")
     return "\n".join(lines) + "\n"
-
