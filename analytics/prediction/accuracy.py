@@ -18,6 +18,7 @@ ratios signal a parameter/orientation problem, not a calibration one.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from collections import Counter, defaultdict
 from collections.abc import Iterator
@@ -29,6 +30,8 @@ from sqlalchemy.orm import Session
 from domain.models.prints import MachineParams, PrintRecord
 from domain.models.sessions import BuildSession
 from analytics.prediction.layer_engine import scan_model_key
+from analytics.prediction.calibration_inputs import CalibrationInputs
+from analytics.prediction.input_quality import INPUT_REASON_RU, calibration_input_exclusion
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +44,27 @@ CALIBRATION_WINDOW = 20
 # it silently; surface it instead.
 CORRECTION_MIN, CORRECTION_MAX = 0.5, 2.0
 _CALIBRATION_ADVISORY_LOCK = 0x50524341  # stable PostgreSQL bigint key: "PRCA"
+_EXCLUSION_REASON_RU = {
+    **INPUT_REASON_RU,
+    "not_a_print": "Сервисная или диагностическая сессия, не печать.",
+    "implausible_duration": "Длительность вне допустимого диапазона; нужна проверка логов.",
+    "machine_time_unavailable": "Нет полного набора достоверных измерений времени по слоям.",
+    "manually_excluded": "Карточка исключена из этой калибровки.",
+    "duplicate_session_link": "Одни логи связаны с несколькими карточками.",
+    "already_fitted": "Прогноз уже использует обученную модель; повторная поправка не применяется.",
+    "missing_scan_breakdown": "В старом прогнозе нет отдельного расчёта прожига и нанесения порошка.",
+    "missing_print_mode": "Не указан режим печати: материал и толщина слоя.",
+    "missing_scan_actual": "Нет достоверного времени прожига.",
+}
 
 
 def try_acquire_calibration_lock(db: Session) -> bool:
     """Serialize shared MachineParams calibration across operator PCs.
 
     The lock is transaction-scoped and PostgreSQL performs no calculation; it
-    merely ensures the last finishing workstation cannot overwrite a newer
-    calibration from another one. SQLite tests/single-PC installs need no lock.
+    only serializes publication. It does not prove freshness by itself: the
+    worker also compares source/config fingerprints and checks its lease in
+    that transaction. SQLite tests/single-PC installs need no advisory lock.
     """
     if db.get_bind().dialect.name != "postgresql":
         return True
@@ -156,11 +172,10 @@ def _machine_hours_from_logs(
 ) -> float | None:
     """Pause-free machine hours: Σ(burn_ms + pour_ms) over the session's time_log.
 
-    This is the project's calibration principle (см. базу знаний в
-    plate_estimator.py, п.1): predictions model machine time only, so actuals
-    must be machine time too. The wall-clock session span includes operator
-    pauses — on a real build 18 of 47.6 hours — and calibrating against it
-    bakes pauses into every quoted time.
+    This is the legacy scan+recoat subtotal, NOT the full normal machine cycle:
+    normal inter-phase overhead and minimum-cycle waiting are separate. It
+    must only be compared with the snapshot's matching ``print_hours`` subtotal,
+    never with ``machine_cycle_hours`` or the wall-clock session span.
 
     Returns None when the time_log is absent or does not plausibly cover the
     whole print (see the two floors above — ``expected_layers`` is normally
@@ -242,15 +257,17 @@ def _raw_predicted(snapshot: dict) -> float | None:
         raw = snapshot.get("print_hours")
     if raw is None:  # legacy two-method snapshots: prefer the accurate one
         raw = (snapshot.get("accurate") or {}).get("print_hours")
-    return raw if (raw and raw > 0) else None
+    return _positive_number(raw)
 
 
 def _positive_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return number if number > 0 else None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def _quantile_bounds(sample: list[float], low: float, high: float) -> tuple[float, float]:
@@ -270,13 +287,13 @@ def _quantile_bounds(sample: list[float], low: float, high: float) -> tuple[floa
     return round(_pct(low), 3), round(_pct(high), 3)
 
 
-def prediction_accuracy(db: Session) -> dict:
+def prediction_accuracy(db: Session | None = None, *, inputs: CalibrationInputs | None = None) -> dict:
     """Compare stored prediction snapshots with actual session durations.
 
-    Every linked pair remains visible for diagnosis, including a wall-clock
-    fallback when machine timings are unavailable. Only complete machine logs,
-    physics predictions with a scan/recoat breakdown, unique links and an
-    explicit material+thickness mode can train a correction factor.
+    Historical quotes remain visible even when no longer eligible to train.
+    Missing machine timings stay unknown; wall-clock is diagnostic only. Only
+    trusted geometry, confirmed links, current inputs, complete machine logs
+    and a physics scan/recoat breakdown in an explicit mode may train a factor.
     """
     rows: list[dict] = []
     # (sort key, ratio) so the calibration window can be taken by recency.
@@ -286,16 +303,24 @@ def prediction_accuracy(db: Session) -> dict:
     all_usable: list[tuple[datetime, float]] = []
     excluded: list[dict] = []
 
-    linked = list(iter_linked_prints(db))
+    linked = inputs.linked if inputs is not None else list(iter_linked_prints(db))
     link_counts = Counter(record.session_id for record, _ in linked)
 
     for record, session in linked:
         snapshot = (record.metadata_json or {}).get("prediction")
         if not snapshot:
             continue
-        components = _machine_components_from_logs(
-            record.session_id, snapshot.get("layer_count"), db,
-        )
+        if inputs is None:
+            components = _machine_components_from_logs(
+                record.session_id, snapshot.get("layer_count"), db,
+            )
+        else:
+            per_layer = inputs.components.get(record.session_id, {})
+            components = (
+                (sum(burn for burn, _ in per_layer.values()) / 3600,
+                 sum(pour for _, pour in per_layer.values()) / 3600)
+                if _has_full_layer_coverage(per_layer, snapshot.get("layer_count")) else None
+            )
         wall_span = _actual_hours(session)
         if components is not None:
             actual_scan, actual_recoat = components
@@ -317,7 +342,7 @@ def prediction_accuracy(db: Session) -> dict:
         if mode is not None:
             observed_modes[mode] = (material, thickness)
 
-        factor = float(snapshot.get("correction_factor") or 1.0) or 1.0
+        factor = _positive_number(snapshot.get("correction_factor")) or 1.0
         # Preserve exactly what was quoted historically. For old snapshots
         # without print_hours, reproduce their old blanket-factor behaviour.
         shown = _positive_number(snapshot.get("print_hours")) or raw_total * factor
@@ -343,6 +368,11 @@ def prediction_accuracy(db: Session) -> dict:
             skip_reason = "missing_print_mode"
         if skip_reason is None and ratio is None:
             skip_reason = "missing_scan_actual"
+        if skip_reason is None:
+            skip_reason = calibration_input_exclusion(
+                record.metadata_json or {}, snapshot, record.revision,
+                session_id=record.session_id,
+            )
 
         # Order pairs by when the print happened, so "most recent N" is real.
         when = printed_at(record, session)
@@ -386,6 +416,7 @@ def prediction_accuracy(db: Session) -> dict:
             "scan_ratio": round(ratio, 3) if ratio is not None else None,
             "used_for_calibration": skip_reason is None,
             "excluded_reason": skip_reason,
+            "excluded_reason_ru": _EXCLUSION_REASON_RU.get(skip_reason),
             "actual_source": actual_source,
             "printed_at": when.isoformat(),
             "estimated_at": snapshot.get("estimated_at"),
@@ -445,6 +476,8 @@ def prediction_accuracy(db: Session) -> dict:
         }
 
     return {
+        "comparison_basis": "scan_plus_recoat",
+        "comparison_basis_ru": "Прожиг и нанесение порошка; без межфазной задержки, ожидания минимального цикла и пауз.",
         "pairs": rows,
         "n_pairs": len(rows),
         "n_usable_pairs": len(all_usable),
@@ -459,8 +492,9 @@ def prediction_accuracy(db: Session) -> dict:
 
 
 def calibration_interval_hours(
-    db: Session, material: str, layer_thickness_mm: float,
+    db: Session | None, material: str, layer_thickness_mm: float,
     raw_scan_hours: float, raw_recoat_hours: float,
+    *, inputs: CalibrationInputs | None = None,
 ) -> tuple[float, float] | None:
     """Print-time interval for one mode, scaling scan while keeping recoat fixed.
 
@@ -473,7 +507,7 @@ def calibration_interval_hours(
     fewer than ``MIN_PAIRS_FOR_CALIBRATION`` usable pairs, exactly like the
     point correction factor.
     """
-    report = prediction_accuracy(db)
+    report = prediction_accuracy(db, inputs=inputs) if inputs is not None else prediction_accuracy(db)
     info = report["by_mode"].get(scan_model_key(material, layer_thickness_mm))
     if not info or info["ratio_interval"] is None:
         return None
@@ -491,10 +525,12 @@ def recalibrate_and_apply(db: Session) -> dict:
     summary {applied: {...}, skipped: [...], locked: bool}. Caller's unit of work
     commits — this only mutates the row.
     """
-    report = prediction_accuracy(db)
-    by_mode = report["by_mode"]
+    return apply_accuracy_report(db.get(MachineParams, 1), prediction_accuracy(db))
 
-    row = db.get(MachineParams, 1)
+
+def apply_accuracy_report(row: MachineParams | None, report: dict) -> dict:
+    """Publish an already calculated report; never read evidence or fit here."""
+    by_mode = report["by_mode"]
     if row is None:
         return {"applied": {}, "skipped": [], "locked": False, "reason": "no machine params"}
     if row.correction_locked:

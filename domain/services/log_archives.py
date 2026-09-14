@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
+import unicodedata
 import zipfile
 
 from core.utils.files import sha256_file
@@ -39,7 +40,11 @@ def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease
     become pseudo-sessions. A different file with the same basename fails closed;
     byte-identical files occurring loose and in ZIP are parsed once.
     """
+    if target.is_symlink():
+        raise ValueError('Папка распаковки не должна быть символической ссылкой')
     target.mkdir(parents=True, exist_ok=True)
+    if any(target.iterdir()):
+        raise ValueError('Для распаковки нужна пустая отдельная папка')
     objects, member_paths, seen = {}, {}, {}
     expanded = 0
 
@@ -61,12 +66,21 @@ def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease
             if written != size:
                 raise ValueError('Неполный файл в архиве')
             checksum = sha256_file(temp)
-            if name in seen:
-                if seen[name] != checksum:
+            # APFS/NTFS may identify these names as the same destination even
+            # when Linux distinguishes them. Keep interpretation identical on
+            # every operator PC and preserve the first source reference.
+            name_key = unicodedata.normalize('NFC', name).casefold()
+            if name_key in seen:
+                if seen[name_key] != checksum:
                     raise ValueError(f'Разные логи с одинаковым именем: {name}. Разделите печати.')
                 return
-            seen[name] = checksum
-            temp.rename(target / name)
+            # Publish without replacing an existing destination, even if a
+            # concurrent writer appeared after the empty-directory check.
+            try:
+                (target / name).hardlink_to(temp)
+            except FileExistsError:
+                raise ValueError(f'Разные логи с одинаковым именем: {name}. Разделите печати.') from None
+            seen[name_key] = checksum
             if uri:
                 objects[name] = uri
             if member_path:

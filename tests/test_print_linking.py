@@ -131,12 +131,21 @@ class TestAutoLink:
 
 class TestImportHint:
     def test_hint_beats_record_ambiguity(self, db):
-        """Два рекорда на одну дату, но у одного есть hint от import-logs."""
+        """Only a completed card-specific import proves explicit intent."""
+        from core.config.settings import get_settings
+        from domain.models.sessions import ImportJob
+
         ts = datetime(2027, 7, 10, 9, 0, tzinfo=timezone.utc)
         _make_session(db, "s_hint", ts)
         db.add(PrintRecord(record_id="pr_hinted", name="с хинтом", printed_at=ts,
-                           metadata_json={"log_import_hint": {"date": "2027-07-10"}}))
+                           metadata_json={"log_import_hint": {"date": "2027-07-10"},
+                                          "session_link_confirmed": False}))
         _make_record(db, "pr_rival", "соперник", ts.replace(hour=11))
+        db.add(ImportJob(
+            import_job_id="job_hint", owner_node_id=get_settings().compute_node_id,
+            print_record_id="pr_hinted", source_path="/local/explicit-batch",
+            source_name="explicit-batch", status="done", session_ids=["s_hint"],
+        ))
         db.flush()
 
         links = auto_link_print_records(db)
@@ -144,7 +153,46 @@ class TestImportHint:
         hinted = db.get(PrintRecord, "pr_hinted")
         assert hinted.session_id == "s_hint"
         assert "log_import_hint" not in (hinted.metadata_json or {})
+        assert hinted.metadata_json["session_link_confirmed"] is True
+        assert hinted.metadata_json["session_link_evidence"]["session_id"] == "s_hint"
+        assert hinted.metadata_json["session_link_evidence"]["import_job_id"] == "job_hint"
         assert db.get(PrintRecord, "pr_rival").session_id is None
+
+    @pytest.mark.parametrize("job_status", [None, "importing", "failed", "done"])
+    def test_date_hint_cannot_confirm_unrelated_session(self, db, job_status):
+        from core.config.settings import get_settings
+        from domain.models.sessions import ImportJob
+
+        ts = datetime(2027, 7, 20, 9, tzinfo=timezone.utc)
+        _make_session(db, "s_same_date_unrelated", ts)
+        db.add(PrintRecord(record_id="pr_date_hint", name="чужой лог того же дня", printed_at=ts,
+                           metadata_json={"log_import_hint": {"date": "2027-07-20"}}))
+        if job_status:
+            db.add(ImportJob(
+                import_job_id="job_unfinished_hint", owner_node_id=get_settings().compute_node_id,
+                print_record_id="pr_date_hint", source_path="/local/another-batch",
+                source_name="another-batch", status=job_status, session_ids=["s_different"],
+            ))
+        db.flush()
+        assert auto_link_print_records(db) == []
+        assert db.get(PrintRecord, "pr_date_hint").session_id is None
+
+    def test_two_sessions_from_card_batch_remain_ambiguous(self, db):
+        from core.config.settings import get_settings
+        from domain.models.sessions import ImportJob
+
+        ts = datetime(2027, 7, 25, 9, tzinfo=timezone.utc)
+        _make_session(db, "s_batch_a", ts)
+        _make_session(db, "s_batch_b", ts.replace(hour=15))
+        db.add(PrintRecord(record_id="pr_multi_hint", name="два запуска", printed_at=ts,
+                           metadata_json={"log_import_hint": {"date": "2027-07-25"}}))
+        db.add(ImportJob(
+            import_job_id="job_multi_hint", owner_node_id=get_settings().compute_node_id,
+            print_record_id="pr_multi_hint", source_path="/local/multi-batch",
+            source_name="multi-batch", status="done", session_ids=["s_batch_a", "s_batch_b"],
+        ))
+        db.flush()
+        assert auto_link_print_records(db) == []
 
     def test_hint_kept_until_session_appears(self, db):
         db.add(PrintRecord(record_id="pr_waiting", name="ждёт", printed_at=None,

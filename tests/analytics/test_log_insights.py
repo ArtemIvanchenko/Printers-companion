@@ -86,6 +86,32 @@ def test_pause_and_burn_windows_exclude_ambiguous_overlaps():
     assert burn_windows(events, pauses) == []
 
 
+def test_long_burn_window_invalidates_every_nested_layer_not_only_next_one():
+    events = [timing(1, burn=20000, make=22000), timing(2), timing(3), timing(4),
+              stamp('burn_start', 0, 1), stamp('burn_start', 1, 2),
+              stamp('burn_start', 5, 3), stamp('burn_start', 25, 4)]
+    assert [w['layer'] for w in burn_windows(events)] == [4]
+
+
+def test_burn_windows_can_touch_without_overlapping():
+    events = [timing(1), timing(2), stamp('burn_start', 0, 1), stamp('burn_start', 2, 2)]
+    assert [w['layer'] for w in burn_windows(events)] == [1, 2]
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_invalid_attempt_cannot_leave_same_layer_in_normal_cycle_total(reverse):
+    good = timing(1)
+    invalid = timing(1)
+    invalid['payload']['timing_valid'] = False
+    events = [good, invalid] if not reverse else [invalid, good]
+    events.append(timing(2))
+    report = time_accounting(events, cycle_model={'layer_overhead_ms': 1000, 'minimum_layer_cycle_ms': 0})
+    assert report['observed_attempt_cycle_seconds'] == 8
+    assert report['ambiguous_layer_count'] == 1
+    assert report['normal_layer_count'] == 1
+    assert report['normal_unique_layer_seconds'] == 4
+
+
 def test_timezone_conversion_is_consistent_for_naive_machine_clock():
     assert seconds(datetime(2026, 9, 9, 3)) == seconds("2026-09-09T00:00:00+00:00")
 
@@ -177,6 +203,45 @@ def test_restart_layer_comparison_has_real_before_and_after():
     windows = [window(i*10, i*10+1, i) for i in range(1, 5)]
     result = restart_layer_comparison(events, windows, [{"start": 22, "end": 29, "resumed": True}])
     assert result["items"][0]["metrics"]["burn_ms"]["change_pct"] == 100
+
+
+def test_restart_comparison_survives_missing_and_rejected_layer_timings():
+    events = [timing(1), timing(2), timing(3), timing(4), timing(5)]
+    events[0]["payload"]["timing_valid"] = False
+    events.append(timing(2, burn=1000, make=3000))  # conflicting attempt
+    windows = [window(i * 10, i * 10 + 1, i) for i in range(1, 7)]
+    result = restart_layer_comparison(events, windows, [
+        {"start": 31, "end": 39, "resumed": True},
+    ])
+    assert result["items"][0]["metrics"] == {}  # only one valid prior layer
+    assert result["items"][0]["before_layers"] == [1, 2, 3]
+    assert result["items"][0]["after_layers"] == [4, 5, 6]
+
+
+def test_long_recorded_phase_is_diagnostic_not_normal_forecast():
+    # Real 04.06 layer 1648: the counters agree, but a >5 h pour cannot be
+    # assumed to be a continuous normal recoat or a proven operator pause.
+    events = [timing(1, 28922, 9000, 38311), timing(1648, 28922, 20081407, 20110718)]
+    result = time_accounting(events, cycle_model={
+        "layer_overhead_ms": 389, "minimum_layer_cycle_ms": 0,
+    })
+    assert result["observed_attempt_cycle_seconds"] == pytest.approx(20149.029)
+    assert sum(c["seconds"] for c in result["components"]) == pytest.approx(20149.029)
+    assert result["normal_unique_layer_seconds"] == pytest.approx(38.311)
+    assert result["normal_layer_count"] == 1
+    assert result["phase_excluded_layer_count"] == 1
+    assert result["phase_exclusions"][0]["layer"] == 1648
+    assert result["phase_exclusions"][0]["reasons"] == ["pour_out_of_range"]
+    assert result["normal_time_scope"] == "eligible_measured_layers_only"
+    assert result["explicit_pause_seconds"] == 0
+
+
+def test_all_out_of_range_phases_do_not_report_zero_normal_time():
+    result = time_accounting([timing(1, 28922, 20081407, 20110718)], cycle_model={
+        "layer_overhead_ms": 389, "minimum_layer_cycle_ms": 0,
+    })
+    assert result["normal_unique_layer_seconds"] is None
+    assert result["normal_layer_count"] == 0
 
 
 def test_frozen_scan_reference_matches_physics_coefficients():

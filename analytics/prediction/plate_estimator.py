@@ -498,12 +498,12 @@ def estimate_plate(
     else:
         build_origin_z = geometry_z_min
         build_origin_source = "minimum_supplied_geometry_z"
-        if abs(geometry_z_min) > 1e-6:
-            warnings.append(
-                "Начало печати не подтверждено, поэтому слои считаются от минимального "
-                f"Z всей переданной геометрии: {geometry_z_min:.3f} мм. "
-                "Для подтверждённой координаты платформы укажите build_origin_z_mm."
-            )
+        warnings.append(
+            "Начало печати не подтверждено, поэтому слои считаются от минимального "
+            f"Z всей переданной геометрии: {geometry_z_min:.3f} мм. "
+            "Даже Z=0 в STL не подтверждает координату платформы. "
+            "Для подтверждённой координаты платформы укажите build_origin_z_mm."
+        )
 
     series = None
     cache_key = (

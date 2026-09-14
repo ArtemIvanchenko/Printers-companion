@@ -12,6 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_prints_repository
 from storage.repositories.prints_repo import _PARAM_FIELDS, PrintsRepository
+from domain.services.estimation.inputs import (
+    effective_params as effective_params,
+    missing_for_estimation as missing_for_estimation,
+    params_configured as params_configured,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -36,54 +41,6 @@ _DICT_FIELDS = {
 # model dicts written only by the calibration code — the settings PUT treats it
 # as an unknown key and ignores it.
 _BOOL_FIELDS = {"correction_locked"}
-
-# Fields the time/cost estimators cannot work without
-_REQUIRED_FOR_ESTIMATION = (
-    "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm", "layer_thickness_mm", "laser_count",
-)
-
-# Human-readable names for the "what is missing" message. Telling the operator
-# to "fill in the machine parameters" when four of five are already filled by a
-# preset is not actionable — the whole estimate was blocked on laser_count
-# alone, which no preset supplies.
-_FIELD_LABELS = {
-    "hatch_speed_mm_s": "скорость штриховки",
-    "contour_speed_mm_s": "скорость контуров",
-    "hatch_distance_mm": "шаг штриховки",
-    "layer_thickness_mm": "толщина слоя",
-    "laser_count": "количество лазеров",
-}
-
-# This machine is single-laser (M350/M450M — see scripts/bulk_import_prints.py).
-# Defaulting is safe and correct here, and it is the difference between a
-# working estimate and a blocked one: presets carry the four scanning
-# parameters but not this, so without a default nothing can be estimated until
-# someone finds the one empty field on the settings page.
-_DEFAULT_LASER_COUNT = 1
-
-
-def effective_params(params: dict | None) -> dict:
-    """Machine params with defaults applied for fields that have a known one."""
-    out = dict(params or {})
-    if out.get("laser_count") is None:
-        out["laser_count"] = _DEFAULT_LASER_COUNT
-    return out
-
-
-def missing_for_estimation(params: dict | None) -> list[str]:
-    """Names of the estimation-critical fields that are still empty."""
-    filled = effective_params(params)
-    return [
-        _FIELD_LABELS.get(f, f)
-        for f in _REQUIRED_FOR_ESTIMATION
-        if filled.get(f) is None
-    ]
-
-
-def params_configured(params: dict | None) -> bool:
-    """True when all estimation-critical parameters are filled in."""
-    return not missing_for_estimation(params)
-
 
 @router.get("/machine")
 def get_machine_params(repo: PrintsRepository = Depends(get_prints_repository)) -> dict:

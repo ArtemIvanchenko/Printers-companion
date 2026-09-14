@@ -326,8 +326,48 @@ class TestScanParamsResolution:
     def test_no_machine_params_at_all_is_not_a_crash(self):
         assert self._resolve({}, machine=None, preset=None) == {}
 
+    def test_parameter_sources_follow_the_same_precedence_without_claiming_confirmation(self):
+        from api.routes.prints import _params_with_sources_for_record
+
+        repo = self._Repo(
+            {"layer_thickness_mm": 0.03, "hatch_distance_mm": 0.12},
+            {"preset_id": 7, "layer_thickness_mm": 0.06, "hatch_distance_mm": 0.15},
+        )
+        params, sources = _params_with_sources_for_record(
+            repo, {"material": "steel", "hatch_distance_mm": 0.9},
+        )
+        assert params["hatch_distance_mm"] == 0.9
+        assert sources["hatch_distance_mm"] == {"source": "print_record", "value": 0.9}
+        assert sources["layer_thickness_mm"] == {
+            "source": "material_preset", "value": 0.06, "preset_id": 7,
+        }
+
 
 class TestPrintRecordReads:
+    def test_latest_prediction_is_not_limited_to_first_catalogue_page(self):
+        from datetime import datetime, timezone
+        from domain.models.prints import PrintRecord
+        from storage.db.session import session_scope
+
+        with session_scope() as db:
+            for i in range(25):
+                db.add(PrintRecord(record_id=f"new-{i}", name=f"new-{i}",
+                                   printed_at=datetime(2027, 9, 1, tzinfo=timezone.utc)))
+            for rid, when, hours in (("older-estimate", "2027-08-01T00:00:00+00:00", 9),
+                                     ("latest-estimate", "2027-08-02T00:00:00+00:00", 10)):
+                db.add(PrintRecord(record_id=rid, name=rid,
+                                   printed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                                   metadata_json={"prediction": {"print_hours": hours, "estimated_at": when}}))
+        assert not any(r["metadata_json"].get("prediction")
+                       for r in client.get("/prints?limit=20").json()["items"])
+        response = client.get("/prints/latest-prediction")
+        assert response.status_code == 200
+        assert response.json()["record"]["record_id"] == "latest-estimate"
+
+    def test_latest_prediction_empty_state_is_not_an_error(self):
+        _create_record(name="Без оценки")
+        assert client.get("/prints/latest-prediction").json() == {"record": None}
+
     def test_has_logs_filters_before_pagination_and_counts(self):
         from domain.models.sessions import BuildSession
         from storage.db.session import session_scope
@@ -823,6 +863,29 @@ class TestStreamingModelIO:
 
 
 class TestSessionLinking:
+    def test_manual_link_and_unlink_update_confirmation_without_leaving_old_evidence(self):
+        from domain.models.sessions import BuildSession
+        from storage.db.session import session_scope
+
+        record = _create_record(name="Подтверждение связи")
+        with session_scope() as db:
+            db.add(BuildSession(session_id="manual-session",
+                                origin_compute_node_id=record["origin_compute_node_id"]))
+        response = client.patch(f"/prints/{record['record_id']}", json={
+            "expected_revision": record["revision"], "session_id": "manual-session",
+        })
+        assert response.status_code == 200
+        linked = response.json()
+        assert linked["metadata_json"]["session_link_confirmed"] is True
+        assert linked["metadata_json"]["session_link_evidence"]["session_id"] == "manual-session"
+        response = client.patch(f"/prints/{record['record_id']}", json={
+            "expected_revision": linked["revision"], "session_id": None,
+        })
+        assert response.status_code == 200
+        metadata = response.json()["metadata_json"]
+        assert metadata["session_link_confirmed"] is False
+        assert "session_link_evidence" not in metadata
+
     def test_link_session_sets_printed_at(self):
         from datetime import datetime, timezone
         from domain.models.sessions import BuildSession
@@ -1034,7 +1097,9 @@ class TestCalibrationEndpointsIncludeRecoat:
 
     def test_recalibrate_response_has_a_recoat_section(self):
         response = client.post("/prints/recalibrate")
-        assert response.status_code == 200
+        assert response.status_code == 202
         body = response.json()
+        assert body["contract_version"] == 2
+        assert body["job_id"]
         assert "recoat" in body
         assert "applied" in body["recoat"]

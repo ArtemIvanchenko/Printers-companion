@@ -1,5 +1,7 @@
 from copy import deepcopy
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -68,6 +70,18 @@ def test_identity_key_does_not_accept_unconfirmed_links_or_recipe_changes():
     assert context_key(record) is None
 
 
+@pytest.mark.parametrize("evidence", [
+    {"session_id": "different-session", "method": "operator_selected_session"},
+    {"session_id": "this-session", "method": "operator_import_hint"},
+])
+def test_old_or_date_only_link_evidence_cannot_enable_geometry_decisions(evidence):
+    record = {"session_id": "this-session", "metadata": {
+        "prediction": snapshot(), "session_link_confirmed": True,
+        "session_link_evidence": {"eligible": True, "auto_link_allowed": True, **evidence},
+    }}
+    assert context_key(record) is None
+
+
 def test_stale_prediction_does_not_map_observations_to_geometry():
     seed("stale", "stale-session")
     with SessionLocal() as db:
@@ -77,6 +91,19 @@ def test_stale_prediction_does_not_map_observations_to_geometry():
     result = client.get("/analysis/prints/stale/log-insights").json()
     assert result["geometry_residuals"]["status"] == "unconfirmed_context"
     assert result["repeatability"]["status"] == "insufficient_identity"
+
+
+@pytest.mark.parametrize("status", ["incomplete", "lower_bound"])
+def test_incomplete_geometry_is_not_used_even_with_confirmed_link_and_origin(status):
+    record = {"metadata": {"prediction": snapshot(), "session_link_confirmed": True,
+                           "geometry_quality": {"status": status}}}
+    assert context_key(record) is None
+
+
+def test_explicit_link_revocation_overrides_old_auto_link_evidence():
+    record = {"metadata": {"prediction": snapshot(), "session_link_confirmed": False,
+                           "session_link_evidence": {"eligible": True, "auto_link_allowed": True}}}
+    assert context_key(record) is None
 
 
 def test_ui_script_is_served_and_uses_text_nodes_for_untrusted_values():

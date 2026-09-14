@@ -5,6 +5,7 @@ scenario the rest of the suite never exercises (it uses tiny synthetic data).
 Uses an in-memory fake ObjectStore — no real MinIO needed.
 """
 from uuid import uuid4
+import hashlib
 
 from domain.models.entities import ReportArtifact
 from storage.db.session import SessionLocal
@@ -23,7 +24,7 @@ class _FakeStore:
     def is_available(self) -> bool:
         return _FakeStore._available
 
-    def put_bytes(self, bucket, name, data, content_type="application/json") -> str:
+    def put_bytes_verified(self, bucket, name, data, content_type="application/json") -> str:
         _FakeStore._blobs[(bucket, name)] = data
         return f"s3://{bucket}/{name}"
 
@@ -58,8 +59,10 @@ def test_large_report_offloaded_to_object_store(monkeypatch):
 
         row = db.get(ReportArtifact, report_id)
         # full blob uploaded + pointer stored
-        assert row.storage_uri == f"s3://reports/{report_id}.json"
-        assert ("reports", f"{report_id}.json") in _FakeStore._blobs
+        assert row.storage_uri.startswith(f"s3://reports/{report_id}/")
+        object_name = row.storage_uri.removeprefix("s3://reports/")
+        blob = _FakeStore._blobs[("reports", object_name)]
+        assert object_name == f"{report_id}/{hashlib.sha256(blob).hexdigest()}.json"
         # DB payload is the bounded preview, not the full 5000-event timeline
         assert len(row.payload["timeline"]) <= 2001
         assert len(row.payload["timeline"]) < len(report["timeline"])
@@ -87,3 +90,19 @@ def test_report_falls_back_to_payload_when_store_unavailable(monkeypatch):
         # get_report falls back to the slim payload
         full = repo.get_report(report_id)
         assert full["timeline"] == row.payload["timeline"]
+
+
+def test_report_revisions_have_immutable_object_names(monkeypatch):
+    from storage.repositories.runtime import _offload_report, _load_offloaded_report
+
+    monkeypatch.setattr("storage.object_store.minio_client.ObjectStore", _FakeStore)
+    _FakeStore._blobs = {}
+    _FakeStore._available = True
+    first = {"report_id": "same-report", "marker": "first"}
+    second = {"report_id": "same-report", "marker": "second"}
+    first_uri = _offload_report("same-report", first)
+    second_uri = _offload_report("same-report", second)
+    assert first_uri != second_uri
+    assert _offload_report("same-report", first) == first_uri
+    assert _load_offloaded_report(first_uri) == first
+    assert _load_offloaded_report(second_uri) == second

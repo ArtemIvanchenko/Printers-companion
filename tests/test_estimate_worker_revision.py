@@ -15,7 +15,7 @@ def test_stale_queued_estimate_is_rejected_before_geometry(monkeypatch):
                      'owner_node_id': 'operator-test'})
     def forbidden(*args, **kwargs):
         raise AssertionError('Stale jobs must not prepare or slice geometry')
-    monkeypatch.setattr('api.routes.prints._prepare_prediction_inputs', forbidden)
+    monkeypatch.setattr('domain.services.estimation.inputs.prepare_prediction_inputs', forbidden)
     assert process_next_estimate('worker-test', 'operator-test')
     with session_scope() as db:
         row = db.get(BackgroundJob, job['job_id'])

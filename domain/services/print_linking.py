@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from analytics.prediction.pair_matching import PairMatchScore, score_print_session_pair
 from core.config.settings import get_settings
 from domain.models.prints import PrintRecord
-from domain.models.sessions import BuildSession
+from domain.models.sessions import BuildSession, ImportJob
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ def _link(
     origin_compute_node_id: str,
     evidence: PairMatchScore | None = None,
     method: str = "automatic_evidence",
+    import_job_id: str | None = None,
 ) -> bool:
     from storage.repositories.prints_repo import PrintsRepository
 
@@ -46,6 +47,10 @@ def _link(
         session.session_id,
         _as_utc(session.start_ts),
         compute_node_id=origin_compute_node_id,
+        link_evidence={
+            "method": method, **evidence.as_dict(),
+            **({"import_job_id": import_job_id} if import_job_id else {}),
+        } if evidence is not None else None,
     )
     if not linked:
         logger.info(
@@ -54,13 +59,6 @@ def _link(
             session.session_id,
         )
         return False
-    if evidence is not None:
-        metadata = dict(record.metadata_json or {})
-        metadata["session_link_evidence"] = {
-            "method": method,
-            **evidence.as_dict(),
-        }
-        record.metadata_json = metadata
     links.append({"record_id": record.record_id, "session_id": session.session_id})
     logger.info("print_linking: linked %s ↔ %s", record.record_id, session.session_id)
     return True
@@ -120,39 +118,51 @@ def _resolve_import_hints(
     *,
     origin_compute_node_id: str,
 ) -> None:
-    """Explicit operator intent: logs uploaded via a record's import-logs.
+    """Recover explicit intent from completed card→job→session lineage.
 
-    The hint (log file date) wins over date-ambiguity with other records, but
-    two same-date sessions are still ambiguous and stay unlinked.
+    A filename date cannot prove which same-day log was actually uploaded.
+    Old date-only hints therefore wait for a completed job or manual linking.
     """
-    for record in records:
-        hint = (record.metadata_json or {}).get("log_import_hint")
-        if not hint or record.session_id:
-            continue
-        matches = [
-            s for s in sessions
-            if s.session_id and _as_utc(s.start_ts).date().isoformat() == hint.get("date")
-        ]
-        if len(matches) == 1:
-            evidence = _score(record, matches[0], explicit_hint=True)
+    hinted = [r for r in records if not r.session_id
+              and (r.metadata_json or {}).get("log_import_hint")]
+    if not hinted:
+        return
+    jobs = db.scalars(select(ImportJob).where(
+        ImportJob.owner_node_id == origin_compute_node_id,
+        ImportJob.print_record_id.in_([r.record_id for r in hinted]),
+        ImportJob.status.in_(("done", "needs_operator_context")),
+    )).all()
+    by_session = {s.session_id: s for s in sessions}
+    for record in hinted:
+        lineage = {sid: job.import_job_id for job in jobs
+                   if job.print_record_id == record.record_id for sid in (job.session_ids or [])}
+        # Count every returned session, not only those currently available for
+        # linking; otherwise an incomplete/partly claimed batch looks unique.
+        if len(lineage) == 1:
+            sid, job_id = next(iter(lineage.items()))
+            session = by_session.get(sid)
+            if session is None:
+                continue
+            evidence = _score(record, session, explicit_hint=True)
             linked = False
             if evidence.eligible:
                 linked = _link(
                     db,
                     record,
-                    matches[0],
+                    session,
                     links,
                     origin_compute_node_id=origin_compute_node_id,
                     evidence=evidence,
-                    method="operator_import_hint",
+                    method="operator_card_upload",
+                    import_job_id=job_id,
                 )
             if linked:
                 meta = dict(record.metadata_json or {})
                 meta.pop("log_import_hint", None)
                 record.metadata_json = meta
-        elif len(matches) > 1:
-            logger.info("print_linking: hint for %s matches %d sessions — skipped",
-                        record.record_id, len(matches))
+        elif len(lineage) > 1:
+            logger.info("print_linking: imports for %s contain %d sessions — skipped",
+                        record.record_id, len(lineage))
             continue
 
 
@@ -214,6 +224,10 @@ def auto_link_print_records(
     # day (or more) earlier than the actual print.
     record_candidates: dict[str, list[tuple[BuildSession, PairMatchScore]]] = {}
     for record in records:
+        if (record.metadata_json or {}).get("log_import_hint"):
+            # Await the operator's actual batch instead of substituting an
+            # unrelated historical session while the upload is still parsing.
+            continue
         anchor = _as_utc(record.printed_at or record.created_at)
         matches = [s for s in sessions if abs(_as_utc(s.start_ts) - anchor) <= window]
         scored = [(session, _score(record, session)) for session in matches]

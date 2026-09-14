@@ -5,6 +5,7 @@ from analytics.log_insights.clocks import burn_windows, pause_intervals
 from analytics.log_insights.environment import analyze_environment, default_thresholds, sensor_samples
 from analytics.log_insights.timing import restart_layer_comparison, time_accounting
 from core.config.settings import get_settings
+from core.versioning.constants import LOG_INSIGHTS_VERSION
 from core.versioning.provenance import build_provenance
 
 
@@ -27,7 +28,7 @@ def build_log_insights(files, events, *, thresholds=None):
         required_signals=list(thresholds) if explicit_thresholds else None,
     )
     return {
-        "method_version": "log-insights-1.0.0", "source": "calculated",
+        "method_version": LOG_INSIGHTS_VERSION, "source": "calculated",
         "environment": environment,
         "recovery": {**environment.pop("recovery"), "layer_comparison": restart_layer_comparison(events, windows, pauses)},
         "time_accounting": time_accounting(events, pauses),

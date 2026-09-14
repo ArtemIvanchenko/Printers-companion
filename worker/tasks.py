@@ -19,6 +19,8 @@ from domain.services.import_jobs import (
     StaleImportLeaseError,
     retry_import_job,
 )
+from domain.services.importing.fence import ImportFence
+from domain.services.importing.publication import prepare_import_reports, publish_import
 from domain.services.ingestion import IngestionService
 from profiles.m350.profile import build_registry, get_profile
 from reporting.json_report.generator import generate_session_json_report
@@ -221,9 +223,9 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
                     if heartbeat.lost:
                         return False
                     checked_at = time.monotonic()
-                    # Persistence checkpoints can occur every 500 events. One
-                    # fenced DB check per 30 seconds is enough; checking every
-                    # batch would add thousands of writes to a weak NAS.
+                    # This cached guard only interrupts local preparation.
+                    # Each SQL batch and final publication verify their own
+                    # authoritative fence inside the writing transaction.
                     if checked_at - last_guard_check < 30.0:
                         return True
                     try:
@@ -244,110 +246,16 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
                     now=now,
                     lease_guard=current_lease,
                 )
+                prepared_reports = prepare_import_reports(result)
             if heartbeat.lost:
                 logger.warning("Discarding import result after lost lease: %s", job_id)
                 continue
-            result.job.lease_owner = None
-            result.job.lease_until = None
-
             with SessionLocal() as db:
-                repo = RuntimeRepository(db)
-                # Serialize finalization with lease reclaim and operator
-                # Retry/Ignore/Postpone. The fence must be checked while the
-                # row lock is held; a plain read followed by an upsert lets a
-                # stale process overwrite a newly claimed generation.
-                current = repo.get_import_job_for_update(job_id)
-                # Fencing check: ignore a late result if an operator retried,
-                # ignored or otherwise replaced this exact lease meanwhile.
-                if (
-                    current is None
-                    or current.owner_node_id != settings.compute_node_id
-                    or current.lease_owner != lease_owner
-                    or current.lease_generation != lease_generation
-                    or _lease_expired(current.lease_until)
-                ):
-                    logger.warning("Discarding stale result for import job %s", job_id)
-                    continue
-                # Browser upload can attach an explicit card while this batch
-                # is already being parsed after the watcher discovered it.
-                # Keep that stronger identity from the locked current row;
-                # the claimed Pydantic snapshot predates the attachment.
-                if current.print_record_id and not result.job.print_record_id:
-                    result.job.print_record_id = current.print_record_id
-                _require_import_entity_owners(
-                    db,
-                    owner_node_id=current.owner_node_id,
-                    print_record_id=result.job.print_record_id,
-                    session_ids=result.job.session_ids,
+                publish_import(
+                    db, result,
+                    fence=ImportFence(job_id, claimed.owner_node_id, lease_owner, lease_generation),
+                    prepared_reports=prepared_reports,
                 )
-                repo.save_import_job(result.job)
-                repo.save_notifications(result.notifications)
-                repo.save_sessions(
-                    result.sessions,
-                    origin_compute_node_id=current.owner_node_id,
-                )
-                repo.save_reports(result.reports)
-                from domain.services.print_linking import auto_link_print_records
-
-                links: list[dict] = []
-                if result.job.print_record_id and len(result.job.session_ids) == 1:
-                    from domain.models.sessions import BuildSession
-                    from storage.repositories.prints_repo import PrintsRepository
-
-                    session_id = result.job.session_ids[0]
-                    session = db.get(BuildSession, session_id)
-                    if PrintsRepository(db).link_session(
-                        result.job.print_record_id,
-                        session_id,
-                        session.start_ts if session else None,
-                        compute_node_id=current.owner_node_id,
-                    ):
-                        links.append({
-                            "record_id": result.job.print_record_id,
-                            "session_id": session_id,
-                        })
-                links.extend(
-                    auto_link_print_records(
-                        db,
-                        origin_compute_node_id=current.owner_node_id,
-                    )
-                )
-                if links:
-                    # A strict quality verdict may have been entered on the
-                    # card before logs arrived. Linking creates the first
-                    # training-grade session/outcome pair, so enqueue its
-                    # owner-local model refresh now.
-                    from analytics.prediction.retraining import (
-                        enqueue_retraining_for_session,
-                    )
-
-                    for linked_session_id in {
-                        str(link["session_id"]) for link in links if link.get("session_id")
-                    }:
-                        enqueue_retraining_for_session(db, linked_session_id)
-                    # New predicted/actual pairs appeared → refresh per-material
-                    # time-correction factors automatically.
-                    from analytics.prediction.accuracy import (
-                        recalibrate_and_apply,
-                        try_acquire_calibration_lock,
-                    )
-                    from analytics.prediction.recoat_calibration import (
-                        recalibrate_recoat_and_apply,
-                    )
-                    from analytics.prediction.scan_calibration import (
-                        recalibrate_scan_and_apply,
-                    )
-                    try:
-                        if try_acquire_calibration_lock(db):
-                            recalibrate_and_apply(db)
-                            recalibrate_recoat_and_apply(db)
-                            recalibrate_scan_and_apply(db)
-                        else:
-                            logger.info(
-                                "Auto-calibration already runs on another operator PC; skipped"
-                            )
-                    except Exception:
-                        logger.exception("auto-calibration after linking failed")
                 db.commit()
                 processed += 1
                 logger.info("Successfully processed import job %s", claimed.import_job_id)

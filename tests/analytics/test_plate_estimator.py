@@ -95,6 +95,11 @@ class TestParts:
         assert explicit.build_origin_source == "explicit"
         assert explicit.recoat_hours == pytest.approx(150 * 10 / 3600, rel=1e-6)
 
+    def test_stl_minimum_at_zero_is_not_a_confirmed_build_origin(self):
+        result = estimate_plate([("part", _box_stl(z=10.0))], [], _params(), "steel")
+        assert result.build_origin_source == "minimum_supplied_geometry_z"
+        assert any("Даже Z=0" in message for message in result.warnings)
+
     def test_geometry_below_explicit_origin_is_rejected(self):
         with pytest.raises(EstimationError, match="ниже заданного начала печати"):
             estimate_plate(

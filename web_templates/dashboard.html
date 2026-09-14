@@ -925,7 +925,13 @@
                     <div class="design-grid-two" id="design-estimate-inputs"><div class="design-cell"><div class="design-cell-label">Слои</div><div class="design-cell-value">—</div></div><div class="design-cell"><div class="design-cell-label">Высота</div><div class="design-cell-value">—</div></div><div class="design-cell"><div class="design-cell-label">Шаг штриховки</div><div class="design-cell-value">—</div></div><div class="design-cell"><div class="design-cell-label">Скорость штриховки</div><div class="design-cell-value">—</div></div><div class="design-cell"><div class="design-cell-label">Толщина слоя</div><div class="design-cell-value">—</div></div><div class="design-cell"><div class="design-cell-label">Лазеры</div><div class="design-cell-value">—</div></div></div>
                     <div class="design-warning" id="design-estimate-warning">Значения по умолчанию явно отмечаются; паузы оператора в прогноз не включаются.</div>
                 </section>
-                <section style="padding-left:24px"><h3 class="design-section-title">ОЦЕНКА ПРОТИВ ФАКТА</h3><div class="design-chart" id="design-accuracy-chart"><div class="design-chart-empty">Загрузка проверенных пар…</div></div><div class="design-stats"><div class="design-stat"><div class="design-stat-label">МЕДИАННАЯ ОШИБКА</div><div class="design-stat-value" id="design-median-error">—</div></div><div class="design-stat"><div class="design-stat-label">ХУДШАЯ ОШИБКА</div><div class="design-stat-value" id="design-worst-error">—</div></div></div><div class="design-table-wrap"><table class="design-table"><thead><tr><th>ПЕЧАТЬ</th><th>ОЦЕНКА</th><th>ФАКТ</th><th>ОШИБКА</th></tr></thead><tbody id="design-accuracy-rows"><tr><td colspan="4" class="muted" style="text-align:center">Загрузка точности…</td></tr></tbody></table></div></section>
+                <section style="padding-left:24px">
+                    <h3 class="design-section-title">ОЦЕНКА ПРОТИВ ФАКТА</h3>
+                    <p class="muted">Прожиг и нанесение порошка, без межфазной задержки и ожидания минимального цикла. Историческое сравнение, не независимая проверка точности.</p>
+                    <div class="design-chart" id="design-accuracy-chart"><div class="design-chart-empty">Загрузка сохранённых пар…</div></div>
+                    <div class="design-stats"><div class="design-stat"><div class="design-stat-label">МЕДИАННАЯ ОШИБКА</div><div class="design-stat-value" id="design-median-error">—</div></div><div class="design-stat"><div class="design-stat-label">ХУДШАЯ ОШИБКА</div><div class="design-stat-value" id="design-worst-error">—</div></div></div>
+                    <div class="design-table-wrap"><table class="design-table"><thead><tr><th>ПЕЧАТЬ</th><th>ОЦЕНКА</th><th>ФАКТ</th><th>ОШИБКА</th></tr></thead><tbody id="design-accuracy-rows"><tr><td colspan="4" class="muted" style="text-align:center">Загрузка точности…</td></tr></tbody></table></div>
+                </section>
             </div>
         </div>
 
@@ -2416,9 +2422,14 @@
             }
         }
 
+        function _hasMeasuredAccuracyPair(pair) {
+            return [pair.predicted_hours, pair.actual_hours].every(value =>
+                typeof value === 'number' && Number.isFinite(value) && value > 0);
+        }
+
         function _designAccuracyChart(pairs) {
             const host = document.getElementById('design-accuracy-chart');
-            const points = pairs.filter(x => Number.isFinite(Number(x.predicted_hours)) && Number.isFinite(Number(x.actual_hours)));
+            const points = pairs.filter(_hasMeasuredAccuracyPair);
             if (!points.length) { host.innerHTML = '<div class="design-chart-empty">Нет проверенных пар «оценка + факт»</div>'; return; }
             const width=500, height=218, pad=34, max=Math.max(1, ...points.flatMap(x => [Number(x.predicted_hours), Number(x.actual_hours)])) * 1.08;
             const sx=v => pad + Number(v) / max * (width-pad*2), sy=v => height-pad-Number(v)/max*(height-pad*2);
@@ -2431,9 +2442,9 @@
         async function loadDesignEstimate() {
             const body = document.getElementById('design-accuracy-rows');
             try {
-                const [accuracy, prints, settings] = await Promise.all([_designFetch('/prints/prediction-accuracy'), _designFetch('/prints?limit=20'), _designFetch('/settings/machine')]);
+                const [accuracy, latestResult] = await Promise.all([_designFetch('/prints/prediction-accuracy'), _designFetch('/prints/latest-prediction')]);
                 const pairs = accuracy.pairs || [];
-                const latest = (prints.items || []).find(record => record.metadata_json?.prediction);
+                const latest = latestResult.record;
                 const prediction = latest?.metadata_json?.prediction || null;
                 if (prediction) {
                     const hours = prediction.machine_hours ?? prediction.machine_cycle_hours ?? prediction.print_hours;
@@ -2443,23 +2454,25 @@
                     document.getElementById('design-estimate-interval').textContent = interval.length === 2 ? `± ${_formatHours(Math.abs(interval[1]-interval[0])/2)}` : '';
                     const source = {calculated:'расчёт по геометрии', calibrated:'калибровано по истории', model:'модель', heuristic:'эвристика'}[prediction.prediction_source] || prediction.method || 'расчёт';
                     document.getElementById('design-estimate-source').textContent = `${source}; операторские паузы исключены`;
-                    const params=settings.params||{}, thickness=prediction.layer_thickness_mm, layers=prediction.layer_count;
-                    const cells=[['Слои',layers],['Высота',layers&&thickness?`${(layers*thickness).toFixed(2)} мм`:'—'],['Шаг штриховки',prediction.hatch_distance_mm?`${prediction.hatch_distance_mm} мм`:'—'],['Скорость штриховки',params.hatch_speed_mm_s?`${params.hatch_speed_mm_s} мм/с`:'—'],['Толщина слоя',thickness?`${thickness} мм`:'—'],['Лазеры',prediction.laser_count??params.laser_count??'—']];
+                    const inputs=prediction.calculation_inputs||{}, thickness=prediction.layer_thickness_mm, layers=prediction.layer_count;
+                    const cells=[['Слои',layers],['Высота',layers&&thickness?`${(layers*thickness).toFixed(2)} мм`:'—'],['Шаг штриховки',prediction.hatch_distance_mm?`${prediction.hatch_distance_mm} мм`:'—'],['Скорость штриховки',inputs.hatch_speed_mm_s?`${inputs.hatch_speed_mm_s} мм/с`:'Не сохранена'],['Толщина слоя',thickness?`${thickness} мм`:'—'],['Лазеры',prediction.laser_count??'—']];
                     document.getElementById('design-estimate-inputs').innerHTML=cells.map(([label,value])=>`<div class="design-cell"><div class="design-cell-label">${label}</div><div class="design-cell-value">${_esc(value)}</div></div>`).join('');
                     const scan=Number(prediction.scan_hours)||0, recoat=(Number(prediction.recoat_hours)||0)+(Number(prediction.layer_overhead_hours)||0), total=scan+recoat;
                     if(total>0) document.getElementById('design-scan-part').style.width=`${Math.round(scan/total*100)}%`;
-                    const warnings=prediction.prediction_warnings||[];
-                    document.getElementById('design-estimate-warning').textContent=warnings[0]||'Все параметры взяты из сохранённого снимка расчёта; паузы оператора не включены.';
+                    const historicalPair = pairs.find(pair => pair.record_id === latest.record_id);
+                    const warnings=[historicalPair?.excluded_reason_ru, ...(prediction.prediction_warnings||[])].filter(Boolean);
+                    document.getElementById('design-estimate-warning').textContent=[...new Set(warnings)].join(' ')||'Сохранённый расчёт по заданным параметрам; паузы оператора не включены.';
                 } else {
                     document.getElementById('design-estimate-time').textContent='—';
                     document.getElementById('design-estimate-source').textContent='Нет сохранённых оценок. Откройте карточку со STL и запустите расчёт.';
                 }
-                const usable=pairs.filter(x=>x.actual_hours!=null&&x.predicted_hours!=null);
+                const usable=pairs.filter(_hasMeasuredAccuracyPair);
                 _designAccuracyChart(usable);
-                const errors=usable.map(x=>Math.abs(Number(x.error_pct))).filter(Number.isFinite).sort((a,b)=>a-b);
-                document.getElementById('design-median-error').textContent=errors.length?`${errors[Math.floor(errors.length/2)].toFixed(1)}%`:'—';
+                const errors=usable.filter(x=>typeof x.error_pct==='number'&&Number.isFinite(x.error_pct)).map(x=>Math.abs(x.error_pct)).sort((a,b)=>a-b);
+                const medianError=errors.length?(errors[Math.floor((errors.length-1)/2)]+errors[Math.floor(errors.length/2)])/2:null;
+                document.getElementById('design-median-error').textContent=medianError!=null?`${medianError.toFixed(1)}%`:'—';
                 document.getElementById('design-worst-error').textContent=errors.length?`${Math.max(...errors).toFixed(1)}%`:'—';
-                body.innerHTML=usable.length?usable.slice(0,6).map(x=>`<tr><td>${_esc(x.name||x.record_id||'Печать')}</td><td>${_formatHours(x.predicted_hours)}</td><td>${_formatHours(x.actual_hours)}</td><td class="${Math.abs(x.error_pct)>20?'design-error':''}">${x.error_pct>0?'+':''}${_esc(x.error_pct)}%</td></tr>`).join(''):'<tr><td colspan="4" class="muted" style="text-align:center">Проверенных пар пока нет</td></tr>';
+                body.innerHTML=pairs.length?pairs.slice(0,6).map(x=>`<tr><td>${_esc(x.name||x.record_id||'Печать')}${x.excluded_reason_ru?`<div class="muted">${_esc(x.excluded_reason_ru)}</div>`:''}</td><td>${_formatHours(x.predicted_hours)}</td><td>${x.actual_hours!=null?_formatHours(x.actual_hours):'Нет данных'}</td><td class="${Math.abs(x.error_pct)>20?'design-error':''}">${x.error_pct!=null?`${x.error_pct>0?'+':''}${_esc(x.error_pct)}%`:'—'}</td></tr>`).join(''):'<tr><td colspan="4" class="muted" style="text-align:center">Сохранённых пар пока нет</td></tr>';
             } catch (_) {
                 body.innerHTML='<tr><td colspan="4" class="design-error">Не удалось загрузить точность</td></tr>';
                 document.getElementById('design-accuracy-chart').innerHTML='<div class="design-chart-empty design-error">Ошибка загрузки данных</div>';
@@ -3886,19 +3899,20 @@
                 }
 
                 const rows = (d.pairs || []).slice(0, 12).map(p => {
-                    const col = Math.abs(p.error_pct) <= 10 ? 'var(--status-success)'
+                    const col = p.error_pct == null ? 'var(--text-muted)'
+                              : Math.abs(p.error_pct) <= 10 ? 'var(--status-success)'
                               : Math.abs(p.error_pct) <= 25 ? 'var(--status-warning)' : 'var(--status-danger)';
                     // A wall-span actual carries operator pauses the estimate
                     // never modelled — flagged rather than silently averaged in.
                     const src = p.actual_source === 'wall_span'
                         ? ' <span style="color:var(--status-warning);" title="Факт по интервалу сессии, включая паузы">≈</span>' : '';
                     return `<tr>
-                        <td>${p.name || p.record_id}</td>
-                        <td>${_materialRu(p.material)}</td>
-                        <td>${p.predicted_hours} ч</td>
-                        <td>${p.actual_hours} ч${src}</td>
-                        <td style="color:${col};font-weight:600;">${p.error_pct > 0 ? '+' : ''}${p.error_pct}%</td>
-                        <td style="font-size:12px;color:var(--text-muted);">${p.used_for_calibration ? 'учтена' : (p.excluded_reason || '—')}</td>
+                        <td>${_esc(p.name || p.record_id)}</td>
+                        <td>${_esc(_materialRu(p.material))}</td>
+                        <td>${_formatHours(p.predicted_hours)}</td>
+                        <td>${p.actual_hours != null ? _formatHours(p.actual_hours) : 'Нет данных'}${src}</td>
+                        <td style="color:${col};font-weight:600;">${p.error_pct != null ? `${p.error_pct > 0 ? '+' : ''}${_esc(p.error_pct)}%` : '—'}</td>
+                        <td style="font-size:12px;color:var(--text-muted);">${p.used_for_calibration ? 'учтена' : _esc(p.excluded_reason_ru || 'Недостаточно подтверждений')}</td>
                     </tr>`;
                 }).join('');
 
@@ -3935,12 +3949,14 @@
                         </div>
                         <div class="pc-box">
                             <h4>Модели скана по режимам</h4>
+                            <p class="muted">${_esc(scan.status_ru || '')}</p>
                             ${scanRows}
                             <div style="margin-top:10px;font-size:12px;color:var(--text-muted);">
                                 Модель обучается на реальном времени прожига слоёв и применяется только к своему режиму
                                 «материал + толщина» — на чужой режим она не переносится.</div>
                         </div>
                     </div>
+                    <p class="muted">${_esc(d.comparison_basis_ru || 'Сравнение прожига и нанесения порошка.')} Это история расчётов, не проверка точности на новых печатях.</p>
                     <div style="overflow-x:auto;">
                         <table>
                             <thead><tr><th>Печать</th><th>Материал</th><th>Прогноз</th><th>Факт</th><th>Расхождение</th><th>В калибровке</th></tr></thead>
@@ -5057,19 +5073,58 @@
             } catch (e) { el.innerHTML = ''; }
         }
 
+        let _calibrationRequestActive = false;
         async function recalibrateNow() {
-            await fetch('/prints/recalibrate', { method: 'POST' });
-            loadCalibration(); loadMachineParams();
+            if (_calibrationRequestActive) {
+                showToast('Калибровка уже в очереди или выполняется на этом ПК.', 'info');
+                return;
+            }
+            _calibrationRequestActive = true;
+            try {
+                const response = await fetch('/prints/recalibrate', { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Не удалось поставить расчёт в очередь');
+                if (data.contract_version === 2 && data.job_id) {
+                    showToast('Калибровка в очереди на этом ПК. Можно продолжать работу.', 'info');
+                    // A bounded UI wait does not cancel durable work. A slow or
+                    // offline workstation continues when its worker recovers.
+                    for (let attempt = 0; attempt < 60; attempt++) {
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        const statusResponse = await fetch('/background-analysis/jobs/' + encodeURIComponent(data.job_id));
+                        if (!statusResponse.ok) throw new Error('Не удалось проверить расчёт. Он остаётся в фоновой очереди.');
+                        const job = await statusResponse.json();
+                        if (job.status === 'failed') throw new Error(job.error || 'Калибровка не завершилась');
+                        if (job.status !== 'done') continue;
+                        const result = job.result || {};
+                        showToast(result.locked ? 'Настройки зафиксированы — калибровка ничего не изменила.'
+                            : result.status === 'no_machine_params' ? 'Сначала задайте параметры машины.'
+                            : 'Калибровка завершена. Применены только допустимые результаты.', 'info');
+                        await Promise.all([loadCalibration(), loadMachineParams(), loadMachineAccuracy()]);
+                        return;
+                    }
+                    showToast('Расчёт продолжается в фоне. Результат появится после завершения.', 'info');
+                } else {
+                    // Compatibility with a PC still running the synchronous API.
+                    await Promise.all([loadCalibration(), loadMachineParams(), loadMachineAccuracy()]);
+                }
+            } catch (error) {
+                showToast(error.message || 'Не удалось запустить калибровку', 'error');
+            } finally {
+                _calibrationRequestActive = false;
+            }
         }
 
         async function setCorrectionLock(locked) {
-            await fetch('/settings/machine', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ correction_locked: locked }),
-            });
-            if (!locked) await fetch('/prints/recalibrate', { method: 'POST' });
-            loadCalibration(); loadMachineParams();
+            try {
+                const response = await fetch('/settings/machine', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ correction_locked: locked }),
+                });
+                if (!response.ok) throw new Error('Не удалось изменить фиксацию настроек');
+                if (!locked) void recalibrateNow();
+                loadCalibration(); loadMachineParams();
+            } catch (error) { showToast(error.message, 'error'); }
         }
 
         // =========================================================

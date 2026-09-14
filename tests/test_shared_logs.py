@@ -12,6 +12,7 @@ time_log here keeps cross-PC calibration cheap: 3 MB across this shop's 19 real
 prints instead of downloading a full multi-gigabyte batch for each lookup.
 """
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,12 @@ class _FakeStore:
     def get_bytes(self, bucket, name):
         return self.objects.get((bucket, name))
 
+    def put_file_verified(self, bucket, name, path, *, expected_sha256, expected_size):
+        data = Path(path).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == expected_sha256
+        assert len(data) == expected_size
+        return self.put_file(bucket, name, path)
+
 
 @pytest.fixture
 def store(monkeypatch):
@@ -72,6 +79,31 @@ def store(monkeypatch):
 
 
 class TestMirroring:
+    def test_immutable_mirrors_do_not_replace_each_other(self, tmp_path, store):
+        path = tmp_path / "t_time.log"
+        path.write_text(_TIME_LOG, encoding="utf-8")
+        first = _file(path)
+        first.checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert runtime_mod.mirror_logs_to_object_store("s1", [first], immutable=True) == 1
+        uri = first.metadata["shared_log_uri"]
+        path.write_text(_TIME_LOG + "OLD_STATS: 6 | 9250 | 30000 | 39250 |\n", encoding="utf-8")
+        second = _file(path)
+        second.checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert runtime_mod.mirror_logs_to_object_store("s1", [second], immutable=True) == 1
+        assert second.metadata["shared_log_uri"] != uri
+        old_copy = runtime_mod._fetch_shared_log("s1", path.name, object_uri=uri)
+        new_copy = runtime_mod._fetch_shared_log("s1", path.name, object_uri=second.metadata["shared_log_uri"])
+        assert old_copy != new_copy
+        assert old_copy.read_bytes() == _TIME_LOG.encode()
+        assert new_copy.read_bytes() == path.read_bytes()
+
+    def test_corrupt_or_foreign_immutable_mirror_is_not_read(self, store):
+        checksum = "a" * 64
+        name = f"s1/sha256/{checksum}/t_time.log"
+        store.objects[("raw-logs", name)] = b"wrong content"
+        assert runtime_mod._fetch_shared_log("s1", "t_time.log", object_uri=f"s3://raw-logs/{name}") is None
+        assert runtime_mod._fetch_shared_log("s2", "t_time.log", object_uri=f"s3://raw-logs/{name}") is None
+
     def test_time_log_is_mirrored(self, tmp_path, store):
         log = tmp_path / "23.03.2026_time.log"
         log.write_text(_TIME_LOG, encoding="utf-8")

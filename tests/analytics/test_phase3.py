@@ -71,7 +71,9 @@ class TestAccuracyReport:
         raw_recoat = 100 * pour_ms / 3_600_000
         db.add(PrintRecord(
             record_id=f"pr_acc_{idx}", name=f"acc{idx}", session_id=sid, material=material,
-            metadata_json={"prediction": {
+            metadata_json={"session_link_confirmed": True, "prediction": {
+                "input_revision": 1,
+                "build_origin_source": "explicit", "build_origin_z_mm": 0.0,
                 "estimated_at": start.isoformat(),
                 "material": material,
                 "method": "cohatch",

@@ -120,6 +120,9 @@ def _linked_pair(db, tmp_path, record_id: str, series: LayerGeometrySeries,
     row.classification = classification
     row.start_ts = datetime(2027, 3, 1, 8, tzinfo=timezone.utc)
     prediction = {
+        "input_revision": 1,
+        "build_origin_source": "explicit",
+        "build_origin_z_mm": 0.0,
         "material": material,
         "scan_geometry": _snapshot_geometry(series),
     }
@@ -127,7 +130,7 @@ def _linked_pair(db, tmp_path, record_id: str, series: LayerGeometrySeries,
         prediction["geometry_fingerprint"] = geometry_fingerprint
     db.add(PrintRecord(
         record_id=record_id, name=record_id, material=material, session_id=session_id,
-        metadata_json={"prediction": prediction},
+        metadata_json={"prediction": prediction, "session_link_confirmed": True},
     ))
 
 
@@ -145,6 +148,39 @@ class TestBurnExtraction:
 
 
 class TestLayerCycleFit:
+    @pytest.mark.parametrize("case,reason", [
+        ("lower_bound", "incomplete_geometry"),
+        ("origin", "unconfirmed_build_origin"),
+        ("link", "unconfirmed_session_link"),
+        ("revision", "stale_prediction"),
+    ])
+    def test_scan_input_gates_preserve_log_only_cycle_measurements(self, db, tmp_path, case, reason):
+        series = _series()
+        burn = {layer: _burn_seconds(series, layer) * 1000 for layer in range(1, N_LAYERS + 1)}
+        _linked_pair(db, tmp_path, "quality", series, burn)
+        db.flush()
+        record = db.get(PrintRecord, "quality")
+        metadata = dict(record.metadata_json)
+        prediction = dict(metadata["prediction"])
+        if case == "lower_bound":
+            metadata["geometry_quality"] = {"status": "lower_bound"}
+        elif case == "origin":
+            prediction["build_origin_source"] = "minimum_supplied_geometry_z"
+        elif case == "link":
+            metadata.pop("session_link_confirmed")
+        else:
+            record.revision = 20
+        metadata["prediction"] = prediction
+        record.metadata_json = metadata
+        db.flush()
+        report = scan_calibration_report(db)
+        row = report["records"][0]
+        assert row["used"] is False
+        assert row["reason"] == reason
+        assert row["reason_ru"]
+        assert row["cycle_used"] is True
+        assert report["candidates"] == {}
+
     def test_recovers_base_and_minimum_cycle_robustly(self):
         components_a = [10_000.0 + index * 100.0 for index in range(180)]
         components_b = [10_100.0 + index * 105.0 for index in range(180)]

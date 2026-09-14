@@ -6,6 +6,8 @@ only stores a compact dataset snapshot and immutable model metadata.
 
 from __future__ import annotations
 
+from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -37,8 +39,8 @@ MIN_BRIER_IMPROVEMENT = 0.01
 MIN_AUC_IMPROVEMENT = 0.01
 
 
-def _latest_labels(db: Session) -> dict[str, int]:
-    labels: dict[str, int] = {}
+def _latest_label_evidence(db: Session) -> dict[str, dict[str, Any]]:
+    labels: dict[str, dict[str, Any]] = {}
     rows = db.scalars(
         select(QualityOutcome).order_by(QualityOutcome.timestamp, QualityOutcome.outcome_id)
     ).all()
@@ -46,13 +48,24 @@ def _latest_labels(db: Session) -> dict[str, int]:
         if not row.session_id or not row.is_final:
             continue
         label = outcome_to_label(row.result)
-        if label is not None:
-            labels[row.session_id] = label
+        if label is None:
+            labels.pop(row.session_id, None)
+        else:
+            observed_at = _utc_timestamp(row.timestamp)
+            labels[row.session_id] = {
+                "label": label,
+                "label_outcome_id": row.outcome_id,
+                "label_observed_at": observed_at.isoformat() if observed_at else None,
+            }
     return labels
 
 
+def _latest_labels(db: Session) -> dict[str, int]:
+    return {sid: item["label"] for sid, item in _latest_label_evidence(db).items()}
+
+
 def _labelled_sessions(db: Session) -> list[dict[str, Any]]:
-    labels = _latest_labels(db)
+    labels = _latest_label_evidence(db)
     rows = db.scalars(select(BuildSession).order_by(BuildSession.start_ts, BuildSession.session_id)).all()
     result: list[dict[str, Any]] = []
     for row in rows:
@@ -65,7 +78,7 @@ def _labelled_sessions(db: Session) -> list[dict[str, Any]]:
             "session_id": row.session_id,
             "start_ts": row.start_ts.isoformat() if row.start_ts else None,
             "group": group,
-            "label": labels[row.session_id],
+            **labels[row.session_id],
         })
     return result
 
@@ -76,6 +89,8 @@ def training_fingerprint(rows: list[dict[str, Any]]) -> str:
             "session_id": row["session_id"],
             "start_ts": row.get("start_ts"),
             "label": row["label"],
+            "label_outcome_id": row.get("label_outcome_id"),
+            "label_observed_at": row.get("label_observed_at"),
             "features": build_feature_row(row["group"]),
         }
         for row in rows
@@ -186,13 +201,46 @@ def _binary_metrics(observed: list[int], predicted: list[float]) -> dict[str, An
     return result
 
 
+def _utc_timestamp(value: Any) -> datetime | None:
+    """Registry/DB timestamps are UTC; SQLite may omit the timezone suffix."""
+    try:
+        dt = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _shadow_evaluation(
     rows: list[dict[str, Any]],
     shadow: dict[str, Any],
     active: dict[str, Any] | None,
 ) -> dict[str, Any]:
     trained_ids = set(shadow.get("training_session_ids") or [])
-    future = [row for row in rows if row["session_id"] not in trained_ids]
+    comparator_trained_ids = set((active or {}).get("training_session_ids") or [])
+    cutoff = _utc_timestamp(shadow.get("created_at"))
+    future = []
+    exclusions: Counter[str] = Counter()
+    for row in rows:
+        start = _utc_timestamp(row.get("start_ts"))
+        labelled = _utc_timestamp(row.get("label_observed_at"))
+        if row["session_id"] in trained_ids:
+            reason = "candidate_training_sample"
+        elif row["session_id"] in comparator_trained_ids:
+            reason = "comparator_training_sample"
+        elif cutoff is None:
+            reason = "candidate_time_unavailable"
+        elif start is None:
+            reason = "print_time_unavailable"
+        elif start <= cutoff:
+            reason = "not_a_future_print"
+        elif labelled is None:
+            reason = "label_time_unavailable"
+        elif labelled <= cutoff or labelled < start:
+            reason = "not_a_future_label"
+        else:
+            future.append(row)
+            continue
+        exclusions[reason] += 1
     candidate = dict(shadow.get("artifact") or {})
     comparator = dict((active or {}).get("artifact") or {}) if active else None
 
@@ -224,6 +272,9 @@ def _shadow_evaluation(
         "comparator": comparator_metrics,
         "comparator_type": "active_model" if active else "transparent_heuristic",
         "evaluated_session_ids": evaluated_ids,
+        "validation_policy": "print_and_label_after_registration_v1",
+        "future_after": cutoff.isoformat() if cutoff else None,
+        "temporal_exclusions": dict(sorted(exclusions.items())),
     }
 
     enough = (
@@ -308,6 +359,7 @@ def calculate_retraining(prepared: dict[str, Any], *, owner_node_id: str) -> dic
                     "minimum_cv_auc": MIN_CV_AUC,
                     "future_shadow_validation_required": True,
                     "minimum_future_labels": MIN_SHADOW_LABELS,
+                    "future_validation_policy": "print_and_label_after_registration_v1",
                 },
                 "app_version": APP_VERSION,
                 "analysis_version": ANALYSIS_VERSION,
@@ -318,6 +370,7 @@ def calculate_retraining(prepared: dict[str, Any], *, owner_node_id: str) -> dic
                     "minimum_shadow_class": MIN_SHADOW_CLASS,
                     "minimum_brier_improvement": MIN_BRIER_IMPROVEMENT,
                     "minimum_auc_improvement": MIN_AUC_IMPROVEMENT,
+                    "future_validation_policy": "print_and_label_after_registration_v1",
                 }),
                 "parent_model_version_id": (active or {}).get("model_version_id"),
             }

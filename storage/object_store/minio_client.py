@@ -119,6 +119,19 @@ class ObjectStore:
         )
         return f"s3://{bucket}/{object_name}"
 
+    def put_bytes_verified(
+        self, bucket: str, object_name: str, data: bytes,
+        content_type: str = "application/json",
+    ) -> str:
+        """Use the same immutable checksum protocol for generated reports."""
+        with tempfile.TemporaryDirectory(prefix="printer-object-upload-") as directory:
+            path = Path(directory) / "payload"
+            path.write_bytes(data)
+            return self.put_file_verified(
+                bucket, object_name, path, expected_sha256=hashlib.sha256(data).hexdigest(),
+                expected_size=len(data), content_type=content_type,
+            )
+
     def get_bytes(self, bucket: str, object_name: str) -> bytes | None:
         """Download an object's bytes, or None if missing/unavailable."""
         try:

@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
+from analytics.prediction.calibration_inputs import CalibrationInputs
 
 from analytics.prediction.accuracy import (
     PRINT_CLASSIFICATIONS,
@@ -52,6 +53,10 @@ from analytics.prediction.layer_engine import (
     GEOMETRY_FEATURES,
     LayerGeometrySeries,
     machine_mode_key,
+)
+from analytics.prediction.input_quality import INPUT_REASON_RU, calibration_input_exclusion
+from analytics.prediction.timing_validation import (
+    MAX_BURN_MS, MIN_BURN_MS, calibration_burn_ms, calibration_cycles_ms,
 )
 from domain.enums.common import SourceFileFamily
 from domain.models.prints import MachineParams
@@ -75,7 +80,7 @@ MAX_CV_MEDIAN_TOTAL_ERR_PCT = 25.0
 MAX_CV_WORST_TOTAL_ERR_PCT = 35.0
 # Plausibility bounds on a single layer's burn reading (ms) — mirrors the
 # pour_ms guards in recoat_calibration.
-_MIN_BURN_MS, _MAX_BURN_MS = 100.0, 3_600_000.0
+_MIN_BURN_MS, _MAX_BURN_MS = MIN_BURN_MS, MAX_BURN_MS
 
 # ``make_layer_ms`` is not simply burn+pour+one constant.  On real M-350
 # builds the controller holds short layers near a minimum cycle duration.  The
@@ -98,17 +103,7 @@ MIN_CYCLE_BRANCH_PRINTS = 2
 
 def _burn_seconds_by_layer(events: list[Any]) -> dict[int, float]:
     """{layer: burn_seconds}; conflicting repeated attempts are excluded."""
-    from analytics.prediction.timing_validation import calibration_timing_payloads
-
-    out: dict[int, float] = {}
-    for payload in calibration_timing_payloads(events).values():
-        layer, burn_ms = payload.get("layer"), payload.get("burn_ms")
-        if not isinstance(layer, int) or not isinstance(burn_ms, (int, float)):
-            continue
-        if not (_MIN_BURN_MS <= burn_ms <= _MAX_BURN_MS):
-            continue
-        out[layer] = burn_ms / 1000.0
-    return out
+    return {layer: burn / 1000.0 for layer, burn in calibration_burn_ms(events).items()}
 
 
 def _layer_overhead_ms_by_layer(events: list[Any]) -> dict[int, float]:
@@ -132,26 +127,7 @@ def _layer_cycles_ms_by_layer(
     pause-like ``make`` value.  It is evidence and may be useful to explain the
     finished build; only the normal-cycle fitter filters it out.
     """
-    from analytics.prediction.recoat_calibration import _MAX_POUR_MS, _MIN_POUR_MS
-    from analytics.prediction.timing_validation import calibration_timing_payloads
-
-    out: dict[int, tuple[float, float, float]] = {}
-    for payload in calibration_timing_payloads(events).values():
-        layer = payload.get("layer")
-        values = [payload.get(name) for name in ("burn_ms", "pour_ms", "make_layer_ms")]
-        if not isinstance(layer, int) or not all(
-            isinstance(value, (int, float)) for value in values
-        ):
-            continue
-        burn_ms, pour_ms, make_layer_ms = (float(value) for value in values)
-        if not (_MIN_BURN_MS <= burn_ms <= _MAX_BURN_MS):
-            continue
-        if not (_MIN_POUR_MS <= pour_ms <= _MAX_POUR_MS):
-            continue
-        if make_layer_ms < burn_ms + pour_ms:
-            continue
-        out[layer] = (burn_ms, pour_ms, make_layer_ms)
-    return out
+    return calibration_cycles_ms(events)
 
 
 def session_burn_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
@@ -161,11 +137,11 @@ def session_burn_by_layer(session_id: str, db: Session) -> dict[int, float] | No
     the file not being on this machine, which is the shared-database case);
     falls back to re-parsing the log for sessions imported before storage.
     """
-    from analytics.prediction.layer_timings import stored_timings
+    from analytics.prediction.layer_timings import stored_timing_events
 
-    stored = stored_timings(session_id, db)
-    if stored:
-        return {layer: burn / 1000.0 for layer, (burn, _) in stored.items()}
+    stored = stored_timing_events(session_id, db)
+    if stored is not None:
+        return _burn_seconds_by_layer(stored) or None
 
     from storage.repositories.runtime import RuntimeRepository
     from domain.services.compute_affinity import ComputeAffinityError
@@ -189,11 +165,11 @@ def session_burn_by_layer(session_id: str, db: Session) -> dict[int, float] | No
 
 def session_layer_overhead_ms_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
     """Inter-phase machine overhead by layer, from DB first, local log second."""
-    from analytics.prediction.layer_timings import stored_layer_overheads
+    from analytics.prediction.layer_timings import stored_timing_events
 
-    stored = stored_layer_overheads(session_id, db)
-    if stored:
-        return stored
+    stored = stored_timing_events(session_id, db)
+    if stored is not None:
+        return _layer_overhead_ms_by_layer(stored) or None
 
     from storage.repositories.runtime import RuntimeRepository
     from domain.services.compute_affinity import ComputeAffinityError
@@ -217,11 +193,11 @@ def session_layer_cycles_ms_by_layer(
     session_id: str, db: Session,
 ) -> dict[int, tuple[float, float, float]] | None:
     """Raw complete layer cycles, from shared DB first and local log second."""
-    from analytics.prediction.layer_timings import stored_layer_cycles
+    from analytics.prediction.layer_timings import stored_timing_events
 
-    stored = stored_layer_cycles(session_id, db)
-    if stored:
-        return stored
+    stored = stored_timing_events(session_id, db)
+    if stored is not None:
+        return _layer_cycles_ms_by_layer(stored) or None
 
     from domain.services.compute_affinity import ComputeAffinityError
     from storage.repositories.runtime import RuntimeRepository
@@ -604,7 +580,7 @@ def _fit_layer_cycle_model(
     }
 
 
-def scan_calibration_report(db: Session) -> dict:
+def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInputs | None = None) -> dict:
     """Collect (geometry, burn) pairs per mode and fit candidate models."""
     rows: list[dict] = []
     # One (X_rows, y) group per contributing print, not a flat pool — _fit
@@ -616,7 +592,7 @@ def scan_calibration_report(db: Session) -> dict:
         str, list[tuple[list[float], list[float], str, str]]
     ] = defaultdict(list)
 
-    linked = list(iter_linked_prints(db))
+    linked = inputs.linked if inputs is not None else list(iter_linked_prints(db))
     link_counts = Counter(record.session_id for record, _ in linked)
     for record, session in linked:
         snapshot = (record.metadata_json or {}).get("prediction") or {}
@@ -662,7 +638,8 @@ def scan_calibration_report(db: Session) -> dict:
         # intentionally independent of STL completeness and NNLS scan gates.
         cycles = (
             None if calibration_is_excluded(record, "cycle")
-            else session_layer_cycles_ms_by_layer(record.session_id, db)
+            else (inputs.cycles.get(record.session_id) if inputs is not None
+                  else session_layer_cycles_ms_by_layer(record.session_id, db))
         )
         cycle_used = False
         if cycles and key is not None:
@@ -694,7 +671,19 @@ def scan_calibration_report(db: Session) -> dict:
                 "reason": "no_scan_geometry",
             })
             continue
-        burn = session_burn_by_layer(record.session_id, db)
+        exclusion = calibration_input_exclusion(
+            record.metadata_json or {}, snapshot, record.revision,
+            session_id=record.session_id,
+        )
+        if exclusion:
+            rows.append({
+                "record_id": record.record_id, "session_id": record.session_id,
+                "used": False, "cycle_used": cycle_used, "reason": exclusion,
+                "reason_ru": INPUT_REASON_RU[exclusion],
+            })
+            continue
+        burn = (inputs.burns.get(record.session_id) if inputs is not None
+                else session_burn_by_layer(record.session_id, db))
         if not burn:
             rows.append({"record_id": record.record_id, "session_id": record.session_id,
                          "used": False, "reason": "no_time_log"})
@@ -784,9 +773,11 @@ def recalibrate_scan_and_apply(db: Session) -> dict:
     No-op when ``correction_locked`` (one operator lock for all auto-calibration).
     Caller commits.
     """
-    report = scan_calibration_report(db)
+    return apply_scan_report(db.get(MachineParams, 1), scan_calibration_report(db))
 
-    row = db.get(MachineParams, 1)
+
+def apply_scan_report(row: MachineParams | None, report: dict) -> dict:
+    """Publish accepted coefficients only; fitting is a local worker concern."""
     if row is None:
         return {"applied": {}, "skipped": [], "locked": False, "reason": "no machine params"}
     if row.correction_locked:

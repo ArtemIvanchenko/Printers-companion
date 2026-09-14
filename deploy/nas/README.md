@@ -54,11 +54,12 @@ PostgreSQL/MinIO и `!reset` для удаления унаследованно�
 
 1. Установить Container Manager и Tailscale, подключить NAS и все рабочие ПК к
    одной tailnet.
-2. Создать каталоги:
+2. Создать каталог проекта и два каталога данных. Имя каталога проекта может
+   использовать дефис или подчёркивание: compose использует относительные пути.
 
    ```text
-   /volume1/docker/printer-companion/postgres
-   /volume1/docker/printer-companion/minio
+   /volume1/docker/printer_companion/postgres
+   /volume1/docker/printer_companion/minio
    ```
 
 3. Не пробрасывать порты в интернет. В firewall NAS разрешить TCP `5433` и
@@ -70,16 +71,30 @@ PostgreSQL/MinIO и `!reset` для удаления унаследованно�
 
 ## 2. Запуск хранилищ на NAS
 
-На NAS по SSH или через Container Manager:
+Для запуска через Synology Container Manager скопировать из репозитория именно
+`deploy/nas/docker-compose.yml` и `deploy/nas/.env.nas.example` непосредственно
+в каталог проекта. Второй файл переименовать в `.env`, заполнить секреты, затем
+создать проект из этого каталога. Корневой `docker-compose.yml` использовать
+нельзя: он содержит вычислительные сервисы операторского ПК и может не
+поддерживаться встроенной версией Compose на NAS.
+
+Итоговая структура:
+
+```text
+/volume1/docker/printer_companion/
+├── docker-compose.yml
+├── .env
+├── postgres/
+└── minio/
+```
+
+Альтернативный запуск по SSH из этого же каталога:
 
 ```bash
-cd /volume1/docker/printer-companion
-cp deploy/nas/.env.nas.example deploy/nas/.env.nas
-# Заменить пароли в deploy/nas/.env.nas.
-docker compose --env-file deploy/nas/.env.nas \
-  -f deploy/nas/docker-compose.yml up -d
-docker compose --env-file deploy/nas/.env.nas \
-  -f deploy/nas/docker-compose.yml ps
+cd /volume1/docker/printer_companion
+# Предварительно сохранить заполненный файл как .env.
+docker compose up -d
+docker compose ps
 ```
 
 Ожидаются ровно два контейнера: `postgres` и `minio`. Если на NAS появились

@@ -3,15 +3,10 @@ import logging
 import logging.handlers
 import os
 import sys
-from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
-
-from core.logging.context import RequestIDFilter, request_id_var
+from core.logging.context import RequestIDFilter
 
 # Path inside the container — mounted as a host volume in docker-compose.
 LOG_DIR = Path(os.environ.get("LOG_DIR", "/app/logs"))
@@ -36,20 +31,14 @@ class StructuredFormatter(logging.Formatter):
         return json.dumps(entry, ensure_ascii=False)
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        rid = request.headers.get("X-Request-ID", "")
-        if not rid:
-            import uuid
-            rid = uuid.uuid4().hex[:12]
-        request.state.request_id = rid
-        token = request_id_var.set(rid)
-        try:
-            response = await call_next(request)
-            response.headers["X-Request-ID"] = rid
-            return response
-        finally:
-            request_id_var.reset(token)
+def __getattr__(name: str):
+    # Compatibility for old API integrations, without importing HTTP merely
+    # because a worker wants configure_logging or StructuredFormatter.
+    if name == "RequestIDMiddleware":
+        from api.middleware import RequestIDMiddleware
+
+        return RequestIDMiddleware
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def configure_logging(level: str = "INFO") -> None:

@@ -7,15 +7,24 @@ from collections.abc import Iterable
 from typing import Any
 
 TIMING_FIELDS = ("burn_ms", "pour_ms", "make_layer_ms")
+# Admission bounds for normal calibration, not proof of a corrupt counter or
+# an operator pause. Keep the measured phase in historical diagnostics.
+MIN_BURN_MS, MAX_BURN_MS = 100.0, 3_600_000.0
+MIN_POUR_MS, MAX_POUR_MS = 500.0, 120_000.0
 
 
 def finite_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def valid_timing_payload(payload: dict) -> bool:
     """Allow old partial summaries, but never known contradictions or NaN."""
-    if payload.get("timing_valid") is False:
+    if not isinstance(payload, dict) or payload.get("timing_valid") is False:
         return False
     for key in TIMING_FIELDS:
         value = payload.get(key)
@@ -72,3 +81,50 @@ def calibration_timing_payloads(events: Iterable[Any]) -> dict[int, dict]:
                 rejected.add(layer)
                 selected.pop(layer, None)
     return selected
+
+
+def normal_phase_exclusions(payload: dict) -> list[str]:
+    """Explain why measured phases cannot represent a normal machine layer."""
+    reasons = []
+    for name, low, high, reason in (
+        ("burn_ms", MIN_BURN_MS, MAX_BURN_MS, "burn_out_of_range"),
+        ("pour_ms", MIN_POUR_MS, MAX_POUR_MS, "pour_out_of_range"),
+    ):
+        value = payload.get(name)
+        if not finite_number(value) or not low <= value <= high:
+            reasons.append(reason)
+    return reasons
+
+
+def timing_components_ms(events: Iterable[Any]) -> dict[int, tuple[float, float]]:
+    """Measured burn+pour pairs; conflicts are checked before phase bounds."""
+    out = {}
+    for layer, payload in calibration_timing_payloads(events).items():
+        burn, pour = payload.get("burn_ms"), payload.get("pour_ms")
+        if (finite_number(burn) and burn > 0 and finite_number(pour)
+                and MIN_POUR_MS <= pour <= MAX_POUR_MS):
+            out[layer] = (float(burn), float(pour))
+    return out
+
+
+def calibration_burn_ms(events: Iterable[Any]) -> dict[int, float]:
+    """Independent burn measurements, including compatible partial summaries."""
+    return {
+        layer: float(payload["burn_ms"])
+        for layer, payload in calibration_timing_payloads(events).items()
+        if finite_number(payload.get("burn_ms"))
+        and MIN_BURN_MS <= payload["burn_ms"] <= MAX_BURN_MS
+    }
+
+
+def calibration_cycles_ms(events: Iterable[Any]) -> dict[int, tuple[float, float, float]]:
+    """Complete cycles with plausible phases; long residuals stay observable."""
+    out = {}
+    for layer, payload in calibration_timing_payloads(events).items():
+        if normal_phase_exclusions(payload):
+            continue
+        make = payload.get("make_layer_ms")
+        burn, pour = payload["burn_ms"], payload["pour_ms"]
+        if finite_number(make) and make >= burn + pour:
+            out[layer] = (float(burn), float(pour), float(make))
+    return out

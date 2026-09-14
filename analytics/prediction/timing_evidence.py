@@ -190,6 +190,7 @@ def summarize_timing_events(events: Iterable[Any]) -> TimingEvidence:
     duplicate_rows = conflicting_duplicates = invalid_rows = 0
     equivalent_duplicate_rows = repeated_attempt_rows = 0
     ambiguous_layers: set[int] = set()
+    invalid_layers: set[int] = set()
     attempts_by_layer: dict[int, list[LayerCycle]] = {}
     for event in events:
         if _field(event, "event_type") != "layer_timing_summary":
@@ -212,6 +213,8 @@ def summarize_timing_events(events: Iterable[Any]) -> TimingEvidence:
             or make <= 0
         ):
             invalid_rows += 1
+            if isinstance(layer, int) and not isinstance(layer, bool) and layer >= 1:
+                invalid_layers.add(layer)
             continue
         burn_f, pour_f, make_f = float(burn), float(pour), float(make)
         components = burn_f + pour_f
@@ -223,6 +226,7 @@ def summarize_timing_events(events: Iterable[Any]) -> TimingEvidence:
                 make_f = components
             else:
                 invalid_rows += 1
+                invalid_layers.add(layer)
                 continue
         candidate = LayerCycle(layer, burn_f, pour_f, make_f)
         previous = cycles.get(layer)
@@ -256,7 +260,10 @@ def summarize_timing_events(events: Iterable[Any]) -> TimingEvidence:
         conflicting_duplicates,
         equivalent_duplicate_rows,
         repeated_attempt_rows,
-        frozenset(ambiguous_layers),
+        # Preserve valid measured attempts as historical evidence, but an
+        # invalid sibling prevents declaring that physical layer a normal
+        # calibration/forecast target, regardless of input file order.
+        frozenset(ambiguous_layers | (invalid_layers & cycles.keys())),
         invalid_rows,
     )
 

@@ -39,7 +39,8 @@ from api.routes import (
 )
 from core.config.settings import get_settings
 from core.compute_identity import register_compute_node
-from core.logging.config import RequestIDMiddleware, configure_logging
+from core.logging.config import configure_logging
+from api.middleware import RequestIDMiddleware
 from core.preflight import run_preflight, exit_on_failure
 from core.versioning.version import APP_VERSION
 from storage.db.migrate import assert_schema_at_head, upgrade_to_head

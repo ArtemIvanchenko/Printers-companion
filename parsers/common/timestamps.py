@@ -1,5 +1,5 @@
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 
@@ -22,6 +22,12 @@ def date_hint_from_filename(path: Path) -> date | None:
         day, month, year = candidates[1].groups()
         return date(int(year), int(month), int(day))
     return None
+
+
+def date_hint_datetime(text: str) -> datetime | None:
+    """UTC date-only hint from a card/file name, never proof of a print/log pair."""
+    hint = date_hint_from_filename(Path(text))
+    return datetime.combine(hint, time(), tzinfo=timezone.utc) if hint else None
 
 
 def parse_timestamp_token(text: str, date_hint: date | None = None) -> tuple[datetime | None, str | None, float]:
@@ -77,4 +83,3 @@ def apply_midnight_rollover(timestamps: list[datetime | None]) -> list[datetime 
         adjusted.append(candidate)
         previous = candidate
     return adjusted
-

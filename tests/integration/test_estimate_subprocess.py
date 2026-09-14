@@ -11,6 +11,7 @@ its "no STL" HTTPException before ever touching ObjectStore, so this needs no
 real MinIO to prove the subprocess mechanism itself works.
 """
 import asyncio
+import multiprocessing
 from datetime import datetime, timezone
 
 import pytest
@@ -37,7 +38,7 @@ class TestRunEstimateInProcess:
         from api.routes.prints import _run_estimate_in_process
 
         _make_bare_record("pr_subproc_direct")
-        with ProcessPoolExecutor(max_workers=1) as pool:
+        with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn')) as pool:
             future = pool.submit(_run_estimate_in_process, "pr_subproc_direct")
             with pytest.raises(Exception) as exc_info:
                 future.result(timeout=60)
@@ -63,10 +64,8 @@ class TestAutoEstimateProcessPoolBranch:
 
         import api.routes.prints as prints_module
 
-        class _NotTestSettings:
-            app_env = "production"
-
-        monkeypatch.setattr(prints_module, "get_settings", lambda: _NotTestSettings())
+        settings = prints_module.get_settings().model_copy(update={"app_env": "production"})
+        monkeypatch.setattr(prints_module, "get_settings", lambda: settings)
 
         record_id = "pr_subproc_auto"
         _make_bare_record(record_id)
@@ -80,3 +79,20 @@ class TestAutoEstimateProcessPoolBranch:
             if prints_module._ESTIMATE_POOL is not None:
                 prints_module._ESTIMATE_POOL.shutdown(wait=True)
                 prints_module._ESTIMATE_POOL = None
+
+
+def test_pool_explicitly_uses_fresh_processes_on_every_platform(monkeypatch):
+    import api.routes.prints as prints_module
+
+    created = []
+    sentinel = object()
+
+    def pool_factory(*, max_workers, mp_context):
+        created.append((max_workers, mp_context.get_start_method()))
+        return sentinel
+
+    monkeypatch.setattr(prints_module, '_ESTIMATE_POOL', None)
+    monkeypatch.setattr(prints_module, 'ProcessPoolExecutor', pool_factory)
+    assert prints_module._estimate_pool() is sentinel
+    assert prints_module._estimate_pool() is sentinel
+    assert created == [(1, 'spawn')]

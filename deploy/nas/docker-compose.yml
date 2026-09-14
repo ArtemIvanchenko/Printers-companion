@@ -4,9 +4,12 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-printer_logs}
       POSTGRES_USER: ${POSTGRES_USER:-printer_logs}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.nas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
-      - /volume1/docker/printer-companion/postgres:/var/lib/postgresql/data
+      # Relative paths work regardless of whether the Synology folder is named
+      # printer-companion or printer_companion. Container Manager resolves them
+      # against the directory containing this compose file.
+      - ./postgres:/var/lib/postgresql/data
     ports:
       - "5433:5432"
     # PostgreSQL stores shared state, but never runs print analytics.  Keep its
@@ -40,10 +43,10 @@ services:
     image: minio/minio:RELEASE.2024-05-10T01-41-38Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.nas}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.nas}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
     volumes:
-      - /volume1/docker/printer-companion/minio:/data
+      - ./minio:/data
     ports:
       - "9000:9000"
       # The administration console is intentionally not published. Add

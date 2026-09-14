@@ -80,7 +80,13 @@ def burn_windows(events, pauses=(), clock_timezone="Europe/Moscow"):
                         "precision": "logged_start" if kind == "burn_start" else "approximate_burn_marker"})
     windows.sort(key=lambda row: row["start"])
     bad = set()
-    for left, right in zip(windows, windows[1:]):
-        if left["end"] > right["start"]:
-            bad.update((left["layer"], right["layer"]))
+    furthest = None
+    for row in windows:
+        # Adjacent-only comparison misses a long window enclosing several
+        # shorter ones. Every overlapping layer is ambiguous, even when its
+        # immediately preceding neighbour has already ended.
+        if furthest is not None and furthest["end"] > row["start"]:
+            bad.update((furthest["layer"], row["layer"]))
+        if furthest is None or row["end"] > furthest["end"]:
+            furthest = row
     return [row for row in windows if row["layer"] not in bad]

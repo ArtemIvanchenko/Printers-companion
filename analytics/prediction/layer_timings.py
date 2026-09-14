@@ -30,127 +30,86 @@ import logging
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from domain.enums.common import SourceFileFamily
 from domain.models.events import LayerSnapshot
-from analytics.prediction.timing_validation import calibration_timing_payloads
+from domain.models.sessions import BuildSession
+from analytics.prediction.timing_validation import (
+    calibration_cycles_ms, timing_components_ms,
+)
+from analytics.prediction.timing_snapshot import (
+    MANIFEST_KEY, MAX_LAYER_OVERHEAD_MS, PreparedLayerTimings,
+    prepare_layer_timings, published_timing_events,
+)
 
 logger = logging.getLogger(__name__)
 
-# Longer residuals are almost certainly a stop/restart recorded inside the
-# full layer cycle, not repeatable machine overhead. Keep them out of future
-# estimates; wall-clock stops remain session diagnostics only.
-MAX_LAYER_OVERHEAD_MS = 10_000.0
+# Bound for the additive-overhead summary, not a diagnosis of a pause. A long
+# residual can also include a legitimate minimum-cycle wait. Raw cycles remain
+# available to diagnostics and to the separate max/base/floor calibration.
 
 
 def store_layer_timings(session_id: str, files: list, db: Session) -> int:
-    """Extract per-layer burn/pour from a session's time_log into the DB.
+    """Legacy synchronous adapter. Durable imports prepare before opening SQL."""
+    from core.config.settings import get_settings
 
-    Idempotent: replaces whatever was stored for this session, so a re-import
-    with more complete logs (the multi-day rotation case) overwrites a partial
-    earlier read rather than duplicating layers.
+    return replace_layer_timings(session_id, prepare_layer_timings(
+        files, owner_node_id=get_settings().compute_node_id,
+    ), db)
 
-    Returns the number of layers stored. Zero means the session has no usable
-    time_log, which is normal for preparation runs and for sessions whose files
-    are gone — not an error.
-    """
-    from analytics.prediction.recoat_calibration import _MAX_POUR_MS, _MIN_POUR_MS
 
-    by_layer: dict[int, tuple[float, float, float | None, float | None]] = {}
-    timing_files = [
-        f for f in files if f.classification.family == SourceFileFamily.time_log and f.parse_result
-    ]
-    payloads = calibration_timing_payloads(
-        event for f in timing_files for event in f.parse_result.events
-    )
-    for layer, payload in payloads.items():
-        burn_ms, pour_ms = payload.get("burn_ms"), payload.get("pour_ms")
-        make_layer_ms = payload.get("make_layer_ms")
-        if not isinstance(layer, int):
-            continue
-        if not isinstance(burn_ms, (int, float)) or not isinstance(pour_ms, (int, float)):
-            continue
-        # Same plausibility guards the calibrations apply, enforced once at
-        # the point of storage instead of at every read.
-        if burn_ms <= 0 or not (_MIN_POUR_MS <= pour_ms <= _MAX_POUR_MS):
-            continue
-        raw_make = None
-        normal_overhead = None
-        if isinstance(make_layer_ms, (int, float)):
-            overhead_ms = float(make_layer_ms) - float(burn_ms) - float(pour_ms)
-            if overhead_ms >= 0.0:
-                raw_make = float(make_layer_ms)
-                if overhead_ms <= MAX_LAYER_OVERHEAD_MS:
-                    normal_overhead = overhead_ms
-        by_layer[layer] = (float(burn_ms), float(pour_ms), raw_make, normal_overhead)
+def replace_layer_timings(session_id: str, prepared: PreparedLayerTimings, db: Session) -> int:
+    """Replace rows and explicit empty state atomically; caller commits/fences."""
+    from core.versioning.provenance import stable_hash
 
-    if not by_layer:
-        if timing_files:
-            db.execute(delete(LayerSnapshot).where(LayerSnapshot.session_id == session_id))
-            db.flush()
-        return 0
-
+    manifest = prepared.manifest
+    if manifest.get("row_count") != len(prepared.rows) or manifest.get("rows_fingerprint") != stable_hash(prepared.rows):
+        raise ValueError("Снимок слоёв повреждён до публикации")
+    session = db.scalar(select(BuildSession).where(BuildSession.session_id == session_id)
+                        .with_for_update().execution_options(populate_existing=True))
+    if session is None:
+        raise ValueError(f"Сессия {session_id} не найдена")
     db.execute(delete(LayerSnapshot).where(LayerSnapshot.session_id == session_id))
-    db.add_all(
-        [
-            LayerSnapshot(
-                session_id=session_id,
-                layer=layer,
-                features={
-                    "burn_ms": burn_ms,
-                    "pour_ms": pour_ms,
-                    **({"make_layer_ms": make_layer_ms} if make_layer_ms is not None else {}),
-                    **(
-                        {"normal_overhead_ms": normal_overhead_ms}
-                        if normal_overhead_ms is not None
-                        else {}
-                    ),
-                },
-            )
-            for layer, (burn_ms, pour_ms, make_layer_ms, normal_overhead_ms) in sorted(
-                by_layer.items()
-            )
-        ]
-    )
+    # Bulk insert bounded batches instead of an ORM object per measured layer.
+    for offset in range(0, len(prepared.rows), 100):
+        db.execute(LayerSnapshot.__table__.insert(), [{
+            "session_id": session_id, "layer": item["layer"], "features": item["features"],
+            "context": {"publication_id": manifest["publication_id"]},
+        } for item in prepared.rows[offset:offset + 100]])
+    session.context = {**(session.context or {}), MANIFEST_KEY: manifest}
     db.flush()
-    logger.info(
-        "layer timings: stored %d validated layers for %s",
-        len(by_layer),
-        session_id,
-    )
-    return len(by_layer)
+    return len(prepared.rows)
+
+
+def stored_timing_events(session_id: str, db: Session) -> list[dict] | None:
+    """Adapt persisted evidence to the same contract as the raw parser.
+
+    None means no snapshot rows exist (legacy local fallback is possible).
+    Existing but invalid rows remain explicit evidence; an empty admission
+    result must not silently resurrect a different on-disk copy.
+    """
+    manifest = db.scalar(select(BuildSession.context[MANIFEST_KEY])
+                         .where(BuildSession.session_id == session_id))
+    # Read the manifest once, not once per layer (megabytes over a weak NAS).
+    # If these reads straddle replacement, generation/digest checks fail closed.
+    rows = db.execute(select(
+        LayerSnapshot.layer, LayerSnapshot.features,
+        LayerSnapshot.context["publication_id"].as_string(),
+    ).where(LayerSnapshot.session_id == session_id)).all()
+    return published_timing_events([tuple(row) for row in rows], manifest)
 
 
 def stored_timings(session_id: str, db: Session) -> dict[int, tuple[float, float]]:
-    """{layer: (burn_ms, pour_ms)} for one session — empty when nothing stored."""
-    rows = db.scalars(select(LayerSnapshot).where(LayerSnapshot.session_id == session_id)).all()
-    out: dict[int, tuple[float, float]] = {}
-    for row in rows:
-        features = row.features or {}
-        burn, pour = features.get("burn_ms"), features.get("pour_ms")
-        if isinstance(burn, (int, float)) and isinstance(pour, (int, float)):
-            out[row.layer] = (float(burn), float(pour))
-    return out
+    """{layer: (burn_ms, pour_ms)} admitted identically to parser events."""
+    return timing_components_ms(stored_timing_events(session_id, db) or [])
 
 
 def stored_layer_overheads(session_id: str, db: Session) -> dict[int, float]:
     """{layer: make-burn-pour milliseconds} for validated complete cycles."""
-    rows = db.scalars(select(LayerSnapshot).where(LayerSnapshot.session_id == session_id)).all()
     out: dict[int, float] = {}
-    for row in rows:
-        features = row.features or {}
-        burn = features.get("burn_ms")
-        pour = features.get("pour_ms")
-        make = features.get("make_layer_ms")
-        if not all(isinstance(value, (int, float)) for value in (burn, pour, make)):
-            continue
-        normal = features.get("normal_overhead_ms")
-        overhead = (
-            float(normal)
-            if isinstance(normal, (int, float))
-            else float(make) - float(burn) - float(pour)
-        )
+    for layer, (burn, pour, make) in stored_layer_cycles(session_id, db).items():
+        # A cached residual can be stale relative to the three measurements.
+        overhead = make - burn - pour
         if 0.0 <= overhead <= MAX_LAYER_OVERHEAD_MS:
-            out[row.layer] = overhead
+            out[layer] = overhead
     return out
 
 
@@ -165,27 +124,16 @@ def stored_layer_cycles(
     cycle model must apply their own pause/restart filter; keeping the raw
     value is what lets diagnostics still explain an unusually long layer.
     """
-    rows = db.scalars(select(LayerSnapshot).where(LayerSnapshot.session_id == session_id)).all()
-    out: dict[int, tuple[float, float, float]] = {}
-    for row in rows:
-        features = row.features or {}
-        values = (
-            features.get("burn_ms"),
-            features.get("pour_ms"),
-            features.get("make_layer_ms"),
-        )
-        if not all(isinstance(value, (int, float)) for value in values):
-            continue
-        burn, pour, make = (float(value) for value in values)
-        if burn > 0.0 and pour >= 0.0 and make >= burn + pour:
-            out[row.layer] = (burn, pour, make)
-    return out
+    return calibration_cycles_ms(stored_timing_events(session_id, db) or [])
 
 
 __all__ = [
     "MAX_LAYER_OVERHEAD_MS",
     "store_layer_timings",
+    "replace_layer_timings",
+    "prepare_layer_timings",
     "stored_timings",
+    "stored_timing_events",
     "stored_layer_overheads",
     "stored_layer_cycles",
 ]

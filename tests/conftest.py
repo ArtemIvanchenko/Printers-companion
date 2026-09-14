@@ -12,10 +12,17 @@ def _ensure_schema():
     In production the API lifespan / Alembic migrations handle this, but the test
     harness bypasses both, so create_all() here gives a stable baseline.
     """
+    from core.config.settings import get_settings
     from storage.db.session import engine
-    if engine.url.get_backend_name() == "sqlite":
-        from storage.db.init_db import create_all
-        create_all()
+    if get_settings().app_env != 'test' or engine.url.get_backend_name() != 'sqlite':
+        raise pytest.UsageError(
+            'Tests require APP_ENV=test and a separate file-based SQLite DATABASE_URL; '
+            'refusing to use operator storage.'
+        )
+    if not engine.url.database or engine.url.database == ':memory:':
+        raise pytest.UsageError('Tests require a temporary SQLite file shared between test subprocesses.')
+    from storage.db.init_db import create_all
+    create_all()
     yield
 
 
@@ -38,6 +45,16 @@ def _clean_db(_ensure_schema):
         for table in reversed(Base.metadata.sorted_tables):
             conn.execute(table.delete())
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_local_outbox(tmp_path, monkeypatch):
+    """Uploads in tests must never consume the operator's durable local queue."""
+    from core.config.settings import get_settings
+
+    path = str(tmp_path / 'isolated-nas-outbox')
+    monkeypatch.setenv('NAS_OUTBOX_PATH', path)
+    monkeypatch.setattr(get_settings(), 'nas_outbox_path', path)
 
 
 @pytest.fixture(autouse=True)

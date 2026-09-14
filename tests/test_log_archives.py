@@ -44,6 +44,40 @@ def test_conflicting_log_names_fail_closed(tmp_path):
         expand_log_inputs(source, tmp_path / 'output', {})
 
 
+@pytest.mark.parametrize('names', [
+    ('day.log', 'DAY.LOG'),
+    ('й.log', 'и\u0306.log'),
+])
+def test_cross_platform_filename_collisions_never_overwrite_logs(tmp_path, names):
+    source = tmp_path / 'input.zip'
+    zip_file(source, [(names[0], b'first'), (names[1], b'second')])
+    with pytest.raises(ValueError, match='одинаковым именем'):
+        expand_log_inputs(source, tmp_path / 'output', {})
+    assert (tmp_path / 'output' / names[0]).read_bytes() == b'first'
+
+
+def test_equivalent_cross_platform_names_keep_first_source_uri(tmp_path):
+    source = tmp_path / 'input'
+    source.mkdir()
+    zip_file(source / 'a.zip', [('day.log', b'same')])
+    zip_file(source / 'b.zip', [('DAY.LOG', b'same')])
+    output = tmp_path / 'output'
+    objects, _ = expand_log_inputs(source, output, {'a.zip': 's3://raw/a.zip', 'b.zip': 's3://raw/b.zip'})
+    assert [p.name for p in output.iterdir()] == ['day.log']
+    assert objects == {'day.log': 's3://raw/a.zip'}
+
+
+def test_nonempty_output_is_never_overwritten(tmp_path):
+    source = tmp_path / 'input.zip'
+    zip_file(source, [('day.log', b'new')])
+    output = tmp_path / 'output'
+    output.mkdir()
+    (output / 'day.log').write_bytes(b'existing')
+    with pytest.raises(ValueError, match='пуст'):
+        expand_log_inputs(source, output, {})
+    assert (output / 'day.log').read_bytes() == b'existing'
+
+
 @pytest.mark.parametrize('name', ['../escape.log', '/absolute.log', '..\\escape.log', 'C:/file.log'])
 def test_archive_traversal_rejected(tmp_path, name):
     path = tmp_path / 'bad.zip'

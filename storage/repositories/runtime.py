@@ -25,7 +25,7 @@ from domain.models.entities import (
     ReportArtifact,
     SourceFile,
 )
-from domain.services.import_jobs import ImportJobRecord
+from domain.services.importing.contracts import ImportJobRecord
 from domain.services.ingestion import IngestedFile
 from domain.services.compute_affinity import require_compute_owner
 from operator_journal.notifications import NotificationMessage
@@ -80,8 +80,9 @@ def _offload_report(report_id: str, report: dict[str, Any]) -> str | None:
         if not store.is_available():
             return None
         bucket = get_settings().minio_bucket_reports
-        data = json.dumps(jsonable_encoder(report), ensure_ascii=False).encode("utf-8")
-        return store.put_bytes(bucket, f"{report_id}.json", data)
+        data = json.dumps(_sanitize_for_json(jsonable_encoder(report)), ensure_ascii=False).encode("utf-8")
+        checksum = hashlib.sha256(data).hexdigest()
+        return store.put_bytes_verified(bucket, f"{report_id}/{checksum}.json", data)
     except Exception as exc:
         logger.warning("Report %s offload to object store failed: %s", report_id, exc)
         return None
@@ -127,7 +128,7 @@ def _shared_log_object_name(session_id: str, file_name: str) -> str:
     return f"{session_id}/{file_name}"
 
 
-def mirror_logs_to_object_store(session_id: str, files: list[IngestedFile]) -> int:
+def mirror_logs_to_object_store(session_id: str, files: list[IngestedFile], *, immutable: bool = False) -> int:
     """Copy calibration-critical logs to a session-addressable fast path.
 
     Best-effort: object storage being down must never fail an import, since the
@@ -150,33 +151,64 @@ def mirror_logs_to_object_store(session_id: str, files: list[IngestedFile]) -> i
         bucket = store.settings.minio_bucket_raw
         for f in candidates:
             name = f.classification.file_name or Path(f.relative_path).name
-            store.put_file(bucket, _shared_log_object_name(session_id, name), Path(f.path))
+            if immutable:
+                # A discarded import must not replace another generation's
+                # readable mirror. The URI is published only with its payload.
+                uri = store.put_file_verified(
+                    bucket, f"{session_id}/sha256/{f.checksum}/{name}", Path(f.path),
+                    expected_sha256=f.checksum, expected_size=f.size_bytes,
+                )
+                f.metadata["shared_log_uri"] = uri
+            else:
+                store.put_file(bucket, _shared_log_object_name(session_id, name), Path(f.path))
     except Exception as exc:
         logger.warning("mirror_logs_to_object_store(%s) failed: %s", session_id, exc)
         return 0
     return len(candidates)
 
 
-def _fetch_shared_log(session_id: str, file_name: str) -> "Path | None":  # noqa: F821
+def _fetch_shared_log(session_id: str, file_name: str, *, object_uri: str | None = None) -> "Path | None":  # noqa: F821
     """Pull a mirrored log into a temp file so the parsers can read a path."""
     import tempfile
     from pathlib import Path
 
     from storage.object_store.minio_client import ObjectStore
 
+    if Path(file_name).name != file_name or Path(session_id).name != session_id:
+        return None
+    expected_hash = None
     try:
         store = ObjectStore()
-        data = store.get_bytes(
-            store.settings.minio_bucket_raw, _shared_log_object_name(session_id, file_name)
-        )
+        object_name = _shared_log_object_name(session_id, file_name)
+        if object_uri:
+            prefix = f"s3://{store.settings.minio_bucket_raw}/{session_id}/sha256/"
+            if not object_uri.startswith(prefix):
+                return None
+            expected_hash, separator, stored_name = object_uri[len(prefix):].partition("/")
+            if (not separator or stored_name != file_name or len(expected_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in expected_hash)):
+                return None
+            object_name = object_uri[len(f"s3://{store.settings.minio_bucket_raw}/"):]
+        data = store.get_bytes(store.settings.minio_bucket_raw, object_name)
     except Exception:
         return None
     if not data:
         return None
-    tmp = Path(tempfile.gettempdir()) / "pc-shared-logs" / session_id
+    checksum = hashlib.sha256(data).hexdigest()
+    if expected_hash is not None and checksum != expected_hash:
+        return None
+    tmp = Path(tempfile.gettempdir()) / "pc-shared-logs" / session_id / checksum
     tmp.mkdir(parents=True, exist_ok=True)
     path = tmp / file_name
-    path.write_bytes(data)
+    # Different generations never share a mutable cache path. Publish the local
+    # file by rename so parallel readers cannot observe a partial download.
+    import os
+    with tempfile.NamedTemporaryFile(dir=tmp, delete=False) as staged:
+        staged.write(data)
+    try:
+        os.replace(staged.name, path)
+    finally:
+        Path(staged.name).unlink(missing_ok=True)
     return path
 
 
@@ -204,7 +236,7 @@ def _rehydrate_parse_results(
             need.append((f, Path(f.path)))
         elif session_id and f.classification.family in _SHARED_LOG_FAMILIES:
             name = f.classification.file_name or Path(f.relative_path).name
-            shared = _fetch_shared_log(session_id, name)
+            shared = _fetch_shared_log(session_id, name, object_uri=f.metadata.get("shared_log_uri"))
             if shared:
                 need.append((f, shared))
     if not need:
@@ -576,7 +608,10 @@ class RuntimeRepository:
             origin_compute_node_id = get_settings().compute_node_id
 
         existing = self.db.get(BuildSession, session_id)
-        context = {"runtime_payload": _sanitize_for_json(jsonable_encoder(payload))}
+        # Reserved publication metadata must survive summary updates. Dropping
+        # an explicit empty marker would resurrect legacy raw-file fallback.
+        context = {**((existing.context or {}) if existing else {}),
+                   "runtime_payload": _sanitize_for_json(jsonable_encoder(payload))}
         group = payload.get("group", {}) or {}
 
         def _parse_ts(value: str | None) -> datetime | None:
@@ -753,6 +788,15 @@ class RuntimeRepository:
     def save_reports(self, reports: dict[str, dict[str, Any]]) -> None:
         for report in reports.values():
             self.save_report(report)
+
+    def save_prepared_report(self, report_id: str, prepared: dict[str, Any]) -> None:
+        """SQL only: full report upload and JSON preparation happened locally."""
+        self._upsert(ReportArtifact, report_id, "report_id", {
+            "session_id": prepared["payload"].get("session_id"), "report_type": "session",
+            "storage_uri": prepared["storage_uri"], "payload": prepared["payload"],
+            "version_metadata": prepared["version_metadata"],
+        })
+        self.flush()
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
         row = self.db.get(ReportArtifact, report_id)

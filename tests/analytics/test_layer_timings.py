@@ -18,7 +18,11 @@ from analytics.prediction.recoat_calibration import (
     session_machine_seconds_by_layer,
     session_recoat_seconds,
 )
-from analytics.prediction.scan_calibration import session_burn_by_layer
+from analytics.prediction.scan_calibration import (
+    session_burn_by_layer,
+    session_layer_cycles_ms_by_layer,
+    session_layer_overhead_ms_by_layer,
+)
 from domain.enums.common import DataQualityStatus
 from domain.models.events import LayerSnapshot
 from domain.models.sessions import BuildSession
@@ -117,7 +121,7 @@ class TestStoring:
             "s_overhead",
             [_time_log_file({
                 1: (30_000, 9_250, 39_500),
-                2: (31_000, 9_300, 60_000),  # implausible residual, ignored
+                2: (31_000, 9_300, 60_000),  # raw cycle retained, not an additive base delay
             })],
             db,
         )
@@ -209,3 +213,79 @@ class TestCalibrationsReadTheStoredRows:
         assert session_machine_seconds_by_layer("s8", db) is None
         assert session_burn_by_layer("s8", db) is None
         assert session_recoat_seconds("s8", db) is None
+
+
+class TestLegacyStoredEvidence:
+    @pytest.mark.parametrize("bad", [
+        {"timing_valid": False}, {"burn_ms": True}, {"burn_ms": -1},
+        {"burn_ms": float("nan")}, {"burn_ms": float("inf")},
+        {"pour_ms": 20081407, "make_layer_ms": 20111707},
+        {"make_layer_ms": 1},
+    ])
+    def test_invalid_stored_measurement_is_not_trusted(self, db, bad):
+        _session(db, "s_legacy_invalid")
+        db.add(LayerSnapshot(session_id="s_legacy_invalid", layer=1, features={
+            "burn_ms": 30000, "pour_ms": 9000, "make_layer_ms": 39300, **bad,
+        }))
+        db.flush()
+        assert stored_timings("s_legacy_invalid", db) == {}
+        assert stored_layer_cycles("s_legacy_invalid", db) == {}
+        assert stored_layer_overheads("s_legacy_invalid", db) == {}
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_conflicting_database_rows_are_rejected_before_bounds(self, db, reverse):
+        _session(db, "s_legacy_conflict")
+        values = [(30000, 9000, 39300), (30000, 500000, 530300)]
+        if reverse:
+            values.reverse()
+        for burn, pour, make in values:
+            db.add(LayerSnapshot(session_id="s_legacy_conflict", layer=1, features={
+                "burn_ms": burn, "pour_ms": pour, "make_layer_ms": make,
+            }))
+        db.flush()
+        assert stored_timings("s_legacy_conflict", db) == {}
+        assert stored_layer_cycles("s_legacy_conflict", db) == {}
+
+    def test_stale_cached_overhead_cannot_hide_a_long_cycle(self, db):
+        _session(db, "s_legacy_overhead")
+        db.add(LayerSnapshot(session_id="s_legacy_overhead", layer=1, features={
+            "burn_ms": 30000, "pour_ms": 9000, "make_layer_ms": 3639300,
+            "normal_overhead_ms": 300,
+        }))
+        db.flush()
+        assert stored_layer_overheads("s_legacy_overhead", db) == {}
+        assert stored_layer_cycles("s_legacy_overhead", db) == {1: (30000, 9000, 3639300)}
+
+    @pytest.mark.parametrize("burn", [50, 3600001])
+    def test_database_scan_and_cycle_bounds_match_raw_path(self, db, monkeypatch, burn):
+        from storage.repositories.runtime import RuntimeRepository
+
+        _session(db, "s_legacy_burn")
+        db.add(LayerSnapshot(session_id="s_legacy_burn", layer=1, features={
+            "burn_ms": burn, "pour_ms": 9000, "make_layer_ms": burn + 9300,
+        }))
+        db.flush()
+        monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **kw: pytest.fail(
+            "Rejected stored evidence must not resurrect a different local file",
+        ))
+        assert session_burn_by_layer("s_legacy_burn", db) is None
+        assert session_layer_cycles_ms_by_layer("s_legacy_burn", db) is None
+        assert session_layer_overhead_ms_by_layer("s_legacy_burn", db) is None
+
+    def test_known_invalid_database_rows_never_fall_back_to_local_copy(self, db, monkeypatch):
+        from storage.repositories.runtime import RuntimeRepository
+
+        _session(db, "s_known_invalid")
+        db.add(LayerSnapshot(session_id="s_known_invalid", layer=1, features={
+            "burn_ms": 30000, "pour_ms": 9000, "make_layer_ms": 39300,
+            "timing_valid": False,
+        }))
+        db.flush()
+        monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **kw: pytest.fail(
+            "Known invalid stored evidence is not missing evidence",
+        ))
+        assert session_machine_seconds_by_layer("s_known_invalid", db) is None
+        assert session_burn_by_layer("s_known_invalid", db) is None
+        assert session_recoat_seconds("s_known_invalid", db) is None
+        assert session_layer_cycles_ms_by_layer("s_known_invalid", db) is None
+        assert session_layer_overhead_ms_by_layer("s_known_invalid", db) is None

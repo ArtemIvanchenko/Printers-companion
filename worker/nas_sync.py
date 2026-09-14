@@ -9,14 +9,17 @@ from __future__ import annotations
 import logging
 import signal
 import time
-from pathlib import Path
 from typing import Any
 
 from core.compute_identity import register_compute_node
 from core.config.settings import Settings, get_settings
 from core.logging.config import configure_logging
 from core.preflight import exit_on_failure, run_preflight
-from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
+from domain.services.estimation.contracts import EstimateError
+from domain.services.print_cards.contracts import CardError
+from domain.services.print_cards.attachments import (
+    publish_attachment, publish_object, validate_attachment_record,
+)
 from storage.db.session import session_scope
 from storage.object_store.minio_client import ObjectStore
 from storage.repositories.prints_repo import PrintsRepository
@@ -29,44 +32,20 @@ class PermanentSyncError(RuntimeError):
     """The NAS is reachable, but operator intervention is required."""
 
 
-def _publish_object(store: Any, item: dict[str, Any], payload: Path) -> str:
-    verified = getattr(store, "put_file_verified", None)
-    if callable(verified):
-        return verified(
-            item["bucket"],
-            item["object_name"],
-            payload,
-            expected_sha256=item["checksum"],
-            expected_size=int(item["size_bytes"]),
-            content_type=item["content_type"],
-        )
-    # Test doubles and older compatible object-store adapters may only expose
-    # put_file. The local outbox has still verified the payload before this call.
-    return store.put_file(
-        item["bucket"],
-        item["object_name"],
-        payload,
-        content_type=item["content_type"],
-    )
+_publish_object = publish_object
 
 
 def _validate_record(item: dict[str, Any], repo: PrintsRepository) -> dict[str, Any]:
-    record = repo.get_print_record(str(item["record_id"]))
-    if record is None:
-        raise PermanentSyncError(
-            f"Карточка {item['record_id']} удалена или не существует; файл оставлен локально"
-        )
-    if item["file_type"] in ("stl", "stl_supports"):
-        try:
-            require_compute_owner(
-                entity_type="print_record",
-                entity_id=str(record["record_id"]),
-                origin_compute_node_id=str(record["origin_compute_node_id"]),
-                requested_compute_node_id=str(item["owner_node_id"]),
-            )
-        except ComputeAffinityError as exc:
-            raise PermanentSyncError(str(exc)) from exc
-    return record
+    try:
+        return validate_attachment_record(item, repo)
+    except CardError as exc:
+        if exc.code == "not_found":
+            raise PermanentSyncError(
+                f"Карточка {item['record_id']} удалена или не существует; файл оставлен локально"
+            ) from exc
+        raise PermanentSyncError(str(exc)) from exc
+    except EstimateError as exc:
+        raise PermanentSyncError(str(exc)) from exc
 
 
 def process_next(
@@ -115,28 +94,7 @@ def process_next(
         # uploads from different operator PCs.
         with session_scope() as db:
             repo = PrintsRepository(db)
-            record = _validate_record(item, repo)
-            saved = repo.add_print_file({
-                "file_id": item["file_id"],
-                "record_id": item["record_id"],
-                "object_uri": object_uri,
-                "file_name": item["file_name"],
-                "file_type": item["file_type"],
-                "size_bytes": item["size_bytes"],
-                "checksum": item["checksum"],
-            })
-            if not saved.get("duplicate"):
-                if not record.get("printed_at"):
-                    from api.routes.prints import _date_from_text
-
-                    printed_at = _date_from_text(str(item["file_name"]))
-                    if printed_at:
-                        repo.update_print_record(item["record_id"], {"printed_at": printed_at})
-                if item["file_type"] in ("stl", "stl_supports"):
-                    from api.routes.prints import _enqueue_estimate
-
-                    current = repo.get_print_record(item["record_id"])
-                    _enqueue_estimate(repo, current)
+            saved = publish_attachment(repo, item, object_uri)
 
         if saved.get("duplicate") and saved.get("object_uri") != object_uri:
             # The other PC won the unique-index race. This operation owns its
@@ -151,7 +109,7 @@ def process_next(
             item["checksum"][:12],
             item["record_id"],
         )
-    except (PermanentSyncError, OutboxIntegrityError, ValueError) as exc:
+    except (PermanentSyncError, CardError, EstimateError, OutboxIntegrityError, ValueError) as exc:
         outbox.fail(operation_id, str(exc))
         logger.error("NAS sync quarantined %s: %s", operation_id, exc)
     except Exception as exc:

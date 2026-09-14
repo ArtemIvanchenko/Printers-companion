@@ -5,11 +5,12 @@ import subprocess
 import pytest
 
 
-def test_catalog_and_import_frontend_modules():
+@pytest.mark.parametrize('script', ['catalog-import.test.cjs', 'prediction-accuracy.test.cjs', 'calibration.test.cjs'])
+def test_catalog_and_import_frontend_modules(script):
     node = shutil.which('node')
     if not node:
         pytest.skip('node is not available')
-    result = subprocess.run([node, '--test', str(Path(__file__).parent / 'web/catalog-import.test.cjs')],
+    result = subprocess.run([node, '--test', str(Path(__file__).parent / 'web' / script)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 

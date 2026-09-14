@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
+from analytics.prediction.calibration_inputs import CalibrationInputs
 
 from analytics.prediction.accuracy import (
     CALIBRATION_WINDOW,
@@ -50,13 +51,15 @@ from analytics.prediction.accuracy import (
 )
 from domain.enums.common import SourceFileFamily
 from domain.models.prints import MachineParams
-from analytics.prediction.timing_validation import calibration_timing_payloads
+from analytics.prediction.timing_validation import (
+    MAX_POUR_MS, MIN_POUR_MS, calibration_timing_payloads, timing_components_ms,
+)
 
 logger = logging.getLogger(__name__)
 
-# A recoat pass outside this range is a bad reading (log corruption, a
-# machine-clock glitch), not a real measurement — excluded, not averaged in.
-_MIN_POUR_MS, _MAX_POUR_MS = 500.0, 120_000.0
+# Compatibility aliases. Exclusion from a normal fit does not establish that
+# the measured counter is corrupt: a stop may occur inside the recorded phase.
+_MIN_POUR_MS, _MAX_POUR_MS = MIN_POUR_MS, MAX_POUR_MS
 # Same physical bounds a learned value must fall within before it is applied —
 # mirrors accuracy.CORRECTION_MIN/MAX, but these are milliseconds, not a ratio.
 RECOAT_MIN_MS, RECOAT_MAX_MS = 1_000.0, 60_000.0
@@ -89,17 +92,8 @@ def layer_seconds_from_events(events: list) -> dict[int, tuple[float, float]]:
     pour calibrates recoat. Combining them and fitting one blanket multiplier
     makes the two independent calibration loops contaminate each other.
     """
-    out: dict[int, tuple[float, float]] = {}
-    for layer, payload in calibration_timing_payloads(events).items():
-        burn_ms, pour_ms = payload.get("burn_ms"), payload.get("pour_ms")
-        if not isinstance(layer, int):
-            continue
-        if not isinstance(burn_ms, (int, float)) or not isinstance(pour_ms, (int, float)):
-            continue
-        if burn_ms <= 0 or not (_MIN_POUR_MS <= pour_ms <= _MAX_POUR_MS):
-            continue
-        out.setdefault(layer, (burn_ms / 1000.0, pour_ms / 1000.0))
-    return out
+    return {layer: (burn / 1000.0, pour / 1000.0)
+            for layer, (burn, pour) in timing_components_ms(events).items()}
 
 
 def machine_seconds_from_events(events: list) -> dict[int, float]:
@@ -118,14 +112,11 @@ def session_layer_seconds_by_layer(
     session_id: str, db: Session,
 ) -> dict[int, tuple[float, float]] | None:
     """Validated per-layer ``(burn, pour)`` seconds for one session."""
-    from analytics.prediction.layer_timings import stored_timings
+    from analytics.prediction.layer_timings import stored_timing_events
 
-    stored = stored_timings(session_id, db)
-    if stored:
-        return {
-            layer: (burn / 1000.0, pour / 1000.0)
-            for layer, (burn, pour) in stored.items()
-        }
+    stored = stored_timing_events(session_id, db)
+    if stored is not None:
+        return layer_seconds_from_events(stored) or None
 
     files = _time_log_files(session_id, db)
     if not files:
@@ -179,7 +170,7 @@ def _time_log_files(session_id: str, db: Session) -> list:
     ]
 
 
-def recoat_accuracy(db: Session) -> dict:
+def recoat_accuracy(db: Session | None = None, *, inputs: CalibrationInputs | None = None) -> dict:
     """Real per-layer recoat durations from printer logs, by material.
 
     Structurally mirrors ``accuracy.prediction_accuracy``: one row per linked
@@ -190,11 +181,14 @@ def recoat_accuracy(db: Session) -> dict:
     usable_by_mat: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
     excluded: list[dict] = []
 
-    linked = list(iter_linked_prints(db))
+    linked = inputs.linked if inputs is not None else list(iter_linked_prints(db))
     link_counts = Counter(record.session_id for record, _ in linked)
     observed_materials: set[str] = set()
     for record, session in linked:
-        pour_seconds = session_recoat_seconds(record.session_id, db)
+        pour_seconds = (
+            [pour for _, pour in inputs.components.get(record.session_id, {}).values()]
+            if inputs is not None else session_recoat_seconds(record.session_id, db)
+        )
         if not pour_seconds:
             continue  # no time_log for this session (or its files are gone) — not an error, just no data
 
@@ -263,10 +257,12 @@ def recalibrate_recoat_and_apply(db: Session) -> dict:
     No-op when ``correction_locked`` (shared with scan-time calibration — one
     "auto-calibration" toggle for the operator, not two). Caller commits.
     """
-    report = recoat_accuracy(db)
-    by_material = report["by_material"]
+    return apply_recoat_report(db.get(MachineParams, 1), recoat_accuracy(db))
 
-    row = db.get(MachineParams, 1)
+
+def apply_recoat_report(row: MachineParams | None, report: dict) -> dict:
+    """Publish an already calculated report without reading logs."""
+    by_material = report["by_material"]
     if row is None:
         return {"applied": {}, "skipped": [], "locked": False, "reason": "no machine params"}
     if row.correction_locked:

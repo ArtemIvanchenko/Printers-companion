@@ -34,7 +34,7 @@ def test_snapshot_exposes_machine_mode_recoat_geometry_and_cycle(monkeypatch):
         "minimum_cycle_active_layers": 30,
         "laser_count": 2,
         "cost_total_rub": 100.0,
-        "prediction": None,
+        "prediction": {"source": "model", "interval": [9.0, 12.0]},
         "cost_prediction": None,
         "scan_geometry": {"zs": []},
         "geometry_totals": {"hatch_mm": 12345.0},
@@ -67,3 +67,6 @@ def test_snapshot_exposes_machine_mode_recoat_geometry_and_cycle(monkeypatch):
     assert "pause_reserve_hours" not in snapshot
     assert snapshot["calculation_inputs"]["geometry_body_count"] == 1
     assert snapshot["geometry_regions"][0]["name"] == "part.stl"
+    assert "unconfirmed_build_origin" in snapshot["geometry_input_issues"]
+    assert snapshot["prediction_interval"] is None
+    assert any("Не подтверждена координата" in message for message in snapshot["prediction_warnings"])

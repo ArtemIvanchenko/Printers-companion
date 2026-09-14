@@ -2,15 +2,15 @@
 
 import logging
 import signal
-import time
+from threading import Event
 
-from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
 
 from core.compute_identity import process_lease_owner, register_compute_node
 from core.config.settings import get_settings
 from core.logging.config import configure_logging
 from core.preflight import exit_on_failure, run_preflight
+from domain.services.estimation.contracts import EstimateError
 from storage.db.session import session_scope
 from storage.repositories.jobs_repo import JobsRepository
 from worker.lease_heartbeat import LeaseHeartbeat
@@ -78,17 +78,16 @@ def process_next_estimate(lease_owner: str, owner_node_id: str | None = None) ->
     try:
         payload_owner = str(job["payload"].get("owner_node_id") or "")
         if job["owner_node_id"] != owner_node_id or payload_owner != job["owner_node_id"]:
-            raise HTTPException(
-                409,
+            raise EstimateError(
+                "stale_inputs",
                 "estimate job owner does not match worker/payload owner",
             )
         # Lazy import keeps the worker's startup/health path cheap.
-        from api.routes.prints import (
-            _calculate_prediction_snapshot,
-            _enrich_prediction_interval,
-            _prepare_prediction_inputs,
-            _store_prediction_snapshot,
+        from domain.services.estimation.calculation import (
+            calculate_prediction_snapshot, enrich_prediction_interval, needs_prediction_interval,
         )
+        from domain.services.estimation.inputs import prepare_prediction_inputs
+        from domain.services.estimation.publication import publish_estimate
         from storage.repositories.prints_repo import PrintsRepository
 
         def renew_lease() -> bool:
@@ -111,8 +110,8 @@ def process_next_estimate(lease_owner: str, owner_node_id: str | None = None) ->
                 record = PrintsRepository(db).get_print_record(record_id)
                 requested_revision = job['payload'].get('record_revision')
                 if record is None or requested_revision != record['revision']:
-                    raise HTTPException(409, 'Карточка изменилась после постановки расчёта в очередь. Запустите новый расчёт.')
-                prepared = _prepare_prediction_inputs(
+                    raise EstimateError("stale_inputs", 'Карточка изменилась после постановки расчёта в очередь. Запустите новый расчёт.')
+                prepared = prepare_prediction_inputs(
                     PrintsRepository(db),
                     record_id,
                     compute_node_id=job["owner_node_id"],
@@ -120,41 +119,35 @@ def process_next_estimate(lease_owner: str, owner_node_id: str | None = None) ->
 
             # MinIO download, mesh slicing, physics and ML all run locally with
             # no PostgreSQL connection checked out from the NAS.
-            snapshot = _calculate_prediction_snapshot(
+            snapshot = calculate_prediction_snapshot(
                 prepared,
                 geometry_cache=_DetachedGeometryCache(),
                 computed_by=owner_node_id,
             )
+            if needs_prediction_interval(snapshot):
+                from analytics.prediction.calibration_inputs import load_calibration_inputs
+
+                with session_scope() as db:
+                    history = load_calibration_inputs(db)
+                enrich_prediction_interval(snapshot, inputs=history)
         if heartbeat.lost:
             logger.warning("discarded calculation after losing lease for %s", job_id)
             return True
 
-        # One short, atomic finalization transaction.  The lease fence is
-        # checked *before* the card is changed and committed together with the
-        # prediction.  A process whose lease expired therefore cannot write a
-        # stale result and only then discover that it lost ownership.
+        # Publication owns the input and lease checks around the card write.
+        # Late expiry raises and rolls back instead of returning from inside
+        # a context manager that would commit a partial change.
         with session_scope() as db:
-            repo = PrintsRepository(db)
-            _enrich_prediction_interval(snapshot, db)
-            completed = JobsRepository(db).complete(
-                job_id,
-                {"record_id": record_id, "prediction": snapshot},
-                lease_owner=lease_owner,
-                lease_generation=lease_generation,
-            )
-            if completed is None:
-                logger.warning("discarded stale completion for estimate job %s", job_id)
-                return True
-            _store_prediction_snapshot(
-                repo,
-                record_id,
-                snapshot,
-                expected_revision=int(prepared["record"]["revision"]),
-                compute_node_id=job["owner_node_id"],
+            publish_estimate(
+                db, prepared, snapshot, job_id=job_id, owner_node_id=owner_node_id,
+                lease_owner=lease_owner, lease_generation=lease_generation,
             )
         logger.info("estimate job %s completed for %s", job_id, record_id)
-    except HTTPException as exc:
-        if exc.status_code in (502, 503, 504):
+    except EstimateError as exc:
+        if exc.code == "lease_lost":
+            logger.warning("discarded estimate %s: %s", job_id, exc.detail)
+            return True
+        if exc.code == "storage_unavailable":
             _defer_infrastructure_failure(
                 job_id,
                 exc,
@@ -166,7 +159,7 @@ def process_next_estimate(lease_owner: str, owner_node_id: str | None = None) ->
                 JobsRepository(db).fail(
                     job_id,
                     str(exc.detail),
-                    retryable=exc.status_code >= 500,
+                    retryable=False,
                     lease_owner=lease_owner,
                     lease_generation=lease_generation,
                 )
@@ -192,6 +185,37 @@ def process_next_estimate(lease_owner: str, owner_node_id: str | None = None) ->
     return True
 
 
+def run_worker_loop(lease_owner: str, owner_node_id: str, stopped: Event) -> None:
+    """Keep this operator's queues alive across claim/finalization outages.
+
+    A database failure can happen before a job is claimed, or while recording
+    its failure. Neither belongs to a model's retry budget. The durable lease
+    remains the recovery/fencing authority; this loop only waits and retries.
+    """
+    from worker.model_tasks import process_next_model_task
+    from worker.calibration_tasks import process_next_calibration_task
+
+    delay = 2.0
+    while not stopped.is_set():
+        try:
+            estimated = process_next_estimate(lease_owner, owner_node_id)
+            # Do not short-circuit on a busy estimate queue: all three job types
+            # belong to this PC and must eventually get a turn.
+            trained = False if stopped.is_set() else process_next_model_task(lease_owner, owner_node_id)
+            calibrated = False if stopped.is_set() else process_next_calibration_task(lease_owner, owner_node_id)
+        except (OperationalError, SQLAlchemyTimeoutError):
+            logger.warning("Estimate/model/calibration queues unavailable; retrying in %.1fs", delay)
+        except Exception:
+            logger.exception("Estimate/model/calibration worker loop failed; retrying in %.1fs", delay)
+        else:
+            if estimated or trained or calibrated:
+                delay = 2.0
+                continue
+        # Event.wait lets SIGTERM/SIGINT interrupt an idle/outage backoff.
+        stopped.wait(delay)
+        delay = min(30.0, delay * 1.5)
+
+
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -203,30 +227,15 @@ def main() -> None:
         assert_schema_at_head()
         register_compute_node(settings)
     owner = process_lease_owner(settings.compute_node_id)
-    stopped = False
+    stopped = Event()
 
     def request_stop(signum: int, frame: object) -> None:
-        nonlocal stopped
-        stopped = True
+        stopped.set()
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     logger.info("Estimate worker started as %s", owner)
-    idle_delay = 2.0
-    while not stopped:
-        from worker.model_tasks import process_next_model_task
-
-        if (
-            process_next_estimate(owner, settings.compute_node_id)
-            or process_next_model_task(owner, settings.compute_node_id)
-        ):
-            idle_delay = 2.0
-        else:
-            # Every operator PC polls the same low-power NAS. Backing off while
-            # idle keeps the UI responsive without a query every two seconds
-            # from every workstation.
-            time.sleep(idle_delay)
-            idle_delay = min(30.0, idle_delay * 1.5)
+    run_worker_loop(owner, settings.compute_node_id, stopped)
     logger.info("Estimate worker stopped")
 
 

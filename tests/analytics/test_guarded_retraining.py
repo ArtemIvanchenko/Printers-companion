@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from analytics.prediction import retraining
 from core.versioning.constants import ANALYSIS_VERSION, APP_VERSION
 from storage.db.session import session_scope
@@ -51,9 +53,11 @@ def test_shadow_candidate_waits_for_unseen_labels(monkeypatch):
     shadow = {
         "training_session_ids": ["old"],
         "artifact": {"type": "candidate"},
+        "created_at": "2026-01-01T00:00:00+00:00",
     }
     rows = [
-        {"session_id": f"new-{index}", "label": index % 2, "group": {"index": index}}
+        {"session_id": f"new-{index}", "label": index % 2, "group": {"index": index},
+         "start_ts": "2026-01-02T00:00:00+00:00", "label_observed_at": "2026-01-03T00:00:00+00:00"}
         for index in range(retraining.MIN_SHADOW_LABELS - 1)
     ]
 
@@ -67,9 +71,11 @@ def test_shadow_candidate_waits_for_unseen_labels(monkeypatch):
 
 
 def test_shadow_candidate_must_beat_current_method_on_future_labels(monkeypatch):
-    shadow = {"training_session_ids": ["old"], "artifact": {"type": "candidate"}}
+    shadow = {"training_session_ids": ["old"], "artifact": {"type": "candidate"},
+              "created_at": "2026-01-01T00:00:00+00:00"}
     rows = [
-        {"session_id": f"new-{index}", "label": index % 2, "group": {"label": index % 2}}
+        {"session_id": f"new-{index}", "label": index % 2, "group": {"label": index % 2},
+         "start_ts": "2026-01-02T00:00:00+00:00", "label_observed_at": "2026-01-03T00:00:00+00:00"}
         for index in range(10)
     ]
 
@@ -83,6 +89,82 @@ def test_shadow_candidate_must_beat_current_method_on_future_labels(monkeypatch)
     result = retraining._shadow_evaluation(rows, shadow, None)
     assert result["decision"] == "promote"
     assert result["metrics"]["candidate"]["brier"] < result["metrics"]["comparator"]["brier"]
+
+
+def test_backfilled_old_prints_cannot_promote_shadow_model(monkeypatch):
+    shadow = {"training_session_ids": [], "artifact": {"type": "candidate"},
+              "created_at": "2026-06-01T00:00:00+00:00"}
+    rows = [{"session_id": f"old-backfill-{i}", "label": i % 2, "group": {"label": i % 2},
+             "start_ts": "2026-05-01T00:00:00+00:00", "label_observed_at": "2026-07-01T00:00:00+00:00"}
+            for i in range(10)]
+    monkeypatch.setattr(retraining, "predict_defect_risk", lambda group, model=None: {
+        "method": "model" if model else "heuristic",
+        "risk": (0.9 if group["label"] else 0.1) if model else 0.5,
+    })
+    result = retraining._shadow_evaluation(rows, shadow, None)
+    assert result["decision"] == "wait"
+    assert result["metrics"]["candidate"]["sample_size"] == 0
+    assert result["metrics"]["temporal_exclusions"]["not_a_future_print"] == 10
+
+
+def test_shadow_without_temporal_boundary_cannot_claim_future_validation(monkeypatch):
+    monkeypatch.setattr(retraining, "predict_defect_risk", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("A candidate without a cutoff must not evaluate alleged future labels"),
+    ))
+    result = retraining._shadow_evaluation([
+        {"session_id": "new", "label": 1, "group": {}},
+    ], {"training_session_ids": [], "artifact": {"type": "candidate"}}, None)
+    assert result["decision"] == "wait"
+    assert result["metrics"]["temporal_exclusions"]["candidate_time_unavailable"] == 1
+
+
+@pytest.mark.parametrize("changes,reason", [
+    ({"start_ts": None}, "print_time_unavailable"),
+    ({"start_ts": "2026-01-01T00:00:00Z"}, "not_a_future_print"),
+    ({"label_observed_at": None}, "label_time_unavailable"),
+    ({"label_observed_at": "2026-01-01T00:00:00Z"}, "not_a_future_label"),
+    ({"label_observed_at": "2026-01-01T12:00:00Z"}, "not_a_future_label"),
+])
+def test_shadow_rejects_missing_or_contradictory_temporal_evidence(changes, reason):
+    row = {"session_id": "new", "label": 1, "group": {},
+           "start_ts": "2026-01-02T00:00:00Z", "label_observed_at": "2026-01-03T00:00:00Z",
+           **changes}
+    result = retraining._shadow_evaluation([row], {
+        "training_session_ids": [], "artifact": {}, "created_at": "2026-01-01T00:00:00Z",
+    }, None)
+    assert result["decision"] == "wait"
+    assert result["metrics"]["temporal_exclusions"][reason] == 1
+
+
+def test_shadow_does_not_compare_against_in_sample_champion_answers():
+    result = retraining._shadow_evaluation([{
+        "session_id": "known-to-champion", "label": 1, "group": {},
+        "start_ts": "2026-01-02T00:00:00Z", "label_observed_at": "2026-01-03T00:00:00Z",
+    }], {"created_at": "2026-01-01T00:00:00Z"}, {
+        "training_session_ids": ["known-to-champion"],
+    })
+    assert result["decision"] == "wait"
+    assert result["metrics"]["temporal_exclusions"]["comparator_training_sample"] == 1
+
+
+def test_training_snapshot_preserves_label_observation_time_and_identity():
+    from domain.models.quality import QualityOutcome
+    from domain.models.sessions import BuildSession
+
+    when = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    with session_scope() as db:
+        db.add(BuildSession(session_id="label-time-session", classification="REAL_PRINT",
+                            start_ts=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                            context={"runtime_payload": {"group": {"features": {"layers": 100}}}}))
+        db.flush()
+        db.add(QualityOutcome(outcome_id="label-time-outcome", session_id="label-time-session",
+                              timestamp=when, inspection_type="visual", result="accepted", is_final=True))
+        db.flush()
+        prepared = retraining.prepare_retraining(db)
+        row = next(row for row in prepared["rows"] if row["session_id"] == "label-time-session")
+        assert row["label"] == 0
+        assert row["label_outcome_id"] == "label-time-outcome"
+        assert row["label_observed_at"] == when.isoformat()
 
 
 def test_calculation_registers_valid_model_as_shadow(monkeypatch):

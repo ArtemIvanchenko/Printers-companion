@@ -70,7 +70,11 @@ def _record(
             session_id=session_id,
             printed_at=printed_at,
             metadata_json={
+                "session_link_confirmed": True,
                 "prediction": {
+                    "input_revision": 1,
+                    "build_origin_source": "explicit",
+                    "build_origin_z_mm": 0.0,
                     "raw_print_hours": raw_hours,
                     "raw_scan_hours": raw_scan,
                     "raw_recoat_hours": raw_recoat,
@@ -90,6 +94,54 @@ def _record(
 
 
 class TestPredictionAccuracy:
+    @pytest.mark.parametrize("case,reason", [
+        ("record_lower_bound", "incomplete_geometry"),
+        ("snapshot_lower_bound", "incomplete_geometry"),
+        ("unknown_origin", "unconfirmed_build_origin"),
+        ("missing_origin", "unconfirmed_build_origin"),
+        ("unconfirmed_link", "unconfirmed_session_link"),
+        ("stale", "stale_prediction"),
+    ])
+    def test_untrusted_inputs_remain_visible_but_do_not_train(self, db, case, reason):
+        start = datetime(2027, 4, 1, 8, tzinfo=timezone.utc)
+        _session(db, "s_quality", start, hours=10)
+        _record(db, "pr_quality", "s_quality", raw_hours=10)
+        db.flush()
+        row = db.get(PrintRecord, "pr_quality")
+        metadata = dict(row.metadata_json)
+        snapshot = dict(metadata["prediction"])
+        if case == "record_lower_bound":
+            metadata["geometry_quality"] = {"status": "lower_bound", "missing": ["supports"]}
+        elif case == "snapshot_lower_bound":
+            snapshot["estimate_quality"] = "lower_bound"
+        elif case == "unknown_origin":
+            snapshot["build_origin_source"] = "minimum_supplied_geometry_z"
+        elif case == "missing_origin":
+            snapshot.pop("build_origin_z_mm")
+        elif case == "unconfirmed_link":
+            metadata.pop("session_link_confirmed")
+        else:
+            row.revision = 20
+        metadata["prediction"] = snapshot
+        row.metadata_json = metadata
+        db.flush()
+        result = prediction_accuracy(db)
+        pair = result["pairs"][0]
+        assert pair["actual_hours"] == 10
+        assert pair["error_pct"] == 0
+        assert pair["used_for_calibration"] is False
+        assert pair["excluded_reason"] == reason
+        assert pair["excluded_reason_ru"]
+        assert result["n_usable_pairs"] == 0
+        assert result["comparison_basis"] == "scan_plus_recoat"
+
+    @pytest.mark.parametrize("value", [True, float("inf"), float("nan"), "wrong", -1])
+    def test_invalid_historical_numbers_cannot_enter_accuracy(self, db, value):
+        from analytics.prediction.accuracy import _positive_number, _raw_predicted
+
+        assert _positive_number(value) is None
+        assert _raw_predicted({"raw_print_hours": value}) is None
+
     def test_scoped_calibration_exclusions_preserve_unrelated_measurements(self):
         record = PrintRecord(
             record_id="pr_scoped", name="scoped", material="steel",
@@ -217,6 +269,13 @@ class TestRatioInterval:
         hours_low, hours_high = calibration_interval_hours(db, "steel", 0.06, 18.0, 2.0)
         assert hours_low == pytest.approx(ratio_low * 18.0 + 2.0, abs=0.01)
         assert hours_high == pytest.approx(ratio_high * 18.0 + 2.0, abs=0.01)
+        from analytics.prediction.calibration_inputs import load_calibration_inputs
+
+        inputs = load_calibration_inputs(db)
+        db.rollback()
+        assert calibration_interval_hours(
+            None, "steel", 0.06, 18.0, 2.0, inputs=inputs,
+        ) == (hours_low, hours_high)
 
     def test_none_for_material_with_no_history(self, db):
         assert calibration_interval_hours(db, "titanium", 0.06, 9.0, 1.0) is None

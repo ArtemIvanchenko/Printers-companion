@@ -54,6 +54,25 @@ def configure():
     sys.path.insert(0, str(ROOT))
 
 
+def check_local_readiness():
+    """A listening API is not proof that its storage connection still works."""
+    from urllib.error import HTTPError, URLError
+    from urllib.request import urlopen
+
+    try:
+        with urlopen("http://127.0.0.1:8000/health/ready", timeout=15) as response:
+            state = json.load(response)
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError(
+            "Локальное хранилище ещё не готово. Проверьте OrbStack и /health/ready; "
+            "наличие процесса на порту 8000 не означает готовность базы."
+        ) from exc
+    checks = state.get('checks') or {}
+    if state.get('status') != 'ready' or any(checks.get(key) is not True for key in ('database', 'redis', 'minio')):
+        raise RuntimeError('Локальное хранилище не прошло проверку PostgreSQL, Redis и MinIO')
+    return state
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["backup", "migrate", "serve", "worker", "estimate-worker", "run", "proxy", "start"])
@@ -85,9 +104,8 @@ def main():
                     time.sleep(0.5)
             else:
                 raise RuntimeError(f"{action} did not become ready")
-        from urllib.request import urlopen
-        with urlopen("http://127.0.0.1:8000/health", timeout=15) as response:
-            print("Local health:", response.status)
+        check_local_readiness()
+        print("Local storage readiness: ready")
         import fcntl
         for action in ('worker', 'estimate-worker'):
             with (STATE / f'{action}.lock').open('a') as lock:

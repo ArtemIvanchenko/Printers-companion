@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func, select, update as sql_update
+from sqlalchemy import delete as sql_delete, func, select, text, update as sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
@@ -35,6 +35,23 @@ _PARAM_FIELDS = (
     "recoat_time_by_mat", "scan_model_by_mat", "layer_cycle_model_by_mode",
     "build_area_cm2",
 )
+
+
+def lock_estimation_configuration(db: Session) -> None:
+    """Serialize parameter/preset writers with estimate publication, including inserts.
+
+    A row lock alone cannot fence replacement of a missing/default preset.
+    This transaction-scoped guard is also used by background calibration.
+    No caller may hold it while slicing, downloading or fitting a model.
+    """
+    connection = db.connection()
+    if connection.dialect.name == "postgresql":
+        connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 0x5043455354494D})
+    elif connection.dialect.name == "sqlite":
+        # pysqlite's legacy mode does not begin a physical transaction on
+        # SELECT. Reserve the writer before checking inputs, not after them.
+        if not connection.connection.driver_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 def _record_to_dict(row: PrintRecord) -> dict[str, Any]:
@@ -215,6 +232,14 @@ class PrintsRepository:
         row = self.db.get(PrintRecord, record_id)
         return _record_to_dict(row) if row else None
 
+    def get_print_record_for_update(self, record_id: str) -> dict[str, Any] | None:
+        """Fresh parent lock for short attachment publication/deletion only."""
+        row = self.db.scalar(
+            select(PrintRecord).where(PrintRecord.record_id == record_id)
+            .with_for_update().execution_options(populate_existing=True)
+        )
+        return _record_to_dict(row) if row else None
+
     def _filtered_records(
         self,
         query: str | None = None,
@@ -278,6 +303,20 @@ class PrintsRepository:
         params = self.db.get(MachineParams, 1)
         return params.powder_cost_rub_per_kg if params else None
 
+    def latest_prediction_record(self) -> dict[str, Any] | None:
+        """Latest saved estimate, not merely an estimate in the newest print page."""
+        prediction = PrintRecord.metadata_json["prediction"]
+        row = self.db.scalar(
+            select(PrintRecord)
+            .where(prediction["print_hours"].as_string().is_not(None))
+            .order_by(
+                prediction["estimated_at"].as_string().desc().nullslast(),
+                PrintRecord.updated_at.desc(), PrintRecord.record_id.desc(),
+            )
+            .limit(1)
+        )
+        return _record_to_dict(row) if row else None
+
     def delete_print_record(self, record_id: str) -> list[str]:
         """Delete a record with its file rows; returns object URIs for storage cleanup."""
         row = self.db.get(PrintRecord, record_id)
@@ -336,18 +375,20 @@ class PrintsRepository:
         session_start: datetime | None = None,
         *,
         compute_node_id: str | None = None,
+        link_evidence: dict[str, Any] | None = None,
     ) -> bool:
         """Attach a log session; its start timestamp becomes the authoritative print date."""
         try:
             with self.db.begin_nested():
-                row = self.db.scalar(
-                    select(PrintRecord)
-                    .where(PrintRecord.record_id == record_id)
-                    .with_for_update()
-                )
+                # Same parent-first order as import/calibration/estimation.
                 session = self.db.scalar(
                     select(BuildSession)
                     .where(BuildSession.session_id == session_id)
+                    .with_for_update()
+                )
+                row = self.db.scalar(
+                    select(PrintRecord)
+                    .where(PrintRecord.record_id == record_id)
                     .with_for_update()
                 )
                 if row is None or session is None:
@@ -378,6 +419,16 @@ class PrintsRepository:
                 if existing_link is not None:
                     return False
                 row.session_id = session_id
+                metadata = dict(row.metadata_json or {})
+                metadata["session_link_confirmed"] = bool(
+                    link_evidence and link_evidence.get("eligible") is True
+                    and (link_evidence.get("auto_link_allowed") is True
+                         or link_evidence.get("method") in {"operator_import_hint", "operator_card_upload"})
+                )
+                metadata.pop("session_link_evidence", None)
+                if link_evidence:
+                    metadata["session_link_evidence"] = {**link_evidence, "session_id": session_id}
+                row.metadata_json = metadata
                 from domain.models.quality import QualityOutcome
 
                 self.db.execute(
@@ -554,7 +605,9 @@ class PrintsRepository:
         return _params_to_dict(row) if row else None
 
     def save_machine_params(self, values: dict[str, Any]) -> dict[str, Any]:
-        row = self.db.get(MachineParams, 1)
+        lock_estimation_configuration(self.db)
+        row = self.db.scalar(select(MachineParams).where(MachineParams.id == 1)
+                             .with_for_update().execution_options(populate_existing=True))
         if not row:
             row = MachineParams(id=1)
             self.db.add(row)
@@ -587,6 +640,7 @@ class PrintsRepository:
         return _preset_to_dict(row) if row else None
 
     def create_preset(self, values: dict[str, Any]) -> dict[str, Any]:
+        lock_estimation_configuration(self.db)
         row = MachinePreset(**{k: v for k, v in values.items() if k in _PRESET_FIELDS})
         if "material" in values:
             row.material = values["material"].lower().strip()
@@ -595,6 +649,7 @@ class PrintsRepository:
         return _preset_to_dict(row)
 
     def update_preset(self, preset_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
+        lock_estimation_configuration(self.db)
         row = self.db.get(MachinePreset, preset_id)
         if not row:
             return None
@@ -609,6 +664,7 @@ class PrintsRepository:
 
     def set_default_preset(self, preset_id: int) -> dict[str, Any] | None:
         """Mark one preset as default for its material, clearing the old default."""
+        lock_estimation_configuration(self.db)
         row = self.db.get(MachinePreset, preset_id)
         if not row:
             return None
@@ -625,6 +681,7 @@ class PrintsRepository:
         return _preset_to_dict(row)
 
     def delete_preset(self, preset_id: int) -> bool:
+        lock_estimation_configuration(self.db)
         row = self.db.get(MachinePreset, preset_id)
         if not row:
             return False
