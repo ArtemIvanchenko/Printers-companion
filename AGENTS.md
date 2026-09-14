@@ -301,6 +301,11 @@
 - Отчёт: `reporting/json_report/generator.py`.
 - Общая БД: `domain/models/`, `storage/repositories/`, `migrations/versions/`.
 - NAS deployment: `deploy/nas/`.
+- Первоначальный комплект NAS для Mac готовит `deploy/nas/prepare-mac.command`:
+  фиксированные revision/SHA-256 compose, секреты создаются один раз, повторный
+  запуск проверяет прежний архив. Это не обновление работающей БД: существующие
+  пароли и пути данных сохраняются. При смене закреплённого compose обновлять
+  revision и SHA вместе и проверять `tests/test_nas_install_bundle.py`.
 - Послойная диагностика: `analytics/log_insights/`; поток исходных сенсоров,
   воздействие среды, восстановление, баланс времени, сравнение повторов и карта
   контроля. Порог профиля предварительный, пока явно не подтверждён оператором.
