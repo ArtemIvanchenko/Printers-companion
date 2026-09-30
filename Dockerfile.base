@@ -27,7 +27,9 @@ RUN groupadd --system app \
 WORKDIR /app
 
 # Copy only dependency manifests — source code is added by child images.
-COPY pyproject.toml README.md requirements.base.txt /app/
+COPY pyproject.toml README.md requirements.*.txt /app/
+COPY scripts/export_requirements.py /app/scripts/export_requirements.py
+RUN python scripts/export_requirements.py --check
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip setuptools wheel

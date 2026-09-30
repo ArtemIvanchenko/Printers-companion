@@ -31,6 +31,10 @@ class PrinterProfilePlugin:
     # Optional machine identity — populated from signals.yaml `machine:` block when present.
     serial_number: str = ""
     passport: str = ""
+    # Explicit profile policy. Generic ingestion must not silently discard a
+    # registered family's independent evidence (e.g. burn-layer timestamps).
+    excluded_source_patterns: tuple[str, ...] = ()
+    source_size_limits: dict[str, int] = field(default_factory=dict)
 
     def register_parsers(self, registry: ParserRegistry) -> None:
         raise NotImplementedError
@@ -41,4 +45,3 @@ def load_yaml(path: Path) -> dict[str, Any]:
         return {}
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
-

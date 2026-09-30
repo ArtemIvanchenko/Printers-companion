@@ -121,36 +121,11 @@ def calibration_is_excluded(record: PrintRecord, scope: str) -> bool:
     return False
 
 
-# Machine-time actuals are only trusted when the time_log covers (almost) the
-# whole print: a partial log (multi-day rotation, truncated file) sums LESS
-# machine time than the print really took and would drag the factor down.
-_MACHINE_TIME_MIN_COVERAGE = 0.95
-# Without a known expected layer count we cannot check coverage at all — a
-# missing/legacy snapshot must not let a two-layer partial log pass as "the
-# whole print". Require this many logged layers as a weak floor in that case;
-# it does not replace the coverage check, only covers its absence.
-_MACHINE_TIME_MIN_LAYERS_NO_EXPECTED = 100
-_MACHINE_TIME_MAX_LAYER_RATIO = 1.05
-
-
 def _has_full_layer_coverage(per_layer: dict[int, object], expected_layers: int | None) -> bool:
-    """Whether timing rows plausibly cover the print from its first to last layer.
+    """Compatibility entry point for the shared strict coverage contract."""
+    from analytics.prediction.timing_validation import has_complete_layer_coverage
 
-    Count alone is insufficient: a rotated log containing layers 6843..7016 can
-    have enough rows for a short, wrongly-linked 174-layer prediction. We also
-    require an anchored start and an end compatible with the expected count.
-    """
-    if not per_layer:
-        return False
-    layers = sorted(per_layer)
-    if expected_layers:
-        return (
-            len(layers) >= _MACHINE_TIME_MIN_COVERAGE * expected_layers
-            and layers[0] <= 2
-            and layers[-1] >= _MACHINE_TIME_MIN_COVERAGE * expected_layers
-            and layers[-1] <= _MACHINE_TIME_MAX_LAYER_RATIO * expected_layers
-        )
-    return len(layers) >= _MACHINE_TIME_MIN_LAYERS_NO_EXPECTED and layers[0] <= 2
+    return has_complete_layer_coverage(per_layer, expected_layers)
 
 
 def _machine_components_from_logs(
@@ -178,8 +153,7 @@ def _machine_hours_from_logs(
     never with ``machine_cycle_hours`` or the wall-clock session span.
 
     Returns None when the time_log is absent or does not plausibly cover the
-    whole print (see the two floors above — ``expected_layers`` is normally
-    present, ``_MACHINE_TIME_MIN_LAYERS_NO_EXPECTED`` only guards its absence).
+    whole print. Missing expected layer count is unknown, never a complete fact.
     """
     components = _machine_components_from_logs(session_id, expected_layers, db)
     return sum(components) if components is not None else None

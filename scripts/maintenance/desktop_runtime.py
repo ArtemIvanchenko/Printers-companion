@@ -49,12 +49,17 @@ def configure():
         "INCOMING_PATH": str(STATE / "raw"),
         "FILE_STABILITY_SECONDS": "0",
         "GIT_COMMIT": subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip(),
+        "APP_VERSION": (ROOT / "VERSION").read_text().strip(),
+        "BUILD_DATE": "unknown",  # Running source, not a newly built container.
+        "SOURCE_STATE": "dirty" if subprocess.check_output(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=normal"], text=True,
+        ).strip() else "clean",
     })
     os.chdir(ROOT)
     sys.path.insert(0, str(ROOT))
 
 
-def check_local_readiness():
+def check_local_readiness(expected_git_sha: str | None = None):
     """A listening API is not proof that its storage connection still works."""
     from urllib.error import HTTPError, URLError
     from urllib.request import urlopen
@@ -68,8 +73,11 @@ def check_local_readiness():
             "наличие процесса на порту 8000 не означает готовность базы."
         ) from exc
     checks = state.get('checks') or {}
-    if state.get('status') != 'ready' or any(checks.get(key) is not True for key in ('database', 'redis', 'minio')):
-        raise RuntimeError('Локальное хранилище не прошло проверку PostgreSQL, Redis и MinIO')
+    required = ('database', 'schema', 'redis', 'minio', 'minio_buckets')
+    if state.get('status') != 'ready' or any(checks.get(key) is not True for key in required):
+        raise RuntimeError('Локальное хранилище не прошло проверку схемы PostgreSQL, Redis и бакетов MinIO')
+    if expected_git_sha and (state.get('build') or {}).get('git_sha') != expected_git_sha:
+        raise RuntimeError('Запущен другой или неидентифицированный build API; перезапустите нужную версию')
     return state
 
 
@@ -104,8 +112,8 @@ def main():
                     time.sleep(0.5)
             else:
                 raise RuntimeError(f"{action} did not become ready")
-        check_local_readiness()
-        print("Local storage readiness: ready")
+        check_local_readiness(expected_git_sha=os.environ['GIT_COMMIT'])
+        print("API dependency readiness: ready (not a worker execution check)")
         import fcntl
         for action in ('worker', 'estimate-worker'):
             with (STATE / f'{action}.lock').open('a') as lock:
@@ -121,7 +129,7 @@ def main():
             time.sleep(1)
             if child.poll() is not None:
                 raise RuntimeError(f'{action} exited; inspect its local log')
-        print("Open http://127.0.0.1:8000/; local import and estimate workers are running")
+        print("Open http://127.0.0.1:8000/; local worker processes started; job execution not verified")
     elif args.action == "proxy":
         import asyncio
 

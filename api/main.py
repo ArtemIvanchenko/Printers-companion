@@ -43,6 +43,8 @@ from core.logging.config import configure_logging
 from api.middleware import RequestIDMiddleware
 from core.preflight import run_preflight, exit_on_failure
 from core.versioning.version import APP_VERSION
+from core.versioning.provenance import build_manifest
+from core.runtime_health import check_api_readiness
 from storage.db.migrate import assert_schema_at_head, upgrade_to_head
 
 logger = logging.getLogger(__name__)
@@ -213,49 +215,17 @@ async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "J
 @app.get("/health")
 def health() -> dict:
     """Liveness: the process is up. Cheap, never touches dependencies."""
-    return {"status": "ok", "version": APP_VERSION, "llm_provider": settings.llm_provider}
+    return {"status": "ok", "version": APP_VERSION, "llm_provider": settings.llm_provider,
+            "build": build_manifest()}
 
 
 @app.get("/health/ready")
 def health_ready() -> JSONResponse:
-    """Readiness: verify the backing services (PostgreSQL, Redis, MinIO) respond.
-
-    Returns 503 if any dependency is unreachable so orchestrators don't route
-    traffic to a pod that can't actually serve requests."""
-    checks: dict[str, bool] = {}
-
-    try:
-        from sqlalchemy import text
-        from storage.db.session import session_scope
-
-        with session_scope() as db:
-            db.execute(text("SELECT 1"))
-        checks["database"] = True
-    except Exception:
-        logger.exception("readiness: database check failed")
-        checks["database"] = False
-
-    try:
-        import redis as _redis
-
-        client = _redis.from_url(settings.redis_url, socket_connect_timeout=1, socket_timeout=1)
-        checks["redis"] = bool(client.ping())
-    except Exception:
-        logger.exception("readiness: redis check failed")
-        checks["redis"] = False
-
-    try:
-        from storage.object_store.minio_client import ObjectStore
-
-        checks["minio"] = ObjectStore().is_available()
-    except Exception:
-        logger.exception("readiness: minio check failed")
-        checks["minio"] = False
-
-    ready = all(checks.values())
+    """Read-only dependency/schema readiness; worker capability remains unknown."""
+    report = check_api_readiness(settings)
     return JSONResponse(
-        status_code=200 if ready else 503,
-        content={"status": "ready" if ready else "not_ready", "checks": checks, "version": APP_VERSION},
+        status_code=200 if report["status"] == "ready" else 503,
+        content=report,
     )
 
 

@@ -16,6 +16,7 @@ from tenacity import (
 from core.config.settings import get_settings
 from core.logging.config import configure_logging
 from core.preflight import run_preflight, exit_on_failure
+from core.utils.files import iter_source_files
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -86,7 +87,9 @@ def candidate_signature(path: Path, incoming_path: Path) -> str | None:
             files = [path]
             root = path.parent
         elif path.is_dir():
-            files = sorted(child for child in path.rglob("*") if child.is_file())
+            files = sorted(child for child in iter_source_files(path) if child.is_file())
+            if not files:
+                return None
             root = path
         else:
             return None
@@ -96,7 +99,7 @@ def candidate_signature(path: Path, incoming_path: Path) -> str | None:
         # logs.  Its metadata also changes when an unrelated ZIP or export
         # folder is added, which must not manufacture a second loose-log
         # notification.  Dedicated file/folder batches do include their root
-        # identity so replacing an empty folder at the same path is visible.
+        # identity so replacing a populated folder at the same path is visible.
         if path != incoming_path:
             root_stat = path.stat()
             digest.update(

@@ -30,6 +30,7 @@ def _sheet_stl(width=30.0, height=20.0) -> bytes:
 
 def _params(**over):
     base = dict(
+        printer_id="test-printer",
         layer_thickness_mm=0.1,
         hatch_speed_mm_s=1000.0,
         contour_speed_mm_s=500.0,
@@ -40,6 +41,15 @@ def _params(**over):
     )
     base.update(over)
     return base
+
+
+def _scoped_model_params(model, **over):
+    from analytics.prediction.scan_scope import scan_scope, scan_scope_key
+
+    params = _params(**over)
+    scope = scan_scope(params, "steel", params["layer_thickness_mm"])
+    params["scan_model_by_mat"] = {scan_scope_key(scope): {**model, "scan_calibration_scope": scope}}
+    return params
 
 
 class TestParts:
@@ -233,9 +243,33 @@ class TestMagicsReader:
 
 
 class TestFittedModelApplication:
+    @pytest.mark.parametrize("lower,applicable", [(11000.0, True), (22000.0, False)])
+    def test_free_branch_model_never_extrapolates_into_unknown_floor(self, lower, applicable):
+        model = {"version": "max_base_floor_v2", "base_overhead_ms": 400.0,
+                 "base_overhead_status": "identified_free_branch", "minimum_cycle_ms": None,
+                 "minimum_cycle_status": "unidentified", "minimum_applicable_component_ms": lower}
+        params = _scoped_model_params({"beta": [0, 0, 0, 0, 0, 1], "layer_cycle_model": model})
+        est = estimate_plate([("box", _box_stl())], [], params, "steel")
+        if applicable:
+            assert est.layer_overhead_ms == 400.0
+            assert est.machine_cycle_hours == pytest.approx(est.layer_count * 11.4 / 3600)
+        else:
+            assert est.layer_overhead_ms is None
+            assert est.layer_overhead_source == "outside_calibrated_range"
+            assert any("короче проверенной области" in warning for warning in est.warnings)
+
+    def test_old_cycle_v1_is_not_automatically_treated_as_identified(self):
+        params = _params(layer_cycle_model_by_mode={"test-printer|steel@0.100|lasers=1": {
+            "version": "max_base_floor_v1", "base_overhead_ms": 8500.0,
+            "minimum_cycle_ms": None, "minimum_cycle_status": "unidentified",
+        }})
+        est = estimate_plate([("box", _box_stl())], [], params, "steel")
+        assert est.layer_overhead_ms is None
+
     def test_cycle_model_applies_even_without_accepted_scan_model(self):
         cycle_model = {
-            "version": "max_base_floor_v1",
+            "version": "max_base_floor_v2",
+            "base_overhead_status": "identified",
             "base_overhead_ms": 400.0,
             "minimum_cycle_ms": 20_000.0,
             "minimum_cycle_status": "identified",
@@ -245,7 +279,7 @@ class TestFittedModelApplication:
         }
         est = estimate_plate(
             [("box", _box_stl())], [],
-            _params(layer_cycle_model_by_mode={"steel@0.100": cycle_model}),
+            _params(layer_cycle_model_by_mode={"test-printer|steel@0.100|lasers=1": cycle_model}),
             "steel",
         )
 
@@ -266,21 +300,19 @@ class TestFittedModelApplication:
         beta[0] = 1.0 / 500.0
         fitted = estimate_plate(
             [("box", _box_stl())], [],
-            _params(time_correction_factor=1.8,
-                    scan_model_by_mat={"steel@0.100": {
-                        "beta": beta, "r2": 0.9, "layer_overhead_ms": 250.0,
-                    }}),
+            _scoped_model_params({"beta": beta, "r2": 0.9, "layer_overhead_ms": 250.0},
+                                 time_correction_factor=1.8),
             "steel",
         )
         assert fitted.scan_source == "fitted"
         assert fitted.method.endswith("+fitted")
         # Absolute: the 1.8 blanket factor must NOT stack on the fitted scan
         assert fitted.correction_factor == 1.0
-        assert fitted.layer_overhead_ms == 250.0
-        assert fitted.layer_overhead_source == "legacy_additive_overhead"
-        assert fitted.machine_cycle_hours == pytest.approx(
-            fitted.print_hours + fitted.layer_count * 0.25 / 3600,
-        )
+        # Legacy additive residual lacks identification evidence, even though
+        # the separate scoped scan model is usable.
+        assert fitted.layer_overhead_ms is None
+        assert fitted.layer_overhead_source == "unavailable"
+        assert fitted.machine_cycle_hours == pytest.approx(fitted.print_hours)
         assert any("паспортным скоростям" in w for w in base.warnings)
         assert not any("паспортным скоростям" in w for w in fitted.warnings)
 
@@ -291,10 +323,11 @@ class TestFittedModelApplication:
         beta[-1] = 1.0  # one second of scan on every physical layer
         est = estimate_plate(
             [("box", _box_stl())], [],
-            _params(scan_model_by_mat={"steel@0.100": {
+            _scoped_model_params({
                 "beta": beta,
                 "layer_cycle_model": {
-                    "version": "max_base_floor_v1",
+                    "version": "max_base_floor_v2",
+                    "base_overhead_status": "identified",
                     "base_overhead_ms": 500.0,
                     "minimum_cycle_ms": 20_000.0,
                     "minimum_cycle_status": "identified",
@@ -304,7 +337,7 @@ class TestFittedModelApplication:
                     "floor_n_prints": 3,
                     "floor_n_layers": 200,
                 },
-            }}),
+            }),
             "steel",
         )
 

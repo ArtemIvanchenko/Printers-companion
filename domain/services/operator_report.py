@@ -91,7 +91,8 @@ def build_operator_report(
     print_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize one print/session into an actionable, Russian-language view."""
-    group = group or {}
+    from domain.schemas.analysis import measured_group
+    group = measured_group(group or {})
     outcomes = quality_outcomes or []
     features = group.get("features") or {}
     health = group.get("health") or {}
@@ -217,7 +218,9 @@ def build_operator_report(
             severity="low",
             causes=["действие оператора", "автоматическое ожидание оборудования", "восстановление после предупреждения"],
             recommendation="Проверить журнал событий около каждой паузы и состояние детали после возобновления.",
-            evidence={"pause_count": pause_count, "idle_min": features.get("idle_min")},
+            evidence={"pause_count": pause_count,
+                      "explicit_pause_seconds": features.get("explicit_pause_seconds"),
+                      "open_pause_count": features.get("open_pause_count")},
         )
 
     deviations.sort(key=lambda row: (-_SEVERITY_RANK[row["severity"]], row["code"]))

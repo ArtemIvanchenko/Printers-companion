@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "printer-log-analytics"
-version = "1.6.0"  # keep in sync with the VERSION file (single source of truth)
+version = "1.7.0"  # keep in sync with the VERSION file (single source of truth)
 description = "Extensible industrial log analytics platform for metal 3D printers"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,46 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp>=1.0.0"]
 dev = ["pytest>=8.2", "pytest-cov>=5.0", "ruff>=0.5"]
+geometry-index = ["rtree==1.4.1"]
+showcase = [
+  "pyod==3.6.1", "shap==0.51.0", "river==0.25.0", "pandas==3.0.3", "tsfresh==0.21.2",
+]
+
+# Container tiers are projections of the declarations above. Keep native
+# dependency ranges intact: Docker's Python 3.11 wheel pins are not a tested
+# lock for native Python 3.14 / macOS / Windows. Regenerate, never edit txt files:
+#   python scripts/export_requirements.py
+#   python scripts/export_requirements.py --check
+[tool.printer-companion.dependencies]
+base = [
+  "fastapi", "uvicorn", "pydantic", "pydantic-settings", "sqlalchemy", "psycopg",
+  "alembic", "redis", "minio", "httpx", "PyYAML", "python-multipart", "typer",
+  "charset-normalizer", "apscheduler", "watchdog", "tenacity",
+]
+analytics = ["polars", "scipy", "networkx", "scikit-learn"]
+heavy = [
+  "lightgbm", "trimesh", "shapely", "rtree", "PythonSLM", "pymeshfix", "ruptures",
+  "plotly", "pyod", "shap", "river", "pandas", "tsfresh",
+]
+dev = ["ruff", "pytest", "pytest-cov"]
+mcp = ["mcp"]
+# Historical native-only dependency, not added to container layers by this
+# reconciliation. Any later removal or use in production is a deliberate change.
+native-only = ["statsmodels"]
+
+[tool.printer-companion.dependencies.pins]
+polars = "0.20.31"
+scipy = "1.13.1"
+scikit-learn = "1.4.2"
+lightgbm = "4.6.0"
+trimesh = "4.12.2"
+shapely = "2.1.2"
+PythonSLM = "0.6.1"
+pymeshfix = "0.18.1"
+ruptures = "1.1.10"
+ruff = "0.15.16"
+pytest = "9.0.3"
+pytest-cov = "7.1.0"
 
 [project.scripts]
 pla = "cli.main:app"

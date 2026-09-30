@@ -63,6 +63,8 @@ def _num(value: Any) -> float | None:
 
 def build_feature_row(group: dict[str, Any]) -> dict[str, float | None]:
     """Extract the raw feature vector from a stored session ``group`` payload."""
+    from domain.schemas.analysis import measured_group
+    group = measured_group(group)
     features = group.get("features", {}) or {}
     health = group.get("health", {}) or {}
     signal_stats = group.get("signal_stats", {}) or {}
@@ -425,6 +427,18 @@ def predict_defect_risk(
     Uses the learned ``model`` when supplied and applicable, else the heuristic.
     """
     row = build_feature_row(group)
+    if model and (model.get("analysis_version") or model.get("model_version_id")):
+        from core.versioning.constants import ANALYSIS_VERSION
+        snapshot = group.get("analysis_snapshot") or {}
+        input_version = (snapshot.get("provenance") or {}).get("analysis_version")
+        if (snapshot.get("schema_version") != 1 or input_version != ANALYSIS_VERSION
+                or model.get("analysis_version") != input_version):
+            result = _heuristic_risk(row)
+            result["prediction"]["warnings"].append(
+                "Версии признаков сессии и ML-модели несовместимы. Нужен повторный анализ исходных логов."
+            )
+            result["model_not_applied_reason"] = "incompatible_analysis_version"
+            return result
     if model:
         result = _model_risk(row, model)
         if result is not None:

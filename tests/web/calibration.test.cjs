@@ -1,9 +1,7 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const vm = require('node:vm');
 const {test} = require('node:test');
-const html = fs.readFileSync(path.join(__dirname, '../../web_templates/dashboard.html'), 'utf8');
+const html = require('./dashboard-source.cjs').dashboardSource();
 const source = html.slice(html.indexOf('let _calibrationRequestActive = false;'), html.indexOf('// HOME STATS'));
 
 function harness(fetch) {

@@ -18,9 +18,9 @@ Two hard-won honesty rules, both from real-data validation:
   collinear (they all grow with cross-section size), so NNLS concentrates
   weight arbitrarily among them. Only the fitted linear MAP is identifiable —
   never report ``1/beta`` as a speed.
-* Models do NOT transfer across machines or modes. They are keyed by physical
-  printer, material, layer thickness and laser count; legacy single-machine
-  material/thickness keys remain readable.
+* Scan models are keyed by a captured physical-machine/configuration scope.
+  Legacy models without the scope remain historical data, not reusable models.
+  Configured inputs do not prove that the machine executed that actual recipe.
 
 Robustness to the known multi-day log-splitting bug: a session holding only
 part of a print's layers still yields valid (geometry, burn) pairs for the
@@ -55,6 +55,7 @@ from analytics.prediction.layer_engine import (
     machine_mode_key,
 )
 from analytics.prediction.input_quality import INPUT_REASON_RU, calibration_input_exclusion
+from analytics.prediction.scan_scope import scan_scope_key, snapshot_scan_scope
 from analytics.prediction.timing_validation import (
     MAX_BURN_MS, MIN_BURN_MS, calibration_burn_ms, calibration_cycles_ms,
 )
@@ -88,10 +89,9 @@ _MIN_BURN_MS, _MAX_BURN_MS = MIN_BURN_MS, MAX_BURN_MS
 #
 #   make = max(burn + pour + base_overhead, minimum_cycle)
 #
-# Extreme residuals are stops/restarts, not repeatable controller behaviour,
-# and stay available in the raw stored row for diagnostics while being
-# excluded from this fit. Moderate outliers are handled by the robust loss;
-# the wider training guard must not delete legitimate floor-bound short layers.
+# Large residuals remain diagnostic and are excluded by a provisional guard,
+# not established as stops. A machine with a genuine large cycle floor needs
+# a separately confirmed admission profile, not a guessed replacement label.
 _MAX_BASE_OVERHEAD_MS = 10_000.0
 _MAX_MINIMUM_CYCLE_MS = 120_000.0
 _MAX_CYCLE_TRAINING_RESIDUAL_MS = 60_000.0
@@ -373,14 +373,17 @@ def _fit(
             fold_beta = _fit_beta(train, train_fingerprints)
             if fold_beta is None:
                 continue
-            X_holdout = [row for index in holdout_indices for row in groups[index][0]]
-            y_holdout = [value for index in holdout_indices for value in groups[index][1]]
-            if not y_holdout:
-                continue
-            fold_pred = np.asarray(X_holdout, dtype=float) @ fold_beta
-            actual_total = float(np.asarray(y_holdout, dtype=float).sum())
-            if actual_total > 0:
-                cv_errors.append((float(fold_pred.sum()) - actual_total) / actual_total * 100.0)
+            # One error per physical print: opposite errors of exact reprints
+            # must not cancel before the absolute-error acceptance gate.
+            for index in holdout_indices:
+                X_holdout, y_holdout = groups[index]
+                if not y_holdout:
+                    continue
+                fold_pred = np.asarray(X_holdout, dtype=float) @ fold_beta
+                actual_total = float(np.asarray(y_holdout, dtype=float).sum())
+                if actual_total > 0:
+                    cv_errors.append((float(fold_pred.sum()) - actual_total) / actual_total * 100.0)
+    model["cv_error_unit"] = "print_with_geometry_held_out"
     model["cv_total_errors_pct"] = [round(value, 2) for value in cv_errors]
     model["cv_median_abs_total_err_pct"] = (
         round(statistics.median(abs(value) for value in cv_errors), 2)
@@ -421,10 +424,9 @@ def _fit_layer_cycle_model(
 ) -> dict[str, Any] | None:
     """Fit ``make=max(burn+pour+base, floor)`` without pause-like rows.
 
-    A floor is published only when both sides of the kink are independently
-    observed.  Otherwise infinitely many floor values can have identical
-    loss; in that case the honest fallback is the one-parameter additive base
-    model and ``minimum_cycle_ms=None``.
+    Neither a flat floor-only sample nor an unsupported kink identifies a
+    universally additive base. Unidentified parameters remain null and must
+    not be published. A free-only fit has a lower applicability boundary.
     """
     import numpy as np
     from scipy.optimize import least_squares
@@ -436,6 +438,13 @@ def _fit_layer_cycle_model(
         clean_components: list[float] = []
         clean_makes: list[float] = []
         for component_ms, make_ms in zip(components, makes):
+            if (isinstance(component_ms, bool) or isinstance(make_ms, bool)
+                    or not isinstance(component_ms, (int, float))
+                    or not isinstance(make_ms, (int, float))
+                    or not np.isfinite(component_ms) or not np.isfinite(make_ms)
+                    or component_ms < 0 or make_ms <= 0):
+                pause_like_rows += 1
+                continue
             residual_ms = make_ms - component_ms
             if not (0.0 <= residual_ms <= _MAX_CYCLE_TRAINING_RESIDUAL_MS):
                 pause_like_rows += 1
@@ -541,12 +550,25 @@ def _fit_layer_cycle_model(
         minimum_cycle_ms: float | None = candidate_floor_ms
         predicted = np.maximum(x + base_ms, minimum_cycle_ms)
         floor_status = "identified"
+        base_status = "identified"
+        minimum_component_ms = None
     else:
-        # When the kink is unsupported, refit the sole identifiable parameter
-        # instead of letting an arbitrary optimiser start value leak into API.
-        base_ms = base_only_ms
+        # An additive model is supported only by varying free-branch data with
+        # no material evidence favouring a kink. Flat floor-only observations
+        # cannot identify a base even when their additive approximation fits.
+        free_identified = (
+            free_layers >= MIN_CYCLE_BRANCH_LAYERS
+            and free_prints >= MIN_CYCLE_BRANCH_PRINTS and free_geometries >= 2
+            and float(np.percentile(x, 90) - np.percentile(x, 10)) >= 2 * _CYCLE_ROBUST_F_SCALE_MS
+            and floor_loss_improvement_pct < _MIN_FLOOR_ROBUST_LOSS_IMPROVEMENT_PCT
+            and float(np.median(np.abs(x + base_only_ms - y))) <= 3 * _CYCLE_ROBUST_F_SCALE_MS
+        )
+        base_ms = base_only_ms if free_identified else None
+        base_status = "identified_free_branch" if free_identified else "unidentified"
         minimum_cycle_ms = None
-        predicted = x + base_ms
+        minimum_component_ms = float(x.min()) if free_identified else None
+        # Fit diagnostics are not usable parameters and do not authorise reuse.
+        predicted = x + base_only_ms if free_identified else np.maximum(x + fitted.x[0], candidate_floor_ms)
         floor_status = "unidentified"
 
     absolute_error = np.abs(predicted - y)
@@ -555,8 +577,10 @@ def _fit_layer_cycle_model(
         if y.sum() else 0.0
     )
     return {
-        "version": "max_base_floor_v1",
-        "base_overhead_ms": round(base_ms, 3),
+        "version": "max_base_floor_v2",
+        "base_overhead_ms": round(base_ms, 3) if base_ms is not None else None,
+        "base_overhead_status": base_status,
+        "minimum_applicable_component_ms": minimum_component_ms,
         "minimum_cycle_ms": (
             round(minimum_cycle_ms, 3) if minimum_cycle_ms is not None else None
         ),
@@ -591,6 +615,7 @@ def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInp
     cycle_by_key: dict[
         str, list[tuple[list[float], list[float], str, str]]
     ] = defaultdict(list)
+    scopes: dict[str, dict] = {}
 
     linked = inputs.linked if inputs is not None else list(iter_linked_prints(db))
     link_counts = Counter(record.session_id for record, _ in linked)
@@ -623,7 +648,12 @@ def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInp
             laser_count = max(int(laser_value or 1), 1)
         except (TypeError, ValueError):
             laser_count = 1
-        printer_id = snapshot.get("printer_id") or session.printer_id
+        # The linked measurement identifies the physical machine. A conflicting
+        # old prediction cannot relabel its timings as another machine's data.
+        printer_id = session.printer_id
+        if (not isinstance(printer_id, str) or not printer_id.strip()
+                or snapshot.get("printer_id") not in (None, printer_id)):
+            printer_id = None
         key = (
             machine_mode_key(
                 str(printer_id) if printer_id else None,
@@ -631,7 +661,7 @@ def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInp
                 thickness,
                 laser_count,
             )
-            if thickness > 0 else None
+            if thickness > 0 and printer_id else None
         )
 
         # Full-cycle calibration needs only machine timings and a mode. It is
@@ -694,11 +724,15 @@ def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInp
                          "used": False, "reason": "geometry_snapshot_unusable"})
             continue
 
-        if key is None:
+        scope = snapshot_scan_scope(snapshot, session.printer_id)
+        if scope is None:
             rows.append({"record_id": record.record_id, "session_id": record.session_id,
                          "used": False, "cycle_used": cycle_used,
-                         "reason": "mode_unavailable"})
+                         "reason": "scan_scope_unavailable",
+                         "reason_ru": "Нет сохранённого состава настроек прожига и идентичности машины; нужен новый снимок."})
             continue
+        key = scan_scope_key(scope)
+        scopes[key] = scope
         fingerprint = _geometry_fingerprint(snapshot)
         if fingerprint is None:
             rows.append({"record_id": record.record_id, "session_id": record.session_id,
@@ -719,6 +753,7 @@ def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInp
             candidates[key] = {"status": "fit_failed"}
             continue
         model["source_records"] = [rid for _, _, rid, _ in groups]
+        model["scan_calibration_scope"] = scopes[key]
         model["source_geometry_fingerprints"] = sorted({
             fingerprint for _, _, _, fingerprint in groups
         })
@@ -751,6 +786,8 @@ def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInp
                 f"rejected: too_few_layers ({cycle_model['n_layers']} < "
                 f"{MIN_LAYERS_FOR_FIT})"
             )
+        elif cycle_model["base_overhead_ms"] is None:
+            status = "rejected: base_overhead_unidentified"
         else:
             status = "ok"
         cycle_model["status"] = status

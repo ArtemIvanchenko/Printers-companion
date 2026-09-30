@@ -13,6 +13,20 @@ from core.config.settings import get_settings
 router = APIRouter(prefix="/background-analysis", tags=["background-analysis"])
 
 
+@router.post("/shadow/{session_id}", status_code=202)
+def request_shadow(session_id: str, db: Session = Depends(get_db)) -> dict:
+    from domain.services.shadow_analysis import request_shadow_analysis, ShadowAnalysisError
+    from domain.services.compute_affinity import ComputeAffinityError
+    try:
+        job = request_shadow_analysis(db, session_id, get_settings().compute_node_id)
+        db.commit()
+    except (ShadowAnalysisError, ComputeAffinityError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"contract_version": 1, "job_id": job["job_id"], "status": job["status"],
+            "owner_node_id": job["owner_node_id"], "operator_action_allowed": False}
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = JobsRepository(db).get(job_id)
@@ -41,8 +55,9 @@ def run_background_analysis(
 @router.get("/status")
 def get_background_status(repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
     return {
-        "daily_review": "scheduled",
-        "historical_reanalysis": "bounded",
+        "daily_review": "not_implemented",
+        "historical_reanalysis": "experimental_manual",
+        "scheduler_verified": False,
         "verdict_count": len(repo.list_historical_verdicts()),
     }
 
@@ -63,6 +78,7 @@ def get_verdict(verdict_id: str, repo: RuntimeRepository = Depends(get_runtime_r
 @router.get("/daily-review")
 def daily_review() -> dict:
     return {
+        "status": "not_implemented",
         "processed_sessions": [],
         "new_real_prints": [],
         "service_sessions": [],

@@ -128,6 +128,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+        SOURCE_STATE: ${SOURCE_STATE:-unknown}
     command: alembic upgrade head
     profiles: ["migration"]
     networks:

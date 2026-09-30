@@ -170,28 +170,25 @@ class LayerGeometrySeries:
 
 
 def resolve_scan_model(params: dict, material: str, layer_thickness_mm: float) -> dict | None:
-    """Fitted scan model for this machine/mode, or a legacy exact-mode model.
+    """Only reuse an artifact fitted to these captured machine/scan inputs.
 
-    A fitted model must never be applied to a different mode: real-data
-    validation showed cross-mode transfer degrades to worse-than-mean (R² < 0).
+    Legacy artifacts stay readable as history, but do not authorise reuse.
+    Matching configured inputs is not confirmation of the actual as-run recipe.
     """
+    from analytics.prediction.scan_scope import scan_scope, scan_scope_key
+
+    scope = scan_scope(params, material, layer_thickness_mm)
+    if scope is None:
+        return None
     models = params.get("scan_model_by_mat") or {}
-    keys = []
-    printer_id = params.get("printer_id")
-    laser_count = int(params.get("laser_count") or 1)
-    if printer_id:
-        keys.append(machine_mode_key(
-            str(printer_id), material, layer_thickness_mm, laser_count,
-        ))
-    # Backward-compatible single-machine models used this shorter key.
-    keys.append(scan_model_key(material, layer_thickness_mm))
-    for key in keys:
-        model = models.get(key)
-        if not isinstance(model, dict):
-            continue
-        beta = model.get("beta")
-        if isinstance(beta, list) and len(beta) == len(GEOMETRY_FEATURES) + 1:
-            return model
+    model = models.get(scan_scope_key(scope))
+    if not isinstance(model, dict) or model.get("scan_calibration_scope") != scope:
+        return None
+    beta = model.get("beta")
+    if (isinstance(beta, list) and len(beta) == len(GEOMETRY_FEATURES) + 1
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(value) and value >= 0 for value in beta)):
+        return model
     return None
 
 

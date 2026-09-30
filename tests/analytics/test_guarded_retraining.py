@@ -155,7 +155,13 @@ def test_training_snapshot_preserves_label_observation_time_and_identity():
     with session_scope() as db:
         db.add(BuildSession(session_id="label-time-session", classification="REAL_PRINT",
                             start_ts=datetime(2026, 6, 1, tzinfo=timezone.utc),
-                            context={"runtime_payload": {"group": {"features": {"layers": 100}}}}))
+                            context={"runtime_payload": {"group": {
+                                "features": {"layers": 100},
+                                "analysis_snapshot": {"schema_version": 1, "analysis_id": "test-analysis",
+                                                      "provenance": {"analysis_version": ANALYSIS_VERSION},
+                                                      "features": {"layers": 100}, "health": {},
+                                                      "data_quality": {}, "signal_stats": {}},
+                            }}}))
         db.flush()
         db.add(QualityOutcome(outcome_id="label-time-outcome", session_id="label-time-session",
                               timestamp=when, inspection_type="visual", result="accepted", is_final=True))
@@ -195,3 +201,38 @@ def test_calculation_registers_valid_model_as_shadow(monkeypatch):
     assert result["candidate"] is not None
     assert result["candidate"]["quality_gates"]["future_shadow_validation_required"] is True
     assert result["candidate"]["training_size"] == 20
+
+
+def test_outdated_active_artifact_is_not_applied_or_deleted():
+    with session_scope() as db:
+        repo = ModelRegistryRepository(db)
+        candidate = _candidate()
+        candidate["analysis_version"] = "0.4.6"
+        old = repo.register_shadow(candidate)
+        repo.promote(old["model_version_id"], "historical validation")
+        assert retraining.active_model(db) is None
+        assert repo.get_active("defect_risk")["model_version_id"] == old["model_version_id"]
+
+
+def test_old_shadow_is_rejected_without_claiming_new_validation(monkeypatch):
+    monkeypatch.setattr(retraining, "_shadow_evaluation", lambda *a: pytest.fail("old feature semantics"))
+    result = retraining.calculate_retraining(
+        {"rows": [], "shadow": {**_candidate(), "analysis_version": "0.4.6"}}, owner_node_id="pc-a",
+    )
+    assert result["evaluation"]["decision"] == "reject"
+    assert result["evaluation"]["metrics"]["feature_version_compatible"] is False
+
+
+def test_legacy_labelled_session_is_retained_but_excluded_from_new_training():
+    from domain.models.quality import QualityOutcome
+    from domain.models.sessions import BuildSession
+    with session_scope() as db:
+        db.add(BuildSession(session_id="legacy", classification="REAL_PRINT",
+                            context={"runtime_payload": {"group": {"features": {"layers": 50}}}}))
+        db.flush()
+        db.add(QualityOutcome(outcome_id="old-label", session_id="legacy", inspection_type="visual",
+                              timestamp=datetime(2026, 6, 2, tzinfo=timezone.utc),
+                              result="accepted", is_final=True))
+        db.flush()
+        assert retraining.prepare_retraining(db)["rows"] == []
+        assert db.get(QualityOutcome, "old-label") is not None

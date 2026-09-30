@@ -194,6 +194,7 @@ def run_worker_loop(lease_owner: str, owner_node_id: str, stopped: Event) -> Non
     """
     from worker.model_tasks import process_next_model_task
     from worker.calibration_tasks import process_next_calibration_task
+    from worker.shadow_tasks import process_next_shadow_task
 
     delay = 2.0
     while not stopped.is_set():
@@ -203,12 +204,13 @@ def run_worker_loop(lease_owner: str, owner_node_id: str, stopped: Event) -> Non
             # belong to this PC and must eventually get a turn.
             trained = False if stopped.is_set() else process_next_model_task(lease_owner, owner_node_id)
             calibrated = False if stopped.is_set() else process_next_calibration_task(lease_owner, owner_node_id)
+            shadow = False if stopped.is_set() else process_next_shadow_task(lease_owner, owner_node_id)
         except (OperationalError, SQLAlchemyTimeoutError):
             logger.warning("Estimate/model/calibration queues unavailable; retrying in %.1fs", delay)
         except Exception:
             logger.exception("Estimate/model/calibration worker loop failed; retrying in %.1fs", delay)
         else:
-            if estimated or trained or calibrated:
+            if estimated or trained or calibrated or shadow:
                 delay = 2.0
                 continue
         # Event.wait lets SIGTERM/SIGINT interrupt an idle/outage backoff.

@@ -73,10 +73,12 @@ def receive_checkout(dbapi_conn, connection_record, connection_proxy):
         logger.debug("Database connection checked out from pool")
 
 def get_db() -> Generator[Session, None, None]:
-    """Request-scoped session — the unit-of-work boundary.
+    """Request-scoped session with a fallback unit-of-work boundary.
 
-    Commits once if the handler succeeds, rolls back on any exception. Route
-    handlers and repositories must NOT commit themselves (repos only flush).
+    Commit remaining work on success, roll back on any exception, always close.
+    Repositories only flush. Application services with an explicit use-case
+    boundary may commit earlier so their callers can safely perform post-commit
+    actions (cache invalidation, object cleanup); they require a clean session.
     """
     db = SessionLocal()
     try:

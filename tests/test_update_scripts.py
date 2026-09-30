@@ -13,12 +13,14 @@ import pytest
     ('postgres\nminio\nredis\n', {'postgres', 'minio', 'redis'}),
     ('', {'api', 'worker', 'estimator', 'nas-sync', 'watcher', 'scheduler'}),
 ])
-def test_update_completes_operator_workers_but_preserves_storage_only(tmp_path, running, expected):
+@pytest.mark.parametrize('api_revision', ['abc123456789', 'stale-build'])
+def test_update_completes_operator_workers_but_preserves_storage_only(tmp_path, running, expected, api_revision):
     bash = shutil.which('bash')
     if not bash:
         pytest.skip('bash is not available')
     root = Path(__file__).parents[1]
     shutil.copyfile(root / 'update.sh', tmp_path / 'update.sh')
+    (tmp_path / 'VERSION').write_text('1.2.3\n')
     commands = {
         'git': '''#!/bin/sh
 case "$*" in
@@ -30,6 +32,7 @@ esac
 case "$*" in
   'compose ps --services --filter status=running') printf '%s' "$TEST_RUNNING" ;;
   'compose up -d --build '*) printf '%s\\n' "$@" > "$TEST_CAPTURE" ;;
+  'compose exec -T api printenv GIT_COMMIT') echo "$TEST_API_REVISION" ;;
   *) exit 1 ;;
 esac
 ''',
@@ -43,9 +46,14 @@ esac
         executable.chmod(0o700)
     capture = tmp_path / 'compose-arguments'
     env = {**os.environ, 'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
-           'TEST_RUNNING': running, 'TEST_CAPTURE': str(capture)}
+           'TEST_RUNNING': running, 'TEST_CAPTURE': str(capture), 'TEST_API_REVISION': api_revision}
     result = subprocess.run([bash, str(tmp_path / 'update.sh')], env=env,
                             capture_output=True, text=True)
+    if 'api' in expected and api_revision == 'stale-build':
+        assert result.returncode != 0
+        assert not (tmp_path / '.last_deployed').exists()
+        assert 'revision differs' in result.stderr
+        return
     assert result.returncode == 0, result.stdout + result.stderr
     arguments = capture.read_text().splitlines()
     assert arguments[:4] == ['compose', 'up', '-d', '--build']
@@ -59,7 +67,9 @@ def test_powershell_updater_completes_workers_and_stamps_build():
     assert '$Services -contains "api" -or $Services -contains "worker"' in source
     assert 'foreach ($Required in @("estimator", "nas-sync"))' in source
     assert '$Services -notcontains $Required' in source
-    assert '$env:GIT_COMMIT = (git rev-parse --short HEAD).Trim()' in source
+    assert '$env:GIT_COMMIT = (git rev-parse HEAD).Trim()' in source
+    assert '$env:SOURCE_STATE' in source
+    assert source.index("/health/ready") < source.index('$Remote | Set-Content $DeployedFile')
     assert 'git pull --ff-only origin main -q' in source
 
 

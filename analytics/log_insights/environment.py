@@ -24,14 +24,22 @@ def default_thresholds():
     }
 
 
-def sensor_samples(files, thresholds, diagnostics, clock_timezone="Europe/Moscow"):
+def sensor_samples(files, thresholds, diagnostics, clock_timezone="Europe/Moscow", *,
+                   apply_profile_ranges=True):
     """Yield (absolute seconds, aligned values), retaining missing cells as None."""
     catalog = load_signal_catalog()
     paths = {}
     for source in files:
         if str(source.classification.family) != "sensors_log":
             continue
-        paths.setdefault(source.checksum or source.path, Path(source.path))
+        path = Path(source.path)
+        try:
+            date_hint = str(date_hint_from_filename(path) or "")
+        except ValueError:
+            date_hint = ""
+        # Identical clock-only samples recorded on different dates are
+        # different observations. Copies from the SAME dated source dedupe.
+        paths.setdefault((source.checksum or source.path, date_hint), path)
     def date_key(path):
         try:
             hint = date_hint_from_filename(path)
@@ -82,8 +90,8 @@ def sensor_samples(files, thresholds, diagnostics, clock_timezone="Europe/Moscow
                 rule = catalog.get(key, {})
                 if (not finite_number(value) or abs(value) > 1e7
                         or value in rule.get("invalid_values", [])
-                        or (rule.get("min_val") is not None and value < rule["min_val"])
-                        or (rule.get("max_val") is not None and value > rule["max_val"])):
+                        or (apply_profile_ranges and rule.get("min_val") is not None and value < rule["min_val"])
+                        or (apply_profile_ranges and rule.get("max_val") is not None and value > rule["max_val"])):
                     value = None
                     diagnostics[f"invalid_cells:{key}"] += 1
                 values[key] = value

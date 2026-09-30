@@ -7,9 +7,12 @@ deleted from the markup, and a placeholder with no matching key renders as the l
 ``{!name!}`` on the page rather than failing.
 """
 import re
+import ast
 from pathlib import Path
 
 import pytest
+
+from dashboard_test_support import dashboard_source
 
 _ROOT = Path(__file__).resolve().parent.parent
 _TEMPLATE = _ROOT / "web_templates" / "dashboard.html"
@@ -19,14 +22,15 @@ _PLACEHOLDER = re.compile(r"\{!(\w+)!\}")
 
 
 def _template_keys() -> set[str]:
-    return set(_PLACEHOLDER.findall(_TEMPLATE.read_text(encoding="utf-8")))
+    return set(_PLACEHOLDER.findall(dashboard_source()))
 
 
 def _context_keys() -> set[str]:
-    source = _ROUTE.read_text(encoding="utf-8")
-    start = source.index("    ctx = {")
-    end = source.index("    return HTMLResponse", start)
-    return set(re.findall(r'^\s+"(\w+)":', source[start:end], re.M))
+    module = ast.parse(_ROUTE.read_text(encoding="utf-8"))
+    handler = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "dashboard")
+    assignment = next(node for node in handler.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "ctx" for target in node.targets))
+    return {key.value for key in assignment.value.keys}
 
 
 def test_every_placeholder_has_a_context_value():
@@ -57,49 +61,35 @@ def test_placeholder_names_are_readable(key):
 
 
 def test_dashboard_script_parses():
-    """The dashboard's own JS is one 170k-character inline block.
-
-    A syntax error anywhere in it kills every handler on the page — the nav
-    stops responding and nothing renders — while the server keeps returning
-    200 and the browser console stays empty, because the parse fails before
-    any of it runs. That happened here: a `const prints` shadowing an existing
-    binding took the whole dashboard down, and only a manual `node --check`
-    found it. This test is that check.
-
-    Skipped where node is unavailable rather than failing: it is a linter for
-    a template, not a runtime dependency of the app.
-    """
+    """Every static module parses, including their shared global bindings."""
     import shutil
     import subprocess
 
     node = shutil.which("node")
     if not node:
         pytest.skip("node not available")
-
     html = _TEMPLATE.read_text(encoding="utf-8")
-    blocks = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S)
-    assert blocks, "no inline script found in the dashboard template"
-
-    for i, block in enumerate(blocks):
-        # Server-side placeholders are not valid JS on their own; they are
-        # substituted before the browser ever sees them, so stand in a literal.
-        source = _PLACEHOLDER.sub("null", block)
+    names = re.findall(r'src="/assets/([^"]+\.js)"', html)
+    scripts = [
+        (_ROOT / "web_assets" / name).read_text(encoding="utf-8")
+        for name in names if not name.startswith("vendor/")
+    ]
+    assert scripts, "dashboard script composition is empty"
+    assert not re.search(r"<script\s*>", html), "application JS must be static"
+    for index, source in enumerate([*scripts, "\n".join(scripts)]):
         result = subprocess.run(
-            [node, "--input-type=module", "--check"],
-            input=source, capture_output=True, text=True,
+            [node, "--check"], input=source, capture_output=True, text=True,
         )
-        assert result.returncode == 0, (
-            f"inline <script> #{i} does not parse:\n{result.stderr}"
-        )
+        assert result.returncode == 0, f"dashboard JS #{index}: {result.stderr}"
 
 
 def test_dashboard_does_not_mislabel_platform_position_as_liquid_level():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     assert "Уровень жидкости" not in html
 
 
 def test_dashboard_protects_shared_print_cards_from_stale_edits():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     assert "expected_revision: _pcRecord.revision" in html
     assert "new EventSource('/prints/events')" in html
     assert "Карточка изменена на другом ПК" in html
@@ -112,7 +102,7 @@ def _javascript_function(html: str, name: str, next_name: str) -> str:
 
 
 def test_general_log_selection_is_sent_as_one_multipart_batch():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     source = _javascript_function(html, "uploadFiles", "rescanFolder")
 
     assert "files.forEach(file => fd.append('files', file))" in source
@@ -121,7 +111,7 @@ def test_general_log_selection_is_sent_as_one_multipart_batch():
 
 
 def test_print_card_log_selection_is_sent_as_one_multipart_batch():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     source = _javascript_function(html, "uploadArchiveLogs", "_pollRecordLink")
 
     assert "files.forEach(file => fd.append('files', file))" in source
@@ -130,7 +120,7 @@ def test_print_card_log_selection_is_sent_as_one_multipart_batch():
 
 
 def test_print_attachment_upload_explains_deferred_nas_sync():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     source = _javascript_function(html, "uploadArchiveFile", "previewArchiveStl")
 
     assert "result.queued" in source
@@ -138,7 +128,7 @@ def test_print_attachment_upload_explains_deferred_nas_sync():
 
 
 def test_quality_correction_sends_the_current_final_verdict_id():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     start = html.index("async function savePrintQualityOutcome(")
     end = html.index("function _renderPcProcess(", start)
     source = html[start:end]
@@ -148,7 +138,7 @@ def test_quality_correction_sends_the_current_final_verdict_id():
 
 
 def test_dashboard_uses_explicit_motion_tokens_and_reduced_motion():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     assert "transition: all" not in html
     assert "--ease-out: cubic-bezier(0.23, 1, 0.32, 1)" in html
     assert "@media (prefers-reduced-motion: reduce)" in html
@@ -156,7 +146,7 @@ def test_dashboard_uses_explicit_motion_tokens_and_reduced_motion():
 
 
 def test_home_prioritizes_print_cards_over_aggregate_charts():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     assert 'class="home-print-grid"' in html
     assert 'id="home-recent-sessions"' in html
     assert "_renderHomeStlPreview" in html
@@ -169,7 +159,7 @@ def test_home_prioritizes_print_cards_over_aggregate_charts():
 
 
 def test_dashboard_uses_dark_handoff_shell_and_stl_preview():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     assert "--bg-page: #201e1d" in html
     assert "--color-primary: #c67139" in html
     assert 'id="nav-add"' in html
@@ -179,7 +169,7 @@ def test_dashboard_uses_dark_handoff_shell_and_stl_preview():
 
 
 def test_handoff_secondary_screens_are_api_backed_and_complete():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     for page in ("add", "estimate", "anomalies", "quality", "journal", "settings"):
         assert f'id="page-design-{page}"' in html
     assert "_designAccuracyChart" in html
@@ -191,7 +181,7 @@ def test_handoff_secondary_screens_are_api_backed_and_complete():
 
 
 def test_print_card_actions_target_current_record_and_camera_switches_are_real():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     assert "uploadArchiveLogs('${rec.record_id}',this.files)" in html
     assert "uploadArchiveFile('${rec.record_id}',this.files[0])" in html
     assert "setCamera(['45', 'top', 'front'][buttonIndex])" in html
@@ -200,7 +190,7 @@ def test_print_card_actions_target_current_record_and_camera_switches_are_real()
 
 
 def test_dashboard_dialogs_and_errors_are_non_blocking_and_accessible():
-    html = _TEMPLATE.read_text(encoding="utf-8")
+    html = dashboard_source()
     assert 'role="dialog" aria-modal="true"' in html
     assert 'id="app-toast-region"' in html
     assert "function showToast(" in html

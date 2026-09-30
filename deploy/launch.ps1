@@ -69,32 +69,36 @@ if ($missingServices) {
     docker compose up -d --remove-orphans 2>&1 | ForEach-Object {
         if ($_ -match 'Started|Created|Running') { Write-Host "  $_" -ForegroundColor DarkGray }
     }
+    if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
 } else {
     Write-Host "  All services already running." -ForegroundColor Green
 }
 
 # 4. Wait for API
 Write-Step "[4/4] Waiting for API..." Yellow
-$url = "http://localhost:8000/health"
+$url = "http://localhost:8000/health/ready"
 $ready = $false
-for ($i = 0; $i -lt 60; $i++) {
+$ReadinessDeadline = (Get-Date).AddSeconds(180)
+while ((Get-Date) -lt $ReadinessDeadline) {
     try {
-        $r = Invoke-WebRequest -Uri $url -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+        $r = Invoke-WebRequest -Uri $url -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
         if ($r.StatusCode -eq 200) { $ready = $true; break }
     } catch {}
-    Write-Host "  [$([int]($i*2))s] waiting for API..." -ForegroundColor DarkGray
+    Write-Host "  Waiting for API and storage..." -ForegroundColor DarkGray
     Start-Sleep 2
 }
 
 if (-not $ready) {
-    Write-Host "  Warning: API did not respond in 2 minutes. Opening dashboard anyway." -ForegroundColor Yellow
+    Write-Host "  ERROR: API/storage readiness was not confirmed. Check container logs." -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
 }
 
 # Open dashboard
 Write-Host "`nOpening dashboard..." -ForegroundColor Cyan
 Start-Process "http://localhost:8000"
 
-Write-Host "`n  Done! Dashboard opened in browser." -ForegroundColor Green
+Write-Host "`n  API and storage are available. Background workers have not been verified." -ForegroundColor Green
 docker compose ps --format "table {{.Name}}`t{{.Status}}" 2>$null
 
 Start-Sleep 3

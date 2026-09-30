@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from core.utils.files import safe_relative, sha256_file
+from core.utils.files import iter_source_files, safe_relative, sha256_file
 from domain.enums.common import DataQualityStatus
 from domain.schemas.parsing import FileClassification, ParseResult
 from domain.services.file_classifier import classify_file
@@ -40,41 +40,24 @@ class IngestionResult(BaseModel):
 
 
 class IngestionService:
-    # Files whose data is fully contained in other logs — skip to save memory and time.
-    #
-    # _burn.log      → same sensor columns as _sensors.log, just 1 row/layer (redundant)
-    # _stateFlowData.log → binary file, unreadable garbage
-    # table_temp.log → table temperature = ST5 column already in _sensors.log
-    #
-    # _stateFlow.log is skipped separately by size (see _should_skip).
+    # Only OS metadata is universally irrelevant. Machine source selection
+    # belongs to the selected profile; burn logs carry independent layer times.
     SKIP_PATTERNS: tuple[str, ...] = (
-        "*_burn.log",
-        "*_stateFlowData.log",
-        "table_temp.log",
         "._*",            # macOS AppleDouble metadata files
         ".DS_Store",      # Finder folder metadata — ingested as a "session" otherwise
         "Thumbs.db",      # Windows Explorer thumbnail cache
         "desktop.ini",
     )
-    # stateFlow logs at 500+ Hz but 99.98% rows are identical; classification
-    # only uses it as "supportive" evidence — Monitor100 is sufficient.
-    # Skip stateFlow files larger than this threshold.
-    STATEFLOW_MAX_BYTES = 10 * 1024 * 1024   # 10 MB
-
     def _should_skip(self, path: Path) -> str | None:
         """Return a skip reason string if this file should not be ingested, else None."""
         name = path.name
-        for pattern in self.SKIP_PATTERNS:
+        patterns = self.SKIP_PATTERNS + tuple(getattr(self.profile, "excluded_source_patterns", ()))
+        for pattern in patterns:
             if fnmatch(name, pattern):
-                return f"redundant file type: matches skip pattern '{pattern}'"
-        if fnmatch(name, "*_stateFlow.log"):
-            size = path.stat().st_size
-            if size > self.STATEFLOW_MAX_BYTES:
-                return (
-                    f"stateFlow file too large ({size / 1024 / 1024:.0f} MB > "
-                    f"{self.STATEFLOW_MAX_BYTES // 1024 // 1024} MB): "
-                    f"data is 99%+ identical rows; classification uses monitor100 instead"
-                )
+                return f"source excluded by metadata/profile policy: '{pattern}'"
+        for pattern, limit in getattr(self.profile, "source_size_limits", {}).items():
+            if fnmatch(name, pattern) and path.stat().st_size > limit:
+                return f"profile source size limit: '{pattern}' exceeds {limit} bytes"
         return None
 
     def __init__(self, registry: ParserRegistry, profile: PrinterProfilePlugin | None = None) -> None:
@@ -87,7 +70,8 @@ class IngestionService:
         if not root.exists():
             result.diagnostics.append({"severity": "error", "code": "root_missing", "path": str(root)})
             return result
-        for path in sorted(root.rglob("*")):
+        relative_root = root.parent if root.is_file() else root
+        for path in sorted(iter_source_files(root)):
             try:
                 if not path.is_file():
                     continue
@@ -98,7 +82,7 @@ class IngestionService:
                 if skip_reason:
                     result.skipped.append({"path": str(path), "reason": skip_reason})
                     continue
-                result.files.append(self._inspect_file(path, root))
+                result.files.append(self._inspect_file(path, relative_root))
             except OSError as exc:
                 result.skipped.append({"path": str(path), "reason": str(exc)})
         return result
@@ -148,4 +132,3 @@ class IngestionService:
             mtime=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
             metadata={"raw_file_name": path.name},
         )
-

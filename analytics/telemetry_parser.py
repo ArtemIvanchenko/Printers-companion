@@ -301,6 +301,15 @@ def compute_full_signal_stats(
         logger.warning("Failed to parse %s: %s", path, exc)
         return {}
 
+    return compute_signal_stats(arrays, alarm_thresholds, valid_ranges)
+
+
+def compute_signal_stats(
+    arrays: dict[str, Any],
+    alarm_thresholds: dict[str, dict[str, float]] | None = None,
+    valid_ranges: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Statistics over aligned full-session inputs, independent of chart sampling."""
     thresholds = alarm_thresholds or {}
     if valid_ranges is None:
         from analytics.thresholds import load_valid_ranges
@@ -308,6 +317,7 @@ def compute_full_signal_stats(
     result: dict[str, dict[str, Any]] = {}
 
     for col, vals in arrays.items():
+        vals = np.asarray(vals, dtype=np.float64)
         # Drop non-finite samples: a sensor disconnect can write "nan"/"inf"
         # cells, which float() accepts silently — a single one would poison
         # mean/std/quantile (NaN propagates) for the entire signal.
@@ -386,7 +396,7 @@ def compute_full_signal_stats(
             "alarm_count": alarm_count,
             "out_of_range": out_of_range,
             "trend_slope": round(slope_val, 8),
-            "group":       _GROUP[col],
+            "group":       _GROUP.get(col, "unknown"),
         }
 
     return result

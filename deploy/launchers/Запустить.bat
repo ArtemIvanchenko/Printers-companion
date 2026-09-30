@@ -71,6 +71,7 @@ if not exist "%REPO_DIR%\" (
 
     echo Собираю образы (15–30 минут, не закрывайте окно)...
     cd %REPO_DIR%
+    call :build_identity
     docker compose -f docker-compose.yml build >> ..\%LOG% 2>&1
     if errorlevel 1 (
         echo ОШИБКА: сборка образов не удалась. Подробности в launch.log.
@@ -85,12 +86,13 @@ if not exist "%REPO_DIR%\" (
 if %JUST_BUILT%==0 (
     echo Проверяю обновления...
     cd %REPO_DIR%
-    git pull --rebase origin main >> ..\%LOG% 2>&1
+    git pull --ff-only origin main >> ..\%LOG% 2>&1
     if errorlevel 1 (
         echo ПРЕДУПРЕЖДЕНИЕ: не удалось проверить обновления. Запускаю текущую версию.
         echo WARNING: git pull failed >> ..\%LOG%
     ) else (
         echo Пересобираю образы...
+        call :build_identity
         docker compose -f docker-compose.yml build >> ..\%LOG% 2>&1
         if errorlevel 1 (
             echo ОШИБКА: пересборка не удалась. Подробности в launch.log.
@@ -120,17 +122,18 @@ set /a attempts=0
 :wait_api
 set /a attempts+=1
 if %attempts% gtr 90 (
-    echo ПРЕДУПРЕЖДЕНИЕ: API долго стартует. Откройте браузер вручную: %URL%
-    goto open_browser
+    echo ОШИБКА: готовность API и хранилища не подтверждена. Проверьте launch.log.
+    pause
+    exit /b 1
 )
-curl -fs %URL%/health >nul 2>&1
+curl --connect-timeout 2 --max-time 15 -fs %URL%/health/ready >nul 2>&1
 if errorlevel 1 (
     timeout /t 2 /nobreak >nul
     goto wait_api
 )
 
 :open_browser
-echo Готово! Открываю дашборд...
+echo API и хранилище доступны. Фоновые обработчики этой проверкой не проверены.
 start "" "%URL%"
 
 echo.
@@ -139,3 +142,12 @@ echo Для остановки закройте Docker Desktop или выпол
 echo   cd %REPO_DIR% ^& docker compose -f docker-compose.yml down
 echo.
 pause
+exit /b 0
+
+:build_identity
+for /f %%G in ('git rev-parse HEAD') do set GIT_COMMIT=%%G
+set /p APP_VERSION=<VERSION
+for /f %%D in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')"') do set BUILD_DATE=%%D
+set SOURCE_STATE=clean
+for /f %%S in ('git status --porcelain --untracked-files^=normal') do set SOURCE_STATE=dirty
+exit /b 0

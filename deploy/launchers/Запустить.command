@@ -8,12 +8,22 @@ cd "$(dirname "$0")" || exit 1
 
 REPO_URL="https://github.com/ArtemIvanchenko/Printers-companion.git"
 REPO_DIR="./printers-companion"
-COMPOSE="docker compose -f docker-compose.yml"
+COMPOSE=(docker compose -f docker-compose.yml)
 URL="http://localhost:8000"
-LOG="./launch.log"
+LOG="$(pwd)/launch.log"
 
 say() { printf "\n>>> %s\n" "$1" | tee -a "$LOG"; }
 fail() { say "ОШИБКА: $1"; echo ""; read -r -p "Нажмите Enter, чтобы закрыть…"; exit 1; }
+
+set_build_identity() {
+  # Set before build, then preserve the same identity through compose up.
+  APP_VERSION=$(tr -d '[:space:]' < "$REPO_DIR/VERSION") || return 1
+  GIT_COMMIT=$(git -C "$REPO_DIR" rev-parse HEAD) || return 1
+  BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  SOURCE_STATE=clean
+  [ -z "$(git -C "$REPO_DIR" status --porcelain --untracked-files=normal)" ] || SOURCE_STATE=dirty
+  export APP_VERSION GIT_COMMIT BUILD_DATE SOURCE_STATE
+}
 
 echo "=== $(date) ===" >> "$LOG"
 
@@ -68,7 +78,8 @@ if [ ! -d "$REPO_DIR" ]; then
   mkdir -p "$REPO_DIR/raw_logs"
 
   say "Собираю образы (это займёт 15–30 минут, в зависимости от скорости интернета)…"
-  (cd "$REPO_DIR" && $COMPOSE build >>"$LOG" 2>&1) \
+  set_build_identity || fail "Не удалось определить версию исходников."
+  (cd "$REPO_DIR" && "${COMPOSE[@]}" build >>"$LOG" 2>&1) \
     || fail "Сборка образов не удалась. Подробности в файле launch.log."
 fi
 
@@ -78,28 +89,33 @@ fi
 # иконки — убрано намеренно, не возвращать.
 if [ "$JUST_BUILT" = "0" ]; then
   say "Проверяю обновления…"
-  (cd "$REPO_DIR" && git pull --rebase origin main >>"$LOG" 2>&1) \
+  (cd "$REPO_DIR" && git pull --ff-only origin main >>"$LOG" 2>&1) \
     || say "Предупреждение: не удалось проверить обновления (нет сети?). Запускаю текущую версию."
-  (cd "$REPO_DIR" && $COMPOSE build >>"$LOG" 2>&1) \
+  set_build_identity || fail "Не удалось определить версию исходников."
+  (cd "$REPO_DIR" && "${COMPOSE[@]}" build >>"$LOG" 2>&1) \
     || fail "Сборка после обновления не удалась. Подробности в файле launch.log."
 fi
 
 # 6. Запустить систему
 say "Запускаю систему…"
-GIT_COMMIT=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-(cd "$REPO_DIR" && GIT_COMMIT="$GIT_COMMIT" $COMPOSE up -d >>"$LOG" 2>&1) \
+(cd "$REPO_DIR" && "${COMPOSE[@]}" up -d >>"$LOG" 2>&1) \
   || fail "Не удалось запустить. Подробности в файле launch.log."
 
 # 7. Дождаться API
 say "Жду готовности (обычно 1–2 минуты)…"
-for i in $(seq 1 90); do
-  curl -fs "$URL/health" >/dev/null 2>&1 && break
+READY_DEADLINE=$((SECONDS + 180))
+while [ "$SECONDS" -lt "$READY_DEADLINE" ]; do
+  curl --connect-timeout 2 --max-time 15 -fs "$URL/health/ready" >/dev/null 2>&1 && break
   sleep 2
 done
-curl -fs "$URL/health" >/dev/null 2>&1 || say "Предупреждение: система долго стартует — попробуйте открыть браузер вручную: $URL"
+curl --connect-timeout 2 --max-time 15 -fs "$URL/health/ready" >/dev/null 2>&1 \
+  || fail "API или хранилище не готовы. Проверьте launch.log; готовность не подтверждена."
+RUNNING_COMMIT=$(cd "$REPO_DIR" && "${COMPOSE[@]}" exec -T api printenv GIT_COMMIT) \
+  || fail "Не удалось проверить версию запущенного API."
+[ "$RUNNING_COMMIT" = "$GIT_COMMIT" ] || fail "Запущенный API не соответствует собранной версии. Проверьте launch.log."
 
 # 8. Открыть дашборд
-say "Готово! Открываю дашборд: $URL"
+say "API и хранилище доступны. Это не проверка фоновых обработчиков. Открываю: $URL"
 open "$URL" 2>/dev/null
 
 echo ""

@@ -302,6 +302,7 @@ def calculate_prediction_snapshot(
     )
 
     from analytics.log_insights.geometry import scan_reference
+    from analytics.prediction.scan_scope import scan_scope
     from core.versioning.provenance import stable_hash
 
     snapshot: dict = {
@@ -363,6 +364,7 @@ def calculate_prediction_snapshot(
         ),
         "correction_factor": result.get("correction_factor", 1.0),
         "scan_source": result.get("scan_source", "physics"),
+        "scan_calibration_scope": scan_scope(params, material, params.get("layer_thickness_mm")),
         "scan_timing_reference": scan_reference(
             params,
             material,

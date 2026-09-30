@@ -74,6 +74,12 @@ def _labelled_sessions(db: Session) -> list[dict[str, Any]]:
         group = ((row.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
         if not group:
             continue
+        snapshot = group.get("analysis_snapshot") or {}
+        if (snapshot.get("schema_version") != 1
+                or (snapshot.get("provenance") or {}).get("analysis_version") != ANALYSIS_VERSION):
+            # Old features came from chart samples/different time semantics.
+            # They remain visible, but need reanalysis before new training.
+            continue
         result.append({
             "session_id": row.session_id,
             "start_ts": row.start_ts.isoformat() if row.start_ts else None,
@@ -98,7 +104,8 @@ def training_fingerprint(rows: list[dict[str, Any]]) -> str:
 
 
 def feature_schema_hash(model: dict[str, Any]) -> str:
-    return stable_hash({"features": model.get("features", []), "schema": "defect-risk-v1"})
+    return stable_hash({"features": model.get("features", []), "schema": "defect-risk-v2",
+                        "analysis_version": ANALYSIS_VERSION})
 
 
 def enqueue_retraining(
@@ -162,7 +169,7 @@ def enqueue_retraining_for_session(db: Session, session_id: str) -> dict[str, An
 def active_model(db: Session) -> dict[str, Any] | None:
     """Return the approved artifact, enriched with visible provenance."""
     row = ModelRegistryRepository(db).get_active(MODEL_NAME, include_artifact=True)
-    if row is None:
+    if row is None or row.get("analysis_version") != ANALYSIS_VERSION:
         return None
     artifact = dict(row.get("artifact") or {})
     artifact.update({
@@ -324,7 +331,13 @@ def calculate_retraining(prepared: dict[str, Any], *, owner_node_id: str) -> dic
     rows = list(prepared.get("rows") or [])
     shadow = prepared.get("shadow")
     active = prepared.get("active")
-    evaluation = _shadow_evaluation(rows, shadow, active) if shadow else None
+    if active and active.get("analysis_version") != ANALYSIS_VERSION:
+        active = None
+    if shadow and shadow.get("analysis_version", ANALYSIS_VERSION) != ANALYSIS_VERSION:
+        evaluation = {"decision": "reject", "reason": "Версия аналитических признаков изменилась",
+                      "metrics": {"feature_version_compatible": False}}
+    else:
+        evaluation = _shadow_evaluation(rows, shadow, active) if shadow else None
 
     # Keep the current candidate until future validation decides it. Once it is
     # promoted/rejected, train the next candidate on all currently known labels.

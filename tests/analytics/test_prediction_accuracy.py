@@ -419,11 +419,18 @@ class TestMachineTimeActuals:
         assert row["used_for_calibration"] is False
         assert row["excluded_reason"] == "machine_time_unavailable"
 
-    def test_missing_expected_layers_still_requires_a_floor(self, db, tmp_path):
-        # snapshot without layer_count -> expected_layers is None -> coverage
-        # can't be checked against anything, so a tiny log must not pass as
-        # "the whole print" just because it exists.
-        self._pair(db, tmp_path, "pr_nolayers", log_layers=5, snapshot_layers=None,
+    def test_ninety_nine_percent_is_not_a_complete_calibration_target(self, db, tmp_path):
+        self._pair(db, tmp_path, "pr_almost", log_layers=990, snapshot_layers=1000, span_hours=12.0)
+        db.flush()
+        row = prediction_accuracy(db)["pairs"][0]
+        assert row["actual_hours"] is None
+        assert row["error_pct"] is None
+        assert row["used_for_calibration"] is False
+
+    @pytest.mark.parametrize("log_layers", [5, 1000])
+    def test_unknown_expected_layers_never_prove_completeness(self, db, tmp_path, log_layers):
+        # Even a long log cannot prove completeness without an independent N.
+        self._pair(db, tmp_path, "pr_nolayers", log_layers=log_layers, snapshot_layers=None,
                    span_hours=6.0)
         db.flush()
 

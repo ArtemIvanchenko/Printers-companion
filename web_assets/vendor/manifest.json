@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "retrieved_at": "2026-09-23",
+  "files": [
+    {
+      "file": "chart-4.4.0/chart.umd.js",
+      "url": "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js",
+      "sha256": "321e3a3fa98da4aaa957d10be57cbb514de0989eed8f9d726b5d05902cd01904"
+    },
+    {
+      "file": "chart-4.4.0/LICENSE.md",
+      "url": "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/LICENSE.md",
+      "sha256": "5a0877ad6d818529be4f33009d0942cdf7e2ed7656156f4aba7308459a546030"
+    },
+    {
+      "file": "three-0.128.0/three.min.js",
+      "url": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js",
+      "sha256": "9274bbcec8d96168626c732b5d31c775aa8cfb7eaa0599bec0c175908a2c1ce2"
+    },
+    {
+      "file": "three-0.128.0/STLLoader.js",
+      "url": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js",
+      "sha256": "c392b93d1331e64082cbd76deb850fe5de11385472a3f4c5b7fe82ba216cb49e"
+    },
+    {
+      "file": "three-0.128.0/OrbitControls.js",
+      "url": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js",
+      "sha256": "02bb4ade710f3e607329e37a21f098bc3ac70eb6e33daf8a65e79f4db785e7b2"
+    },
+    {
+      "file": "three-0.128.0/LICENSE",
+      "url": "https://cdn.jsdelivr.net/npm/three@0.128.0/LICENSE",
+      "sha256": "7dddf7c5b8fd10ee654db8857d75d104b5557889aa5a91fc4ca545ea7c07062f"
+    },
+    {
+      "file": "fonts/caprasimo-v6-latin-ext.woff2",
+      "url": "https://fonts.gstatic.com/s/caprasimo/v6/esDT31JQOPuXIUGBp72UnJ8DKpE.woff2",
+      "sha256": "11b01b946c72750b01287b357b02c67691677397fdf00fe026f89a62af90938a"
+    },
+    {
+      "file": "fonts/caprasimo-v6-latin.woff2",
+      "url": "https://fonts.gstatic.com/s/caprasimo/v6/esDT31JQOPuXIUGBp72Ukp8D.woff2",
+      "sha256": "b1969861df075a84958e7085a04de23f57a2fb6872be63d15dfaad0963c181e5"
+    },
+    {
+      "file": "fonts/figtree-v9-latin-ext.woff2",
+      "url": "https://fonts.gstatic.com/s/figtree/v9/_Xms-HUzqDCFdgfMm4q9DbZs.woff2",
+      "sha256": "bf7828e2c258cffcfa50a048ee388a36b95bc16b452e8d36fa797635dbe15965"
+    },
+    {
+      "file": "fonts/figtree-v9-latin.woff2",
+      "url": "https://fonts.gstatic.com/s/figtree/v9/_Xms-HUzqDCFdgfMm4S9DQ.woff2",
+      "sha256": "4ba7d3d096695818fe0686be4f1e82c6b05134e18a22260336130335027462dd"
+    },
+    {
+      "file": "fonts/Caprasimo-OFL.txt",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/caprasimo/OFL.txt",
+      "sha256": "755d165efdbad1ad4a7840aa1f2484b0111627993e162bdcfb25fb2c277db955"
+    },
+    {
+      "file": "fonts/Figtree-OFL.txt",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/figtree/OFL.txt",
+      "sha256": "140d37233e7f3ce7313798befa9600893bcceaf41a55fa0fa5ad52f7f657a268"
+    }
+  ]
+}

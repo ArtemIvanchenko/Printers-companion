@@ -98,9 +98,9 @@ def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tup
     Both per-print overrides exist because this shop changes them per job while
     the machine holds one global value:
 
-    * ``layer_thickness_mm`` also selects which fitted scan model applies —
-      those are keyed "material@thickness" and do not transfer across
-      thicknesses.
+    * ``layer_thickness_mm`` is part of the captured scan scope, together with
+      the physical machine and other configured scan parameters. Fitted models
+      must not transfer across incompatible scopes.
     * ``hatch_distance_mm`` rescales scan length approximately as 1/hatch.
       Its value must come from a known job strategy or operator configuration;
       unlabelled Monitor100 positions do not establish its meaning or units.
@@ -116,6 +116,7 @@ def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tup
     }
     preset = repo.get_active_preset_for_material(record["material"])
     if preset:
+        params["active_preset_id"] = str(preset["preset_id"]) if preset.get("preset_id") else None
         params.update(
             {k: v for k, v in preset.items() if k in _PRESET_SCANNING_KEYS and v is not None}
         )
@@ -131,6 +132,12 @@ def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tup
             params[field] = record[field]
             sources[field] = {"source": "print_record", "value": record[field]}
     origin = (record.get("metadata_json") or {}).get("build_origin_z_mm")
+    # Optional configured identities; absent values remain unknown, not inferred
+    # from a Monitor100 positional field or a similarly named file.
+    for key in ("process_strategy_id", "process_strategy_version", "slicer_version", "firmware_version"):
+        value = (record.get("metadata_json") or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            params[key] = value
     if isinstance(origin, (int, float)) and not isinstance(origin, bool):
         params["build_origin_z_mm"] = float(origin)
     return params, sources

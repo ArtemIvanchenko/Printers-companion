@@ -6,6 +6,12 @@
 #   cd Printers-companion
 #   docker compose up -d
 
+x-build-identity: &build-identity
+  APP_VERSION: ${APP_VERSION:-dev}
+  GIT_COMMIT: ${GIT_COMMIT:-unknown}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+  SOURCE_STATE: ${SOURCE_STATE:-unknown}
+
 x-app-env: &app-env
   env_file:
     - path: .env
@@ -86,8 +92,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      args: *build-identity
     # One worker is deliberate: every additional process owns another DB pool
     # and cache. Operator deployments point several PCs at a low-power NAS, so
     # horizontal request capacity belongs on those PCs, not in extra processes.
@@ -137,7 +142,7 @@ services:
           cpus: "4.0"
           memory: 4g
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=12)"]
       interval: 30s
       timeout: 15s
       retries: 5
@@ -149,8 +154,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      args: *build-identity
     command: python -m worker.tasks
     volumes:
       - type: bind
@@ -189,8 +193,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      args: *build-identity
     command: python -m worker.nas_sync
     volumes:
       - type: volume
@@ -219,8 +222,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      args: *build-identity
     command: python -m worker.estimate_tasks
     volumes:
       - type: volume
@@ -252,8 +254,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.watcher
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      args: *build-identity
     command: python -m worker.watcher
     volumes:
       - type: bind
@@ -284,8 +285,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.scheduler
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      args: *build-identity
     command: python -m scheduler.jobs
     depends_on:
       postgres:
@@ -350,7 +350,7 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    image: quay.io/minio/minio:RELEASE.2024-05-10T01-41-38Z
     command: server /data --console-address ":9001"
     env_file:
       - path: .env
@@ -381,6 +381,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mcp
+      args: *build-identity
     ports:
       - "8100:8100"
     depends_on:

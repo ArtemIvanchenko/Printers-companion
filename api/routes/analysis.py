@@ -188,12 +188,15 @@ def refresh_patterns() -> dict[str, Any]:
     return get_patterns(force=True)
 
 
-def _load_session_groups(db) -> list[dict[str, Any]]:
+def _load_session_groups(db, *, session_id: str | None = None) -> list[dict[str, Any]]:
     """Full stored ``group`` payload per session (features+health+signal_stats+
     data_quality), newest first — the input shape defect-risk expects."""
     from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS, session_classification
 
-    rows = db.execute(select(BuildSession).order_by(BuildSession.start_ts.desc())).scalars().all()
+    statement = select(BuildSession).order_by(BuildSession.start_ts.desc())
+    if session_id is not None:
+        statement = statement.where(BuildSession.session_id == session_id)
+    rows = db.execute(statement).scalars().all()
     out = []
     for row in rows:
         if session_classification(row) not in PRINT_CLASSIFICATIONS:
@@ -209,17 +212,22 @@ def _load_session_groups(db) -> list[dict[str, Any]]:
     return out
 
 
-def _load_quality_labels(db) -> dict[str, int]:
+def _load_quality_labels(db, *, session_id: str | None = None) -> dict[str, int]:
     """{session_id: 1 defect / 0 good} from operator-entered QualityOutcome rows."""
     from analytics.prediction.defect_risk import outcome_to_label
     from domain.models.quality import QualityOutcome
     from domain.models.prints import PrintRecord
     labels: dict[str, int] = {}
-    rows = db.execute(
+    statement = (
         select(QualityOutcome, PrintRecord.session_id)
         .outerjoin(PrintRecord, PrintRecord.record_id == QualityOutcome.print_record_id)
         .order_by(QualityOutcome.timestamp, QualityOutcome.outcome_id)
-    ).all()
+    )
+    if session_id is not None:
+        from sqlalchemy import or_, and_
+        statement = statement.where(or_(QualityOutcome.session_id == session_id,
+                                         and_(QualityOutcome.session_id.is_(None), PrintRecord.session_id == session_id)))
+    rows = db.execute(statement).all()
     for row, card_session_id in rows:
         if not row.is_final:
             continue
@@ -305,8 +313,8 @@ def defect_risk_all() -> dict[str, Any]:
 def defect_risk_one(session_id: str) -> dict[str, Any]:
     """Defect-risk for a single session with explanation."""
     with session_scope() as db:
-        sessions = _load_session_groups(db)
-        labels = _load_quality_labels(db)
+        sessions = _load_session_groups(db, session_id=session_id)
+        labels = _load_quality_labels(db, session_id=session_id)
         from analytics.prediction.retraining import active_model
 
         model = active_model(db)

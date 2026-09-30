@@ -308,7 +308,8 @@ def test_report_json_is_bounded():
 def test_actual_nnls_fit_uses_detached_geometry_and_keeps_provenance(history, monkeypatch):
     from sqlalchemy import delete
     from analytics.prediction import scan_calibration
-    from tests.analytics.test_scan_calibration import _series, _snapshot_geometry, _burn_seconds, N_LAYERS
+    from tests.analytics.test_scan_calibration import _series, _snapshot_geometry, _burn_seconds, N_LAYERS, SCAN_PARAMS
+    from analytics.prediction.scan_scope import scan_scope
 
     with session_scope() as db:
         db.execute(delete(LayerSnapshot))
@@ -316,9 +317,12 @@ def test_actual_nnls_fit_uses_detached_geometry_and_keeps_provenance(history, mo
             series = _series(1 + i * 0.4)
             row = db.get(PrintRecord, f"cal-record-{i}")
             metadata = dict(row.metadata_json)
+            db.get(BuildSession, row.session_id).printer_id = SCAN_PARAMS["printer_id"]
             metadata["prediction"] = {**metadata["prediction"],
                 "scan_geometry": _snapshot_geometry(series), "layer_thickness_mm": 0.1,
-                "laser_count": 2, "layer_count": N_LAYERS,
+                "laser_count": SCAN_PARAMS["laser_count"], "hatch_distance_mm": 0.12,
+                "scan_calibration_scope": scan_scope(SCAN_PARAMS, "steel", 0.1),
+                "layer_count": N_LAYERS,
                 "input_revision": row.revision + 1, "geometry_fingerprint": f"geometry-{i}"}
             row.metadata_json = metadata
             db.add_all([LayerSnapshot(session_id=row.session_id, layer=layer,

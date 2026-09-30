@@ -11,6 +11,7 @@ from storage.repositories.runtime import RuntimeRepository
 
 def run_daily_review() -> dict:
     return {
+        "status": "not_implemented",
         "processed_sessions": [],
         "new_real_prints": [],
         "service_sessions": [],
@@ -42,7 +43,10 @@ def _load_session_features() -> list[dict[str, object]]:
                 for session_id, payload in repo.list_session_payloads()
             ]
     except Exception:
-        return []
+        # A failed read is not a successful review of an empty archive.
+        import logging
+        logging.getLogger(__name__).exception("Historical review could not read its inputs")
+        raise
 
 
 def main() -> None:

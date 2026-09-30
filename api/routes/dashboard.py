@@ -1,491 +1,130 @@
-"""HTML Dashboard with all analytics charts."""
+"""A SQL-free dashboard shell and bounded, on-demand historical panels."""
 import html
 import json
-import re
-from collections import Counter
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+import re
+from typing import Literal
 
-from domain.models.entities import OperatorEvent, QualityOutcome
-from domain.models.sessions import BuildSession
-from profiles.signal_catalog import signal_display_name, signal_labels_ru
-from storage.db.session import session_scope
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse
+
+from domain.services.dashboard_reads import read_history, read_telemetry_page
+from profiles.signal_catalog import signal_labels_ru
 
 router = APIRouter(tags=["dashboard"])
+_ROOT = Path(__file__).resolve().parents[2]
+_TEMPLATE_PATH = _ROOT / "web_templates" / "dashboard.html"
+_ASSET_ROOT = _ROOT / "web_assets"
 
 
-@router.get("/assets/log-insights.js", include_in_schema=False)
-def log_insights_script():
-    return FileResponse(Path(__file__).resolve().parents[2] / "web_assets" / "log-insights.js",
-                        media_type="text/javascript")
-
-
-@router.get('/assets/{asset_name}', include_in_schema=False)
+@router.get("/assets/{asset_name:path}", include_in_schema=False)
 def catalogue_script(asset_name: str):
-    if asset_name not in {'catalog-pager.js', 'folder-import.js'}:
-        raise HTTPException(404, 'Asset not found')
-    return FileResponse(Path(__file__).resolve().parents[2] / 'web_assets' / asset_name,
-                        media_type='text/javascript')
+    path = (_ASSET_ROOT / asset_name).resolve()
+    if not path.is_relative_to(_ASSET_ROOT.resolve()) or not path.is_file():
+        raise HTTPException(404, "Asset not found")
+    media_type = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2"}.get(path.suffix)
+    if media_type is None:
+        raise HTTPException(404, "Asset not found")
+    return FileResponse(path, media_type=media_type)
 
 
 def esc(value) -> str:
-    """HTML-escape a value before interpolating it into dashboard markup.
-
-    User-supplied fields (defect types, session ids, notes) flow into the
-    template, so every interpolated value must be escaped to prevent XSS.
-    """
     return html.escape(str(value), quote=True)
 
 
-_dumps = json.dumps  # raw alias, so the hardened wrapper below isn't self-rewritten
-
-
 def _js_json(obj) -> str:
-    """json.dumps hardened for embedding inside a <script> block.
+    return json.dumps(obj).replace("</", "<\\/")
 
-    Plain json.dumps does not escape '/', so a user string containing
-    '</script>' would close the tag and allow script injection. Escaping '</'
-    keeps the output valid JSON while making breakout impossible.
-    """
-    return _dumps(obj).replace("</", "<\\/")
-
-
-def get_sessions_paginated(db: Session, skip: int = 0, limit: int = 100):
-    """Get sessions with pagination to avoid loading all rows into memory."""
-    stmt = select(BuildSession).order_by(BuildSession.start_ts.desc()).offset(skip).limit(limit)
-    sessions = db.execute(stmt).scalars().all()
-    
-    result = []
-    for s in sessions:
-        ctx = s.context or {}
-        rp = ctx.get("runtime_payload", {}) or {}
-        group = rp.get("group", {}) or {}
-        features = group.get("features", {})
-        
-        result.append({
-            'id': s.session_id,
-            'date': s.session_id.replace("session_", "") if s.session_id else "-",
-            'type': group.get('classification', s.classification or '-'),
-            'confidence': group.get('confidence', 0),
-            'first_time': features.get('first_time', '-'),
-            'last_time': features.get('last_time', '-'),
-            'duration_min': features.get('duration_min', 0),
-            'total_lines': features.get('total_lines', 0),
-            'total_events': features.get('total_events', 0),
-            'layers': features.get('layers', 0),
-            'burn_events': features.get('burn_events', 0),
-            'file_count': features.get('file_count', 0),
-            'pause_count': features.get('pause_count', 0),
-            'material': features.get('material', 'unknown'),
-            'start_ts': s.start_ts.isoformat() if s.start_ts else None,
-            'data_quality_score': (group.get('data_quality') or {}).get('score'),
-            'data_quality_grade': (group.get('data_quality') or {}).get('grade'),
-            'data_quality_issues': len((group.get('data_quality') or {}).get('issues', [])),
-        })
-    return result
-
-
-
-def _coerce_float(value) -> float | None:
-    try:
-        return float(value) if value else None
-    except (ValueError, TypeError):
-        return None
-
-
-def _get_consumption_events(
-    db: Session, event_type: str, label_key: str, label_attr: str,
-    skip: int = 0, limit: int = 1000,
-):
-    """Shared loader for gas/powder consumption events (they differ only by the
-    event_type filter and the name of one provenance field)."""
-    stmt = (
-        select(OperatorEvent)
-        .where(OperatorEvent.event_type == event_type)
-        .order_by(OperatorEvent.timestamp.asc())
-        .offset(skip)
-        .limit(limit)
-    )
-    return [
-        {
-            'timestamp': e.timestamp.isoformat() if e.timestamp else None,
-            'value': _coerce_float(e.value),
-            label_key: getattr(e, label_attr),
-            'session_id': e.session_id,
-        }
-        for e in db.execute(stmt).scalars().all()
-    ]
-
-
-def get_gas_events_paginated(db: Session, skip: int = 0, limit: int = 1000):
-    """Get gas consumption events with pagination."""
-    return _get_consumption_events(
-        db, "gas_consumption_recorded", "cylinder", "gas_cylinder_id", skip, limit
-    )
-
-
-def get_powder_events_paginated(db: Session, skip: int = 0, limit: int = 1000):
-    """Get powder consumption events with pagination."""
-    return _get_consumption_events(
-        db, "powder_consumption_recorded", "batch", "powder_batch", skip, limit
-    )
-
-
-def get_quality_paginated(db: Session, skip: int = 0, limit: int = 1000):
-    """Get quality outcomes with pagination."""
-    stmt = select(QualityOutcome).order_by(QualityOutcome.timestamp.asc()).offset(skip).limit(limit)
-    outcomes = db.execute(stmt).scalars().all()
-    result = []
-    for q in outcomes:
-        result.append({
-            'timestamp': q.timestamp.isoformat() if q.timestamp else None,
-            'result': q.result,
-            'defect_type': q.defect_type,
-            'session_id': q.session_id,
-        })
-    return result
-
-
-
-_MONTHS_RU = [
-    "января", "февраля", "марта", "апреля", "мая", "июня",
-    "июля", "августа", "сентября", "октября", "ноября", "декабря",
-]
-
-
-def get_latest_print_telemetry(db: Session):
-    """Return (label, telemetry, health, start_ts) for the most data-rich REAL_PRINT session."""
-    stmt = select(BuildSession).order_by(BuildSession.start_ts.desc()).limit(500)
-    best_label, best_tel, best_health, best_start_ts, best_score = None, {}, {}, None, -1
-    for s in db.execute(stmt).scalars().all():
-        group = ((s.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
-        if group.get("classification") != "REAL_PRINT":
-            continue
-        tel = group.get("telemetry") or {}
-        if not tel.get("time"):
-            continue
-        score = len(tel.get("time", []))
-        if score > best_score:
-            best_label = s.session_id.replace("session_", "")
-            best_tel = tel
-            best_health = group.get("health") or {}
-            best_start_ts = s.start_ts
-            best_score = score
-    return best_label, best_tel, best_health, best_start_ts
-
-
-# ---- Template rendering ----
-
-_TEMPLATE_PATH = Path(__file__).resolve().parent.parent.parent / "web_templates" / "dashboard.html"
 
 def _load_template() -> str:
     return _TEMPLATE_PATH.read_text(encoding="utf-8")
 
+
 def _render_template(context: dict) -> str:
-    html = _load_template()
-    def _replacer(m):
-        key = m.group(1)
-        val = context.get(key)
-        if val is None:
-            return m.group(0)
-        return str(val)
-    return re.sub(r'\{!(\w+)!\}', _replacer, html)
+    def replace(match):
+        if match.group(1) not in context:
+            raise ValueError(f"Missing dashboard context: {match.group(1)}")
+        return str(context[match.group(1)])
+    return re.sub(r"\{!(\w+)!\}", replace, _load_template())
 
-
-# ---- Table row builders (split out of the template) ----
 
 def _quality_table_rows(quality: list) -> str:
     if not quality:
-        return '<tr><td colspan="4" style="text-align:center;color:#6b7280;">Нет данных о качестве</td></tr>'
+        return '<tr><td colspan="4">Нет данных о качестве</td></tr>'
     return "".join(
-        f'''<tr>
-                            <td>{esc(q.get('timestamp', '')[:10] if q.get('timestamp') else '-')}</td>
-                            <td><span class="type-badge {'type-real' if q.get('result')=='accepted' else 'type-unknown'}">{esc(q.get('result', '-'))}</span></td>
-                            <td>{esc(q.get('defect_type', '-') or '-')}</td>
-                            <td>{esc(q.get('session_id', '-')[:20])}</td>
-                        </tr>'''
-        for q in quality[:20]
+        "<tr>" + "".join(f"<td>{esc(value)}</td>" for value in (
+            str(q.get("timestamp") or "—")[:10],
+            {"accepted": "Годная", "rejected": "Брак", "unknown": "Неизвестно"}.get(q.get("result"), q.get("result") or "—"),
+            q.get("defect_type") or "—", q.get("session_id") or "—",
+        )) + "</tr>" for q in quality
     )
-
-def _data_quality_badge(score, issues: int) -> str:
-    """Colored data-reliability badge: green ≥85, amber ≥60, red below."""
-    if score is None:
-        return '<span style="color:#4a5568;">—</span>'
-    color = "#10b981" if score >= 85 else "#f59e0b" if score >= 60 else "#ef4444"
-    title = f"{issues} проблем(ы) данных" if issues else "проблем не найдено"
-    return (f'<span title="{title}" style="color:{color};font-weight:700;">{score}</span>'
-            f'<span style="color:#4a5568;font-size:11px;"> {"⚠"+str(issues) if issues else ""}</span>')
 
 
 def _session_table_rows(sessions: list) -> str:
+    if not sessions:
+        return '<tr><td colspan="8">Нет данных о сессиях</td></tr>'
     return "".join(
-        f'''<tr>
-                            <td>{esc(s['id'][:25])}...</td>
-                            <td>{esc(s['date'])}</td>
-                            <td><span class="type-badge {'type-real' if s['type']=='REAL_PRINT' else 'type-unknown'}">{esc(s['type'])}</span></td>
-                            <td>{esc(s['first_time'])} - {esc(s['last_time'])}</td>
-                            <td>{s['duration_min']} мин</td>
-                            <td>{_data_quality_badge(s.get('data_quality_score'), s.get('data_quality_issues', 0))}</td>
-                            <td>{s['total_lines']:,}</td>
-                            <td>{s['pause_count']}</td>
-                        </tr>'''
-        for s in sessions
+        "<tr>" + "".join(f"<td>{esc(value if value is not None else '—')}</td>" for value in (
+            s["id"], s["date"], s["type"],
+            f"{s.get('first_time') or '—'} — {s.get('last_time') or '—'}",
+            s.get("duration_min"), s.get("data_quality_score"),
+            s.get("total_lines"), s.get("pause_count"),
+        )) + "</tr>" for s in sessions
     )
 
-def _gas_table_rows(gas_events: list) -> str:
-    if not gas_events:
-        return '<tr><td colspan="3" style="text-align:center;color:#6b7280;">Нет данных о расходе</td></tr>'
+
+def _gas_table_rows(events: list) -> str:
+    if not events:
+        return '<tr><td colspan="3">Нет данных о расходе</td></tr>'
     return "".join(
-        f'''<tr>
-                            <td>{esc(e.get('timestamp', '')[:10] if e.get('timestamp') else '-')}</td>
-                            <td>{esc(e.get('value', '-'))}</td>
-                            <td>-</td>
-                        </tr>'''
-        for e in gas_events[:20]
+        "<tr>" + "".join(f"<td>{esc(value if value is not None else '—')}</td>" for value in (
+            str(e.get("timestamp") or "—")[:10],
+            e.get("value") if e.get("event_type") != "powder_consumption_recorded" else None,
+            e.get("value") if e.get("event_type") == "powder_consumption_recorded" else None,
+        )) + "</tr>" for e in events
     )
+
+
+@router.get("/dashboard/history/{panel}")
+def dashboard_history(
+    panel: Literal["sessions", "timeline", "quality", "consumption"],
+    skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+) -> dict:
+    data = read_history(panel, skip=skip, limit=limit)
+    # Rendering happens after the read-model releases its SQL connection.
+    renderer = {"sessions": _session_table_rows, "timeline": _session_table_rows,
+                "quality": _quality_table_rows, "consumption": _gas_table_rows}[panel]
+    return {**data, "table_rows": renderer(data["items"])}
 
 
 @router.get("/", response_class=HTMLResponse)
 def dashboard():
-    """Dashboard endpoint that loads limited data for rendering.
+    """Render the operator shell without consulting PostgreSQL or MinIO.
 
-    Intentionally a plain ``def``: the body is synchronous throughout (four
-    bounded queries, a scan of recent sessions' JSON payloads, and a template
-    read). Declared ``async`` it ran all of that on the event loop, so the
-    worker served nothing else while the main page rendered. As a sync handler
-    FastAPI dispatches it to the threadpool instead.
+    Cards load through their existing paginated API; historical panels request
+    their own compact read models only when the operator opens those panels.
     """
-    from profiles.m350.profile import get_profile as _get_profile
+    from profiles.m350.profile import get_profile
     from profiles.thresholds import load_thresholds
-    _profile = _get_profile()
-    _thresholds = load_thresholds(_profile)
-    machine_info = (
-        f"{_profile.model_family} &nbsp;·&nbsp; "
-        f"s/n {_profile.serial_number}" if _profile.serial_number else _profile.model_family
-    )
-
-    with session_scope() as db:
-        # Load a limited amount of data for dashboard display (e.g., last 500 sessions)
-        sessions = get_sessions_paginated(db, skip=0, limit=10_000)
-        gas_events = get_gas_events_paginated(db, skip=0, limit=10_000)
-        powder_events = get_powder_events_paginated(db, skip=0, limit=10_000)
-        quality = get_quality_paginated(db, skip=0, limit=10_000)
-        tel_label, telemetry, health, tel_start_ts = get_latest_print_telemetry(db)
-    
-    # Quality breakdowns remain inputs for the dedicated quality page.
-    quality_stats = Counter(q['result'] for q in quality)
-    defects = Counter(q['defect_type'] for q in quality if q.get('defect_type'))
-
-    # Duration per session
-    durations = [s['duration_min'] for s in sessions if s['type'] == 'REAL_PRINT']
-    dates_labels = [s['date'] for s in sessions if s['type'] == 'REAL_PRINT']
-
-    # Pauses
-    pauses = [s.get('pause_count', 0) for s in sessions]
-    
-    # Pre-compute JS-safe color arrays (avoids undefined-variable ReferenceError in browser).
-    pause_colors = _js_json(
-        ["#f59e0b" if p > 0 else "#60a5fa" for p in pauses]
-    )
-
-    # --- Process telemetry (decoded sensor series) for the latest real print ---
-    tel_time = _js_json(telemetry.get("time", []))
-    tel_oxygen = telemetry.get("oxygen", {})
-    tel_temps = telemetry.get("temperatures", {})
-    tel_humidity = telemetry.get("humidity", {})
-    tel_pressure = telemetry.get("pressure", {})
-    tel_burn = telemetry.get("layer_burn_times", [])
-    tel_burn_labels = _js_json([b["layer"] for b in tel_burn])
-    tel_burn_data = _js_json([b["duration_sec"] for b in tel_burn])
-    has_telemetry = bool(telemetry.get("time"))
-    if tel_label and tel_start_ts:
-        _d = tel_start_ts.day
-        _m = _MONTHS_RU[tel_start_ts.month - 1]
-        _y = tel_start_ts.year
-        _hm = tel_start_ts.strftime("%H:%M")
-        tel_subtitle = f"{_d} {_m} {_y} · {_hm}"
-    elif tel_label:
-        tel_subtitle = tel_label
-    else:
-        tel_subtitle = "нет данных"
-    tel_session_id = tel_label or ""
-
-    # User labels come from the profile catalog.  Raw controller codes remain
-    # the data keys, but are no longer duplicated as ad-hoc UI dictionaries.
-    _o2_colors = {"SO1": "#ef4444", "SO2": "#f59e0b"}
-    _temp_colors = {"ST3": "#60a5fa", "ST4": "#8b5cf6", "ST5": "#10b981"}
-
-    def _datasets(series, colors, fallback="#06b6d4"):
-        out = []
-        palette = ["#60a5fa", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"]
-        for i, (col, values) in enumerate(series.items()):
-            out.append({
-                "label": signal_display_name(col),
-                "data": values,
-                "borderColor": colors.get(col, palette[i % len(palette)]) if colors else fallback,
-                "backgroundColor": "transparent",
-                "borderWidth": 2,
-                "pointRadius": 0,
-                "tension": 0.3,
-            })
-        return out
-
-    # Alarm threshold lines — injected as a flat dashed dataset per chart.
-    # Values from M350 passport (САЦН.681749.002ПС) and TSF-400VAD sieve manual.
-    def _alarm_dataset(label: str, value: float, color: str = "#ef4444") -> dict:
-        return {
-            "label": label,
-            "data": [value] * max(len(telemetry.get("time", [])), 1),
-            "borderColor": color,
-            "borderWidth": 1.5,
-            "borderDash": [6, 4],
-            "pointRadius": 0,
-            "backgroundColor": "transparent",
-            "tension": 0,
-            "fill": False,
-        }
-
-    _o2_alarms = [_alarm_dataset(f"Предел O₂ {_thresholds.oxygen_alarm_high}%", _thresholds.oxygen_alarm_high, "#ef4444")]
-    _temp_alarms = [_alarm_dataset(f"Макс. платформа {_thresholds.temp_alarm_high:.0f}°C", _thresholds.temp_alarm_high, "#ef4444")]
-    _hum_alarms = [_alarm_dataset(f"Порог влажности {_thresholds.humidity_alarm_high:.0f}%", _thresholds.humidity_alarm_high, "#f59e0b")]
-    _press_alarms = [
-        _alarm_dataset(f"Макс. {_thresholds.pressure_alarm_high} бар", _thresholds.pressure_alarm_high, "#ef4444"),
-        _alarm_dataset(f"Норма {_thresholds.pressure_nominal} бар", _thresholds.pressure_nominal, "#10b981"),
-    ]
-
-    oxygen_datasets = _js_json(_datasets(tel_oxygen, _o2_colors) + _o2_alarms)
-    temp_datasets = _js_json(_datasets(tel_temps, _temp_colors) + _temp_alarms)
-    humidity_datasets = _js_json(_datasets(tel_humidity, {}, "#06b6d4") + _hum_alarms)
-    pressure_datasets = _js_json(_datasets(tel_pressure, {}, "#a78bfa") + _press_alarms)
-
-    # --- Alarm detection: check last N points of each series against thresholds ---
-    # Returns True if ANY of the tail values exceeds the alarm threshold.
-    _CHECK_TAIL = 10  # last 10 downsampled points (~last ~7% of session)
-
-    def _series_in_alarm(series: dict, alarm_high: float | None = None,
-                         alarm_low: float | None = None) -> bool:
-        for values in series.values():
-            tail = [v for v in values[-_CHECK_TAIL:] if isinstance(v, (int, float))]
-            if not tail:
-                continue
-            if alarm_high is not None and max(tail) > alarm_high:
-                return True
-            if alarm_low is not None and min(tail) < alarm_low:
-                return True
-        return False
-
-    alarm_o2   = _series_in_alarm(tel_oxygen,   alarm_high=_thresholds.oxygen_alarm_high)
-    alarm_temp = _series_in_alarm(tel_temps,     alarm_high=_thresholds.temp_alarm_high)
-    alarm_hum  = _series_in_alarm(tel_humidity,  alarm_high=_thresholds.humidity_alarm_high)
-    alarm_press = _series_in_alarm(tel_pressure, alarm_high=_thresholds.pressure_alarm_high, alarm_low=_thresholds.pressure_alarm_low)
-
-    # CSS class injected into chart-container divs
-    def _ac(flag: bool) -> str:
-        return " alarm-active" if flag else ""
-
-    def _ex(flag: bool) -> str:
-        return '<span class="alarm-badge">!</span>' if flag else ""
-
-    # --- Process-health panel (readiness score, anomalies, layer burn-time drift) ---
-    readiness = (health or {}).get("readiness") or {}
-    anomalies = (health or {}).get("anomalies") or []
-    burn_drift = (health or {}).get("burn_drift") or {}
-    score = readiness.get("score")
-    grade = readiness.get("grade", "unknown")
-    grade_color = {"good": "#10b981", "fair": "#f59e0b", "poor": "#ef4444"}.get(grade, "#6b7280")
-    trend = burn_drift.get("trend", "—")
-    trend_ru = {"rising": "↑ растёт", "falling": "↓ снижается", "stable": "→ стабильно",
-                "insufficient_data": "нет данных"}.get(trend, trend)
-    trend_color = {"rising": "#ef4444", "falling": "#10b981", "stable": "#60a5fa"}.get(trend, "#6b7280")
-    sev_color = {"high": "#ef4444", "medium": "#f59e0b", "low": "#60a5fa"}
-    if anomalies:
-        anomaly_rows = "".join(
-            f'<div style="padding:8px 12px;background:#2d3748;border-left:3px solid '
-            f'{sev_color.get(a.get("severity"), "#6b7280")};border-radius:6px;margin-bottom:6px;font-size:13px;">'
-            f'⚠ {a.get("detail", a.get("signal"))}</div>'
-            for a in anomalies[:12]
-        )
-    else:
-        anomaly_rows = '<div style="color:#10b981;font-size:13px;">✓ Аномалий процесса не обнаружено</div>'
-    score_txt = f"{score:.0f}" if isinstance(score, (int, float)) else "—"
-    health_panel = f"""
-            <div class="stats" style="margin-bottom:20px;">
-                <div class="stat-card">
-                    <div class="value" style="color:{grade_color};">{score_txt}</div>
-                    <div class="label">Готовность атмосферы (0–100)</div>
-                </div>
-                <div class="stat-card">
-                    <div class="value" style="color:{sev_color.get('high') if anomalies else '#10b981'};">{len(anomalies)}</div>
-                    <div class="label">Аномалий процесса</div>
-                </div>
-                <div class="stat-card">
-                    <div class="value" style="color:{trend_color};font-size:22px;">{trend_ru}</div>
-                    <div class="label">Тренд времени прожига</div>
-                </div>
-            </div>
-            <div class="section" style="margin-bottom:20px;">
-                <h2>⚠️ Аномалии процесса</h2>
-                <div style="margin-top:12px;">{anomaly_rows}</div>
-            </div>"""
-
-    # --- Template rendering ---
-    # Keys are named, not numbered. They used to be EXPR0…EXPR75 with gaps,
-    # which meant changing a chart began with working out which number fed it
-    # inside a 3000-line template — and left seven values (EXPR2, EXPR5,
-    # EXPR38…EXPR42) being computed on every page load after their placeholders
-    # had been removed from the markup. test_dashboard_template.py now fails if
-    # the two sides drift apart again.
-    session_dates = _js_json([s['date'] for s in sessions])
-    session_lines = _js_json([s['total_lines'] for s in sessions])
-    real_print_dates = _js_json(dates_labels)
-
+    profile = get_profile()
+    thresholds = load_thresholds(profile)
+    machine_info = esc(profile.model_family)
+    if profile.serial_number:
+        machine_info += " &nbsp;·&nbsp; s/n " + esc(profile.serial_number)
     ctx = {
         "machine_info": machine_info,
-        "vendor": _profile.vendor,
-        "telemetry_subtitle": tel_subtitle,
-        "telemetry_missing_notice": "" if has_telemetry else '<div class="section" style="text-align:center;color:#6b7280;">Нет данных телеметрии. Импортируйте логи реальной печати (burn/sensors).</div>',
-        "process_health_panel": health_panel if has_telemetry else "",
-        "o2_alarm_class": _ac(alarm_o2),
-        "o2_alarm_badge": _ex(alarm_o2),
-        "temp_alarm_class": _ac(alarm_temp),
-        "temp_alarm_badge": _ex(alarm_temp),
-        "humidity_alarm_class": _ac(alarm_hum),
-        "humidity_alarm_badge": _ex(alarm_hum),
-        "pressure_alarm_class": _ac(alarm_press),
-        "pressure_alarm_badge": _ex(alarm_press),
-        "session_count": len(sessions),
-        # Used by the timeline chart in the dedicated sessions view.
-        "real_print_date_labels": real_print_dates,
-        "real_print_duration_hours": _js_json([d / 60 for d in durations]),
-        # Shared by the line-count, pause and burn-event charts.
-        "session_date_labels": session_dates,
-        "session_line_counts": session_lines,
-        "session_pause_counts": _js_json(pauses),
-        "session_pause_colors": pause_colors,
-        "session_burn_event_counts": _js_json([s.get('burn_events', 0) for s in sessions]),
-        "quality_result_labels": _js_json(list(quality_stats.keys())),
-        "quality_result_counts": _js_json(list(quality_stats.values())),
-        "defect_type_labels": _js_json(list(defects.keys())),
-        "defect_type_counts": _js_json(list(defects.values())),
-        "gas_event_date_labels": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in gas_events[:15]]),
-        "gas_event_values": _js_json([e.get('value', 0) for e in gas_events[:15]]),
-        "powder_event_date_labels": _js_json([e.get('timestamp', '')[:10] if e.get('timestamp') else '-' for e in powder_events[:15]]),
-        "powder_event_values": _js_json([e.get('value', 0) for e in powder_events[:15]]),
-        "telemetry_time_labels": tel_time,
-        "oxygen_datasets": oxygen_datasets,
-        "temperature_datasets": temp_datasets,
-        "humidity_datasets": humidity_datasets,
-        "pressure_datasets": pressure_datasets,
-        "burn_time_layer_labels": tel_burn_labels,
-        "burn_time_seconds": tel_burn_data,
-        "quality_table_rows": _quality_table_rows(quality),
-        "session_table_rows": _session_table_rows(sessions),
-        "gas_table_rows": _gas_table_rows(gas_events),
-        "telemetry_session_id": _js_json(tel_session_id),
-        "signal_labels": _js_json(signal_labels_ru()),
+        "vendor": esc(profile.vendor),
+        "dashboard_bootstrap": _js_json({"signal_labels": signal_labels_ru(), "thresholds": {
+            "o2": thresholds.oxygen_alarm_high, "temp": thresholds.temp_alarm_high,
+            "hum": thresholds.humidity_alarm_high, "press_high": thresholds.pressure_alarm_high,
+            "press_low": thresholds.pressure_alarm_low,
+        }}),
     }
-
     return HTMLResponse(_render_template(ctx))
+
+
+@router.get("/dashboard/telemetry-sessions")
+def dashboard_telemetry_sessions(
+    skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+) -> dict:
+    return read_telemetry_page(skip=skip, limit=limit)

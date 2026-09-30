@@ -1,107 +1,34 @@
-import threading
-from collections import OrderedDict
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
-from api.pagination import LimitParam, PaginatedResponse, SkipParam
+from api.pagination import LimitParam, SkipParam
 from core.config.settings import get_settings
 from domain.services.compute_affinity import ComputeAffinityError
-from domain.services.ingestion import IngestionService
-from domain.services.session_grouping import group_files_into_sessions
-from domain.services.session_overview import build_group_overview
-from domain.services.operator_report import build_operator_report
-from profiles.m350.profile import build_registry, get_profile
-from reporting.json_report.generator import _timeline_preview, generate_session_json_report
-from reporting.markdown_report.generator import generate_markdown_report
-from analytics.prediction.layer_timings import store_layer_timings
-from storage.repositories.runtime import RuntimeRepository, mirror_logs_to_object_store
+from domain.services import session_reports, session_requests
+from reporting.json_report.generator import _timeline_preview
+from storage.repositories.runtime import RuntimeRepository
 
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
-_REPORT_CACHE_MAX = 256
-_report_cache: OrderedDict[tuple[str, bool], dict] = OrderedDict()
-# Sync route handlers run in a threadpool, so cache access is concurrent. Guard
-# every read/modify/write — an unlocked OrderedDict can corrupt or raise
-# "mutated during iteration".
-_cache_lock = threading.Lock()
-
-
 def _invalidate_cache(session_id: str) -> None:
-    with _cache_lock:
-        for key in [k for k in _report_cache if k[0] == session_id]:
-            _report_cache.pop(key, None)
+    """Compatibility hook: published reports are no longer process-cached."""
 
 
-def _cache_get(key: tuple[str, bool]) -> dict | None:
-    with _cache_lock:
-        if key not in _report_cache:
-            return None
-        _report_cache.move_to_end(key)
-        return _report_cache[key]
+def _session_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except session_reports.SessionReportError as exc:
+        raise HTTPException(status_code={"not_found": 404, "conflict": 409,
+                                         "forbidden": 403, "invalid_inputs": 422,
+                                         "storage_unavailable": 503}[exc.code],
+                            detail=exc.detail) from exc
 
 
-def _cache_set(key: tuple[str, bool], value: dict) -> None:
-    with _cache_lock:
-        _report_cache[key] = value
-        _report_cache.move_to_end(key)
-        while len(_report_cache) > _REPORT_CACHE_MAX:
-            _report_cache.popitem(last=False)
-
-
-@router.post("/ingest")
+@router.post("/ingest", status_code=202)
 def ingest_session(payload: dict, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
-    folder = Path(payload.get("folder") or payload.get("path") or "")
-    registry = build_registry()
-    result = IngestionService(registry, get_profile()).parse(folder)
-    groups = group_files_into_sessions(result.files)
-    response_groups = []
-    for group in groups:
-        session_id = payload.get("session_id") or group.group_id
-        # Enrich the stored group with classification + dashboard features + telemetry,
-        # so the persisted payload is directly renderable by the web dashboard.
-        overview = build_group_overview(
-            group.group_id,
-            group.files,
-            start_ts=group.start_ts,
-            end_ts=group.end_ts,
-            grouping_confidence=group.confidence,
-        )
-        try:
-            repo.save_session_payload(
-                session_id,
-                # Strip parse_result (events): tiny payload; events re-read from disk
-                # on demand (avoids ~96 MB/session of monitor events in the DB).
-                {"files": [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files], "group": overview},
-                origin_compute_node_id=get_settings().compute_node_id,
-            )
-        except ComputeAffinityError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Сессия с таким идентификатором уже принадлежит другому "
-                    f"ПК и не может быть перезаписана: {exc}"
-                ),
-            ) from exc
-        # Store the per-layer conclusions the calibrations actually need, while
-        # the parsed log is in hand. Rows in the database are visible to every
-        # operator; the file on this disk is not. The raw log is mirrored as
-        # well so a future change to the extraction can be re-run without it.
-        store_layer_timings(session_id, group.files, repo.db)
-        mirror_logs_to_object_store(session_id, group.files)
-        response_groups.append({"session_id": session_id, **overview})
-
-    from domain.services.print_linking import auto_link_print_records
-
-    links = auto_link_print_records(
-        repo.db,
-        origin_compute_node_id=get_settings().compute_node_id,
-    )
-    repo.flush()
-    return {"root": result.root, "groups": response_groups, "skipped": result.skipped,
-            "diagnostics": result.diagnostics, "print_record_links": links}
+    """Contract v2: enqueue local import, never parse in the HTTP process."""
+    return _session_call(session_requests.request_ingest, repo.db, payload, settings=get_settings())
 
 
 @router.get("")
@@ -110,13 +37,7 @@ def list_sessions(
     limit: LimitParam = 100,
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
-    all_sessions = list(repo.list_session_payloads())
-    total = len(all_sessions)
-    items = [
-        {"session_id": session_id, **payload.get("group", {})}
-        for session_id, payload in all_sessions[skip:skip + limit]
-    ]
-    return PaginatedResponse(items=items, total=total, skip=skip, limit=limit).to_dict()
+    return _session_call(session_reports.list_sessions, repo.db, skip=skip, limit=limit)
 
 
 @router.get("/telemetry-list")
@@ -189,43 +110,20 @@ def get_operator_report(
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     """Compact current-state report; safe to read from every operator PC."""
-    payload = repo.get_session_payload(session_id)
-    if not payload:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    from domain.models.prints import PrintRecord
-    from sqlalchemy import select
-    from storage.repositories.prints_repo import PrintsRepository
-
-    print_row = repo.db.scalar(
-        select(PrintRecord).where(PrintRecord.session_id == session_id).limit(1)
-    )
-    print_record = PrintsRepository(repo.db).get_print_record(print_row.record_id) if print_row else None
-    outcomes = repo.list_quality_outcomes(session_id=session_id)
-    if print_record:
-        # Include labels created before the logs were linked. De-duplicate rows
-        # that now carry both the print and session references.
-        by_id = {row["outcome_id"]: row for row in outcomes}
-        for row in repo.list_quality_outcomes(print_record_id=print_record["record_id"]):
-            by_id[row["outcome_id"]] = row
-        outcomes = list(by_id.values())
-    return build_operator_report(
-        session_id=session_id,
-        group=payload.get("group") or {},
-        quality_outcomes=outcomes,
-        print_record=print_record,
-    )
+    return _session_call(session_reports.read_operator_report, repo.db, session_id)
 
 
-@router.post("/{session_id}/analyze")
+@router.post("/{session_id}/analyze", status_code=202)
 def analyze_session(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
-    return _generate_report(session_id, include_markdown=False, repo=repo)
+    """Contract v2: request an owner-local, durably published analysis."""
+    return _session_call(session_requests.request_analysis, repo.db, session_id,
+                         compute_node_id=get_settings().compute_node_id)
 
 
-@router.post("/{session_id}/reanalyze")
+@router.post("/{session_id}/reanalyze", status_code=202)
 def reanalyze_session(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
-    _invalidate_cache(session_id)
-    return _generate_report(session_id, include_markdown=False, repo=repo) | {"reanalyzed": True}
+    """Same durable analysis path; 202 means queued, not already recalculated."""
+    return analyze_session(session_id, repo=repo)
 
 
 @router.get("/{session_id}/timeline")
@@ -266,10 +164,7 @@ def get_session_hypotheses(session_id: str, repo: RuntimeRepository = Depends(ge
 
 @router.get("/{session_id}/reports")
 def list_session_reports(session_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> list[dict]:
-    return [
-        {"report_id": report.get("report_id"), "session_id": report.get("session_id"), "generated_at": report.get("generated_at")}
-        for report in repo.list_reports_for_session(session_id)
-    ]
+    return _session_call(session_reports.list_reports, repo.db, session_id)
 
 
 @router.post("/{session_id}/reports/generate")
@@ -329,53 +224,12 @@ def _require_local_session(session_id: str, repo: RuntimeRepository) -> None:
 
 
 def _report_for_read(session_id: str, repo: RuntimeRepository) -> dict:
-    """Serve shared derived results without parsing another PC's raw files."""
-    owner = repo.get_session_origin_compute_node_id(session_id)
-    if owner is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    if owner == get_settings().compute_node_id:
-        return _generate_report(session_id, include_markdown=False, repo=repo)
-    report = repo.get_latest_report_for_session(session_id)
-    if report is not None:
-        return report
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            "Сохранённого отчёта для сессии нет. Пересчёт и чтение raw-логов "
-            "выполняются только на ПК-владельце; для legacy-unassigned сначала "
-            "нужно административно назначить владельца."
-        ),
-    )
+    """Every PC reads the same published artifact; GET never parses or writes."""
+    return _session_call(session_reports.read_report, repo.db, session_id)
 
 
 def _generate_report(session_id: str, include_markdown: bool, repo: RuntimeRepository) -> dict:
+    """Legacy name: render the published artifact, not a second analysis path."""
     _require_local_session(session_id, repo)
-    cache_key = (session_id, include_markdown)
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    # Report needs the events → rehydrate parse_result from disk (stored slim).
-    files = repo.get_session_files(session_id, rehydrate=True)
-    if files is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session_payload = repo.get_session_payload(session_id) or {}
-    quality_outcomes = repo.list_quality_outcomes(session_id=session_id)
-    report = generate_session_json_report(
-        session_id,
-        files,
-        quality_outcomes=quality_outcomes,
-    )
-    report["operator_report"] = build_operator_report(
-        session_id=session_id,
-        group=session_payload.get("group") or {},
-        quality_outcomes=quality_outcomes,
-    )
-    report["log_insights"] = (session_payload.get("group") or {}).get("log_insights") or {}
-    if include_markdown:
-        report["markdown"] = generate_markdown_report(report)
-    repo.save_report(report)
-    repo.flush()
-
-    _cache_set(cache_key, report)
-    return report
+    return _session_call(session_reports.read_report, repo.db, session_id,
+                         include_markdown=include_markdown)

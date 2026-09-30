@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import os
-import shutil
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +11,8 @@ from fastapi import APIRouter, HTTPException, UploadFile
 
 from api.upload_limits import read_upload_capped
 from core.config.settings import get_settings
+from domain.services.importing import uploads as _log_uploads
+from domain.services.print_cards.contracts import CardError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -21,8 +20,8 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 
 # ── Step 2: log file upload ────────────────────────────────────────────────────
 
-_ALLOWED_SUFFIXES = {".log", ".zip"}
-_MAX_FILE_MB = 2000
+_ALLOWED_SUFFIXES = _log_uploads.ALLOWED_SUFFIXES
+_MAX_FILE_MB = _log_uploads.MAX_FILE_MB
 
 
 @router.post("/logs")
@@ -32,73 +31,23 @@ async def upload_logs(files: list[UploadFile]) -> dict:
     Every saved file becomes a durable import job.  Parsing starts only after
     operator confirmation (unless that policy is explicitly disabled).
     """
-    settings = get_settings()
-    dest = Path(settings.raw_logs_container_path)
-    if not dest.exists():
-        raise HTTPException(500, f"Папка логов не найдена: {dest}")
+    from storage.db.session import SessionLocal
+    from storage.repositories.prints_repo import PrintsRepository
 
-    saved, skipped = [], []
-    batch_dir: Path | None = None
-    for f in files:
-        name = Path(f.filename or "unknown").name
-        suffix = Path(name).suffix.lower()
-        if suffix not in _ALLOWED_SUFFIXES:
-            skipped.append({"name": name, "reason": "неподдерживаемый тип файла"})
-            continue
-        if batch_dir is None:
-            batch_dir = dest / "incoming" / (
-                "upload_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    def receive():
+        with SessionLocal() as db:
+            return _log_uploads.upload_log_batch(
+                PrintsRepository(db),
+                [_log_uploads.LogUpload(file.filename, file.file) for file in files],
+                settings=get_settings(), max_file_mb=_log_uploads.MAX_FILE_MB,
             )
-            batch_dir.mkdir(parents=True, exist_ok=False)
-        target = batch_dir / name
-        total = 0
-        too_big = False
-        digest = hashlib.sha256()
-        tmp_path = f"/tmp/{os.urandom(8).hex()}.upload"
-        try:
-            with open(tmp_path, "wb") as buf:
-                while chunk := await f.read(16 * 1024 * 1024):
-                    total += len(chunk)
-                    if total > _MAX_FILE_MB * 1024 * 1024:
-                        too_big = True
-                        break
-                    digest.update(chunk)
-                    buf.write(chunk)
-            if too_big:
-                os.unlink(tmp_path)
-                skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
-            else:
-                checksum = digest.hexdigest()
-                duplicate = False
-                if target.exists():
-                    from core.utils.files import sha256_file
 
-                    if await asyncio.to_thread(sha256_file, target) == checksum:
-                        duplicate = True
-                        os.unlink(tmp_path)
-                    else:
-                        # Never overwrite a different log with the same name.
-                        target = batch_dir / f"{Path(name).stem}__{checksum[:12]}{Path(name).suffix}"
-                # /tmp is a tmpfs and the destination a bind mount, so this is a
-                # cross-device copy of up to 2 GB — off the event loop.
-                if not duplicate:
-                    await asyncio.to_thread(shutil.move, tmp_path, target)
-                saved.append({
-                    "name": name,
-                    "stored_name": target.name,
-                    "size_bytes": total,
-                    "checksum": checksum,
-                    "duplicate": duplicate,
-                })
-                logger.info("upload_logs: saved %s (%d bytes) → %s", name, total, target)
-        except BaseException:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
-
-    jobs = _enqueue_import_candidates([batch_dir]) if saved and batch_dir is not None else []
-
-    return {"saved": saved, "skipped": skipped, "jobs": jobs}
+    try:
+        return await asyncio.to_thread(receive)
+    except CardError as exc:
+        status = {"log_directory_unavailable": 500, "insufficient_storage": 507,
+                  "storage_unavailable": 503}[exc.code]
+        raise HTTPException(status, exc.detail) from exc
 
 
 @router.post("/rescan")

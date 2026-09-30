@@ -1,7 +1,5 @@
 from datetime import datetime, timezone
 
-import pytest
-
 from domain.enums.common import DataQualityStatus
 from domain.schemas.parsing import (
     CanonicalEventDraft,
@@ -132,10 +130,10 @@ def _time_log_file(layer_seconds: dict[int, tuple[float, float]]) -> IngestedFil
     )
 
 
-def test_overview_reports_idle_time_from_time_log():
+def test_overview_does_not_mislabel_unmeasured_residual_as_idle():
     # Wall span (event file): 13:00 -> 14:30 = 90 min = 5400s.
     # Machine time (time_log): 2 layers x (20s burn + 10s pour) = 60s.
-    # Idle should be the ~5340s gap the geometry-based prediction never covers.
+    # The gap also contains ordinary cycle overhead and unmeasured layers.
     files = [_event_file(), _time_log_file({1: (20_000, 10_000), 2: (20_000, 10_000)})]
     ov = build_group_overview(
         "g_idle", files,
@@ -144,8 +142,11 @@ def test_overview_reports_idle_time_from_time_log():
     )
     feats = ov["features"]
     assert feats["machine_seconds"] == 60.0
-    assert feats["idle_seconds"] == pytest.approx(5400.0 - 60.0)
-    assert feats["idle_pct"] == pytest.approx((5340.0 / 5400.0) * 100, abs=0.1)
+    assert feats["unattributed_elapsed_seconds"] == 5340.0
+    assert feats["idle_seconds"] is None
+    assert feats["idle_pct"] is None
+    assert feats["explicit_pause_seconds"] == 0.0
+    assert feats["open_pause_count"] == 1
 
 
 def test_overview_idle_none_without_time_log():

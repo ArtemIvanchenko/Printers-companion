@@ -1,18 +1,13 @@
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
-from analytics.features.extraction import extract_layer_features, extract_session_features
-from analytics.normalization.deduplication import deduplicate_events
-from analytics.segmentation.phase_segmenter import segment_phases
 from core.versioning.constants import (
     CAUSAL_MODEL_VERSION,
     RULE_PACK_VERSION,
     SIGNAL_DICTIONARY_VERSION,
 )
-from core.versioning.provenance import build_provenance
 from domain.services.ingestion import IngestedFile
-from domain.services.session_classification import classify_session
-from profiles.m350.profile import get_profile
+from domain.services.session_analysis import PreparedSessionAnalysis, prepare_session_analysis
 
 # The full timeline is offloaded to object storage (no size limit); Postgres and
 # the dashboard keep only a bounded preview to stay well under the 1 GB jsonb cap.
@@ -63,43 +58,38 @@ def generate_session_json_report(
     files: list[IngestedFile],
     production_context: dict[str, Any] | None = None,
     quality_outcomes: list[dict[str, Any]] | None = None,
+    *,
+    analysis: PreparedSessionAnalysis | None = None,
+    overview: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    profile = get_profile()
-    events = [event for file in files if file.parse_result for event in file.parse_result.events]
-    transitions = [transition for file in files if file.parse_result for transition in file.parse_result.transitions]
-    deduped_events, dedupe_diagnostics = deduplicate_events(events)
-    classification = classify_session(files)
-    layer_features = extract_layer_features(deduped_events)
-    session_features = extract_session_features(deduped_events, transitions, production_context)
-    segments = segment_phases(deduped_events, transitions, profile.phase_rules)
-    parser_versions = {
-        file.parse_result.parser_name: file.parse_result.parser_version
-        for file in files
-        if file.parse_result
-    }
+    from copy import deepcopy
+    from domain.services.session_overview import build_group_overview
+
+    analysis = analysis or prepare_session_analysis(files, production_context)
+    overview = overview or build_group_overview(session_id, files, analysis=analysis)
+    snapshot = overview["analysis_snapshot"]
+    if snapshot["analysis_id"] != analysis.analysis_id:
+        raise ValueError("Report and overview belong to different analyses")
+    profile = analysis.profile
+    deduped_events = analysis.events
+    dedupe_diagnostics = analysis.dedupe_diagnostics
     input_hashes = {file.relative_path: file.checksum for file in files}
-    data_quality = summarize_data_quality(files, dedupe_diagnostics)
-    provenance = build_provenance(
-        "session_report",
-        inputs=input_hashes,
-        config={
-            "profile_version": profile.version,
-            "signal_dictionary_version": SIGNAL_DICTIONARY_VERSION,
-            "rule_pack_version": RULE_PACK_VERSION,
-            "causal_model_version": CAUSAL_MODEL_VERSION,
-        },
-        parser_versions=parser_versions,
-    )
+    data_quality = {**summarize_data_quality(files, dedupe_diagnostics), **snapshot["data_quality"]}
+    provenance = analysis.provenance
     return {
         "report_id": f"report_{uuid4().hex}",
         "session_id": session_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "session_summary": {
-            "classification": classification.classification.value,
-            "classification_confidence": classification.confidence,
-            "classification_evidence": classification.evidence,
-            "features": session_features,
+            "classification": snapshot["classification"],
+            "classification_confidence": snapshot["confidence"],
+            "classification_evidence": deepcopy(snapshot["evidence"]),
+            "features": deepcopy(snapshot["features"]),
         },
+        "analysis_snapshot": deepcopy(snapshot),
+        "health": deepcopy(snapshot["health"]),
+        "signal_stats": deepcopy(snapshot["signal_stats"]),
+        "log_insights": deepcopy(overview["log_insights"]),
         "file_inventory": [
             {
                 "path": file.relative_path,
@@ -114,8 +104,8 @@ def generate_session_json_report(
         ],
         "data_quality": data_quality,
         "timeline": [event.model_dump(mode="json") for event in deduped_events],
-        "phase_segments": [segment.model_dump(mode="json") for segment in segments],
-        "layer_features": layer_features,
+        "phase_segments": [segment.model_dump(mode="json") for segment in analysis.phase_segments],
+        "layer_features": analysis.layer_features,
         "anomalies": [],
         "hypotheses": [],
         "operator_context": production_context or {},

@@ -6,6 +6,20 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
+
+def has_complete_layer_coverage(per_layer, expected_layers: int | None) -> bool:
+    """A full-print total requires exactly the independently expected 1..N.
+
+    Unknown N, partial coverage and extra layers stay diagnostic. Do not
+    allocate a range up to an untrusted N or infer N from the observed maximum.
+    """
+    return (
+        type(expected_layers) is int and expected_layers > 0
+        and len(per_layer) == expected_layers
+        and all(type(layer) is int and 1 <= layer <= expected_layers for layer in per_layer)
+        and len(set(per_layer)) == expected_layers
+    )
+
 TIMING_FIELDS = ("burn_ms", "pour_ms", "make_layer_ms")
 # Admission bounds for normal calibration, not proof of a corrupt counter or
 # an operator pause. Keep the measured phase in historical diagnostics.

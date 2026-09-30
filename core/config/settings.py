@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     log_insights_max_gap_seconds: float = Field(default=5.0, gt=0, le=60)
     log_insights_stable_seconds: float = Field(default=30.0, gt=0, le=600)
     log_insights_clock_timezone: str = "Europe/Moscow"
+    shadow_analysis_timeout_seconds: float = Field(default=120, ge=5, le=600)
 
     # Stable identity of the operator PC that owns locally executed work.  It
     # must be configured explicitly for every workstation that shares a NAS.

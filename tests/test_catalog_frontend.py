@@ -4,8 +4,10 @@ import subprocess
 
 import pytest
 
+from dashboard_test_support import dashboard_source
 
-@pytest.mark.parametrize('script', ['catalog-import.test.cjs', 'prediction-accuracy.test.cjs', 'calibration.test.cjs'])
+
+@pytest.mark.parametrize('script', ['catalog-import.test.cjs', 'prediction-accuracy.test.cjs', 'calibration.test.cjs', 'dashboard-startup.test.cjs', 'card-time.test.cjs', 'chat-security.test.cjs'])
 def test_catalog_and_import_frontend_modules(script):
     node = shutil.which('node')
     if not node:
@@ -16,7 +18,7 @@ def test_catalog_and_import_frontend_modules(script):
 
 
 def test_estimate_feedback_is_not_hidden_in_legacy_card_form():
-    html = (Path(__file__).parents[1] / 'web_templates/dashboard.html').read_text()
+    html = dashboard_source()
     assert 'id="estimate-status" role="status"' in html
     source = html.split('function _setEstimateStatus(text)', 1)[1].split('async function', 1)[0]
     assert "getElementById('estimate-status')" in source
@@ -33,5 +35,5 @@ def test_frontend_modules_are_served_and_initialization_waits_for_state():
             assert response.status_code == 200
             assert 'javascript' in response.headers['content-type']
         assert client.get('/assets/unknown.js').status_code == 404
-    html = (Path(__file__).parents[1] / 'web_templates/dashboard.html').read_text()
+    html = dashboard_source()
     assert "document.addEventListener('DOMContentLoaded', () => loadHomeStats())" in html

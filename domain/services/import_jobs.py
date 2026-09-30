@@ -8,7 +8,7 @@ from typing import Any, Callable
 from pydantic import BaseModel
 
 from core.config.settings import Settings, get_settings
-from core.utils.files import sha256_file
+from core.utils.files import iter_source_files, sha256_file
 from domain.enums.common import ImportJobStatus
 from domain.services.ingestion import IngestionService
 from domain.services.importing.fence import ImportFence, StaleImportLeaseError
@@ -336,7 +336,7 @@ def check_source_stability(
 def snapshot_source(source_path: Path) -> dict[str, dict[str, Any]]:
     if not source_path.exists():
         return {}
-    paths = [source_path] if source_path.is_file() else [path for path in source_path.rglob("*") if path.is_file()]
+    paths = [path for path in iter_source_files(source_path) if path.is_file()]
     snapshot: dict[str, dict[str, Any]] = {}
     for path in sorted(paths):
         try:
@@ -401,7 +401,7 @@ def execute_confirmed_import(
                 required=settings.app_env != "test",
             )
             archive_members = {}
-            if any(path.suffix.lower() == '.zip' for path in work_root.rglob('*') if path.is_file()):
+            if any(path.suffix.lower() == '.zip' for path in iter_source_files(work_root) if path.is_file()):
                 from domain.services.log_archives import expand_log_inputs
                 cleanup = tempfile.TemporaryDirectory(prefix="printer-log-import-")
                 work_root = Path(cleanup.name)
@@ -498,15 +498,19 @@ def execute_confirmed_import(
             # (the old behaviour) made the dashboard show these sessions as
             # INCOMPLETE/empty — this was the root cause of "half the graphs
             # are empty" when the watcher import path was active.
+            from domain.services.session_analysis import prepare_session_analysis
+
+            analysis = prepare_session_analysis(group.files, profile=profile)
             overview = build_group_overview(
                 session_id, group.files,
                 start_ts=group.start_ts, end_ts=group.end_ts,
                 grouping_confidence=float(group.confidence) if group.confidence else 0.0,
+                analysis=analysis,
             )
             overview["timing_publication_id"] = layer_timings[session_id].manifest["publication_id"]
             stripped_files = [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files]
             sessions[session_id] = {"files": stripped_files, "group": overview}
-            report = generate_session_json_report(session_id, group.files)
+            report = generate_session_json_report(session_id, group.files, analysis=analysis, overview=overview)
             report["log_insights"] = overview.get("log_insights") or {}
             report["timing_publication"] = layer_timings[session_id].manifest
             report["markdown"] = generate_markdown_report(report)
@@ -547,12 +551,11 @@ def execute_confirmed_import(
 
 
 def calculate_checksum_manifest(root: Path) -> dict[str, str]:
-    if root.is_file():
-        return {root.name: sha256_file(root)}
     manifest: dict[str, str] = {}
-    for path in sorted(root.rglob("*")):
+    for path in sorted(iter_source_files(root)):
         if path.is_file():
-            manifest[str(path.relative_to(root))] = sha256_file(path)
+            relative = path.name if root.is_file() else str(path.relative_to(root))
+            manifest[relative] = sha256_file(path)
     return manifest
 
 
@@ -603,9 +606,7 @@ def archive_raw_import(
                 f"NAS rejected raw archive {archive.name}: {exc}"
             ) from exc
 
-    paths = [work_root] if work_root.is_file() else [
-        path for path in sorted(work_root.rglob("*")) if path.is_file()
-    ]
+    paths = [path for path in sorted(iter_source_files(work_root)) if path.is_file()]
     if not paths:
         raise RuntimeError(f"Raw log source is empty: {work_root}")
 

@@ -233,7 +233,7 @@ class PrintsRepository:
         return _record_to_dict(row) if row else None
 
     def get_print_record_for_update(self, record_id: str) -> dict[str, Any] | None:
-        """Fresh parent lock for short attachment publication/deletion only."""
+        """Fresh parent lock for short card/attachment/inspection transactions."""
         row = self.db.scalar(
             select(PrintRecord).where(PrintRecord.record_id == record_id)
             .with_for_update().execution_options(populate_existing=True)

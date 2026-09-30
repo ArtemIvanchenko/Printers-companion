@@ -156,6 +156,21 @@ def _assert_old():
         assert db.get(ImportJob, "import-pub").status != "done"
 
 
+@pytest.mark.parametrize("corrupt", ["report", "prepared_payload"])
+def test_mismatched_analysis_snapshot_rolls_back_every_publication(attempt, corrupt):
+    result, fence = attempt
+    snapshot = {"schema_version": 1, "analysis_id": "expected"}
+    result.sessions["pub-session"]["group"]["analysis_snapshot"] = deepcopy(snapshot)
+    result.reports["pub-report"]["analysis_snapshot"] = deepcopy(snapshot)
+    reports = prepare_import_reports(result)
+    target = result.reports["pub-report"] if corrupt == "report" else reports["pub-report"]["payload"]
+    target["analysis_snapshot"] = {**snapshot, "analysis_id": "wrong"}
+    with pytest.raises(ValueError, match="аналитическим снимкам"), SessionLocal() as db:
+        publish_import(db, result, fence=fence, prepared_reports=reports)
+        db.commit()
+    _assert_old()
+
+
 def test_preparation_has_no_visible_changes_then_publication_is_complete(attempt):
     result, fence = attempt
     reports = prepare_import_reports(result)

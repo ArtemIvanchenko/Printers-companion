@@ -46,11 +46,31 @@ if ($Services -contains "api" -or $Services -contains "worker") {
         if ($Services -notcontains $Required) { $Services += $Required }
     }
 }
-$env:GIT_COMMIT = (git rev-parse --short HEAD).Trim()
+$env:GIT_COMMIT = (git rev-parse HEAD).Trim()
+$env:APP_VERSION = (Get-Content (Join-Path $RepoDir 'VERSION') -Raw).Trim()
+$env:BUILD_DATE = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+$env:SOURCE_STATE = if (git status --porcelain --untracked-files=normal) { 'dirty' } else { 'clean' }
 
 docker compose up -d --build @Services 2>&1 | Add-Content $Log
 if ($LASTEXITCODE -ne 0) { throw "docker compose up failed with exit code $LASTEXITCODE" }
 
+# A successful compose command only means containers were created. Require the
+# actual API/dependencies and matching build before marking this checkout deployed.
+if ($Services -contains "api") {
+    $Ready = $false
+    $ReadinessDeadline = (Get-Date).AddSeconds(180)
+    while ((Get-Date) -lt $ReadinessDeadline) {
+        try {
+            $State = Invoke-RestMethod -Uri 'http://localhost:8000/health/ready' -TimeoutSec 15
+            if ($State.status -eq 'ready' -and $State.build.git_sha -eq $env:GIT_COMMIT) {
+                $Ready = $true
+                break
+            }
+        } catch {}
+        Start-Sleep 2
+    }
+    if (-not $Ready) { throw 'API/storage readiness and deployed revision were not confirmed; deployment marker was not changed.' }
+}
 $Remote | Set-Content $DeployedFile
 
 $NewCommit = (git rev-parse --short HEAD).Trim()

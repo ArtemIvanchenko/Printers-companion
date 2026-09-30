@@ -20,8 +20,9 @@ class TestSessionsAPI:
         """Test listing sessions when none exist (paginated contract)."""
         from api.routes.sessions import list_sessions
 
-        mock_repo.list_session_payloads.return_value = []
-        result = list_sessions(repo=mock_repo)
+        with patch("domain.services.session_reports.list_sessions", return_value={"items": [], "total": 0}) as read:
+            result = list_sessions(repo=mock_repo)
+        read.assert_called_once_with(mock_repo.db, skip=0, limit=100)
 
         assert result["items"] == []
         assert result["total"] == 0
@@ -30,12 +31,10 @@ class TestSessionsAPI:
         """Test listing sessions with data (paginated contract)."""
         from api.routes.sessions import list_sessions
 
-        mock_repo.list_session_payloads.return_value = [
-            ("session_1", {"group": {"features": {}}}),
-            ("session_2", {"group": {"features": {}}}),
-        ]
-
-        result = list_sessions(repo=mock_repo)
+        with patch("domain.services.session_reports.list_sessions", return_value={
+            "total": 2, "items": [{"session_id": "session_1"}, {"session_id": "session_2"}],
+        }):
+            result = list_sessions(repo=mock_repo)
 
         assert result["total"] == 2
         assert len(result["items"]) == 2
@@ -82,12 +81,12 @@ class TestSessionsReportGeneration:
         repo.commit = MagicMock()
         return repo
 
-    @patch("api.routes.sessions.generate_session_json_report")
-    def test_generate_report_new(self, mock_generate, mock_repo):
-        """Test generating new report."""
+    @patch("domain.services.session_reports.read_report")
+    def test_generate_report_new(self, mock_read, mock_repo):
+        """The compatibility renderer reads, never executes another analysis."""
         from api.routes.sessions import _generate_report
 
-        mock_generate.return_value = {
+        mock_read.return_value = {
             "report_id": "report_123",
             "session_id": "session_123",
             "timeline": [],
@@ -99,42 +98,35 @@ class TestSessionsReportGeneration:
         result = _generate_report("session_123", include_markdown=False, repo=mock_repo)
 
         assert result["report_id"] == "report_123"
-        mock_repo.save_report.assert_called_once()
-        mock_repo.flush.assert_called_once()
+        mock_read.assert_called_once_with(mock_repo.db, "session_123", include_markdown=False)
+        mock_repo.save_report.assert_not_called()
+        mock_repo.flush.assert_not_called()
 
-    @patch("api.routes.sessions.generate_session_json_report")
-    def test_generate_report_with_markdown(self, mock_generate, mock_repo):
+    @patch("domain.services.session_reports.read_report")
+    def test_generate_report_with_markdown(self, mock_read, mock_repo):
         """Test generating report with markdown."""
         from api.routes.sessions import _generate_report
 
-        mock_generate.return_value = {
+        mock_read.return_value = {
             "report_id": "report_123",
             "session_id": "session_123",
             "timeline": [],
             "phase_segments": [],
             "file_inventory": [],
             "data_quality": {"parse_diagnostics": []},
+            "markdown": "# Report",
         }
 
-        with patch("api.routes.sessions.generate_markdown_report") as mock_md:
-            mock_md.return_value = "# Report"
-
-            result = _generate_report("session_123", include_markdown=True, repo=mock_repo)
-
-            assert "markdown" in result
+        result = _generate_report("session_123", include_markdown=True, repo=mock_repo)
+        assert "markdown" in result
+        mock_read.assert_called_once_with(mock_repo.db, "session_123", include_markdown=True)
 
     def test_report_cache(self):
-        """Test report caching mechanism."""
-        from api.routes.sessions import _report_cache, _invalidate_cache
+        """Old invalidation callers remain safe; stale process cache is gone."""
+        from api.routes import sessions
 
-        session_id = "session_123"
-        _report_cache[(session_id, False)] = {"cached": True}
-
-        assert (session_id, False) in _report_cache
-
-        _invalidate_cache(session_id)
-
-        assert (session_id, False) not in _report_cache
+        assert not hasattr(sessions, "_report_cache")
+        assert sessions._invalidate_cache("session_123") is None
 
 
 class TestSessionApproval:
@@ -175,32 +167,16 @@ class TestSessionApproval:
 class TestSessionIngest:
     """Test session ingestion."""
 
-    @patch("api.routes.sessions.IngestionService")
-    @patch("api.routes.sessions.group_files_into_sessions")
-    def test_ingest_session(self, mock_group, mock_service):
-        """Test ingesting new session."""
+    @patch("domain.services.session_requests.request_ingest")
+    def test_ingest_session(self, mock_request):
+        """The HTTP adapter returns the durable-v2 request, not parse output."""
         from api.routes.sessions import ingest_session
 
-        mock_service_instance = MagicMock()
-        mock_service.return_value = mock_service_instance
-        mock_service_instance.parse.return_value = MagicMock(
-            root="/test",
-            files=[],
-            skipped=[],
-            diagnostics=[],
-        )
-
-        mock_group_instance = MagicMock()
-        mock_group_instance.group_id = "session_123"
-        mock_group_instance.model_dump = MagicMock(return_value={})
-        mock_group_instance.files = []
-        mock_group.return_value = [mock_group_instance]
-
+        mock_request.return_value = {"contract_version": 2, "job_id": "import_123", "groups": []}
         repo = MagicMock()
-        repo.commit = MagicMock()
-
-        payload = {"folder": "/test/folder", "session_id": "session_123"}
+        payload = {"folder": "/test/folder"}
         result = ingest_session(payload, repo=repo)
-
-        assert "groups" in result
-        repo.flush.assert_called_once()
+        assert result["job_id"] == "import_123"
+        mock_request.assert_called_once()
+        assert mock_request.call_args.args == (repo.db, payload)
+        repo.flush.assert_not_called()

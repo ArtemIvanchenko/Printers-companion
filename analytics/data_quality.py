@@ -20,10 +20,9 @@ from typing import Any
 from domain.enums.common import SourceFileFamily
 
 # Log families a genuine print run must yield AFTER ingestion. Missing ones
-# usually mean the copy from the machine was incomplete. Note: burn.log /
-# table_temp.log / stateFlow* are intentionally skipped by IngestionService as
-# redundant (their data lives in sensors.log + time.log), so they are NOT
-# expected here — including them would false-positive on every session.
+# usually mean the copy from the machine was incomplete. Additional burn,
+# table-temperature and state-flow sources are profile-dependent, not required
+# for every print. Their absence must not fail this common minimum check.
 _EXPECTED_FAMILIES = {
     SourceFileFamily.main_event_log,
     SourceFileFamily.sensors_log,

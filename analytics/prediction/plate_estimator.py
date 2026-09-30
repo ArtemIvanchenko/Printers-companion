@@ -283,21 +283,33 @@ def _physics_scan_seconds_by_layer(
 
 
 def _resolve_layer_cycle_model(scan_model: dict | None) -> tuple[dict | None, str]:
-    """Validate new max/base/floor contract, then read legacy additive delay."""
+    """Validate the identified v2 cycle contract; old artifacts are diagnostic."""
     if not isinstance(scan_model, dict):
         return None, "unavailable"
     candidate = scan_model.get("layer_cycle_model")
-    if isinstance(candidate, dict) and candidate.get("version") == "max_base_floor_v1":
+    if isinstance(candidate, dict) and candidate.get("version") == "max_base_floor_v2":
         base = candidate.get("base_overhead_ms")
         floor = candidate.get("minimum_cycle_ms")
+        lower = candidate.get("minimum_applicable_component_ms")
+        identified = (
+            floor is not None
+            and candidate.get("base_overhead_status") == "identified"
+            and candidate.get("minimum_cycle_status") == "identified"
+        ) or (
+            floor is None and candidate.get("base_overhead_status") == "identified_free_branch"
+            and candidate.get("minimum_cycle_status") == "unidentified"
+            and isinstance(lower, (int, float)) and not isinstance(lower, bool)
+            and math.isfinite(lower) and lower >= 0
+        )
         if (
-            isinstance(base, (int, float))
+            identified
+            and isinstance(base, (int, float)) and not isinstance(base, bool)
             and math.isfinite(float(base))
             and 0.0 <= float(base) <= 10_000.0
             and (
                 floor is None
                 or (
-                    isinstance(floor, (int, float))
+                    isinstance(floor, (int, float)) and not isinstance(floor, bool)
                     and math.isfinite(float(floor))
                     and 0.0 < float(floor) <= 120_000.0
                 )
@@ -309,23 +321,8 @@ def _resolve_layer_cycle_model(scan_model: dict | None) -> tuple[dict | None, st
                 "minimum_cycle_ms": float(floor) if floor is not None else None,
             }, "calibrated_max_base_floor"
 
-    # Existing fitted models stored one additive median residual.  Keep them
-    # usable until fresh calibration upgrades the mode to the nested contract.
-    legacy = scan_model.get("layer_overhead_ms")
-    if (
-        isinstance(legacy, (int, float))
-        and math.isfinite(float(legacy))
-        and 0.0 <= float(legacy) <= 10_000.0
-    ):
-        return {
-            "version": "legacy_additive_overhead_v0",
-            "base_overhead_ms": float(legacy),
-            "minimum_cycle_ms": None,
-            "n_prints": int(scan_model.get("layer_overhead_n_prints") or 0),
-            "n_layers": int(scan_model.get("layer_overhead_n_layers") or 0),
-            "n_geometries": 0,
-            "minimum_cycle_status": "legacy_not_modelled",
-        }, "legacy_additive_overhead"
+    # Old v1/additive artifacts have no identifiability evidence. Preserve them
+    # in history, but never silently apply their potentially floor-biased base.
     return None, "unavailable"
 
 
@@ -335,7 +332,7 @@ def _resolve_layer_cycle_model_for_mode(
     layer_thickness_mm: float,
     legacy_scan_model: dict | None,
 ) -> tuple[dict | None, str]:
-    """Independent cycle model for the physical machine, then legacy fallback."""
+    """Independent cycle model for the same physical machine only."""
     models = params.get("layer_cycle_model_by_mode") or {}
     keys: list[str] = []
     printer_id = params.get("printer_id")
@@ -344,7 +341,6 @@ def _resolve_layer_cycle_model_for_mode(
         keys.append(machine_mode_key(
             str(printer_id), material, layer_thickness_mm, laser_count,
         ))
-    keys.append(scan_model_key(material, layer_thickness_mm))
     for key in keys:
         candidate = models.get(key)
         if not isinstance(candidate, dict):
@@ -352,8 +348,8 @@ def _resolve_layer_cycle_model_for_mode(
         resolved, source = _resolve_layer_cycle_model({"layer_cycle_model": candidate})
         if resolved is not None:
             return resolved, source
-    # Models written before the independent registry nested cycle data (or a
-    # single additive residual) inside the accepted scan model.
+    # A scoped scan artifact may also carry a v2 cycle. Unscoped scan artifacts
+    # cannot reach this point through resolve_scan_model.
     return _resolve_layer_cycle_model(legacy_scan_model)
 
 
@@ -538,6 +534,10 @@ def estimate_plate(
 
     model = resolve_scan_model(params, material, thickness)
     if model is not None:
+        warnings.append(
+            "Модель прожига соответствует сохранённым настройкам; "
+            "это не подтверждение фактически исполненной стратегии слайсера."
+        )
         raw_scan_seconds_by_layer = scan_seconds_by_layer_from_model(
             series, thickness, laser_count, model,
         )
@@ -547,6 +547,11 @@ def estimate_plate(
         # the blanket correction factor on top would double-correct.
         factor = 1.0
     else:
+        if params.get("scan_model_by_mat"):
+            warnings.append(
+                "Сохранённая модель прожига не подтверждена для текущей машины и настроек; "
+                "использован физический расчёт. Нужна калибровка по совместимым снимкам."
+            )
         raw_scan_seconds_by_layer = _physics_scan_seconds_by_layer(
             series, thickness, params, material, laser_count,
         )
@@ -572,6 +577,17 @@ def estimate_plate(
     cycle_model, layer_overhead_source = _resolve_layer_cycle_model_for_mode(
         params, material, thickness, model,
     )
+    if cycle_model is not None and cycle_model.get("minimum_cycle_ms") is None:
+        lower = cycle_model.get("minimum_applicable_component_ms")
+        if (not isinstance(lower, (int, float)) or isinstance(lower, bool)
+                or not math.isfinite(lower) or lower < 0
+                or any(scan * factor * 1000 + recoat_ms < lower
+                       for scan in raw_scan_seconds_by_layer)):
+            cycle_model, layer_overhead_source = None, "outside_calibrated_range"
+            warnings.append(
+                "Есть слои короче проверенной области калибровки; "
+                "неизвестное минимальное время цикла не заменено постоянной добавкой."
+            )
     layer_overhead_ms = (
         float(cycle_model["base_overhead_ms"]) if cycle_model is not None else None
     )

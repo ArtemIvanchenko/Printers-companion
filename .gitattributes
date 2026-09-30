@@ -1,0 +1,2 @@
+# Preserve downloaded license bytes and their recorded SHA-256 fingerprints.
+web_assets/vendor/fonts/*-OFL.txt -whitespace

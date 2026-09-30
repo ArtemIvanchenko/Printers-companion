@@ -47,10 +47,34 @@ case " $SERVICES " in
         done
         ;;
 esac
-NEW_GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+NEW_GIT_COMMIT=$(git rev-parse HEAD)
+APP_VERSION=$(tr -d '[:space:]' < VERSION)
+BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+SOURCE_STATE=clean
+[ -z "$(git status --porcelain --untracked-files=normal)" ] || SOURCE_STATE=dirty
+export APP_VERSION BUILD_DATE SOURCE_STATE
 # shellcheck disable=SC2086
 GIT_COMMIT="$NEW_GIT_COMMIT" docker compose up -d --build $SERVICES >> "$LOG" 2>&1
 
+# Storage-only deployments have no API. Operator deployment is not recorded as
+# complete merely because compose created containers.
+case " $SERVICES " in
+    *" api "*)
+        READY_DEADLINE=$((SECONDS + 180))
+        until curl --connect-timeout 2 --max-time 15 -fs http://localhost:8000/health/ready >/dev/null 2>&1; do
+            if [ "$SECONDS" -ge "$READY_DEADLINE" ]; then
+                echo "API/storage readiness was not confirmed; deployment marker unchanged." >&2
+                exit 1
+            fi
+            sleep 2
+        done
+        RUNNING_COMMIT=$(docker compose exec -T api printenv GIT_COMMIT)
+        [ "$RUNNING_COMMIT" = "$NEW_GIT_COMMIT" ] || {
+            echo "Running API revision differs from the requested build; deployment marker unchanged." >&2
+            exit 1
+        }
+        ;;
+esac
 echo "$REMOTE" > "$DEPLOYED_FILE"
 
 NEW_COMMIT=$(git rev-parse --short HEAD)

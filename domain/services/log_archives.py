@@ -7,7 +7,7 @@ import stat
 import unicodedata
 import zipfile
 
-from core.utils.files import sha256_file
+from core.utils.files import iter_source_files, sha256_file
 
 MAX_EXPANDED_BYTES = 20 * 1024**3
 MAX_MEMBER_BYTES = 6 * 1024**3
@@ -88,7 +88,7 @@ def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease
         finally:
             temp.unlink(missing_ok=True)
 
-    inputs = [source] if source.is_file() else sorted(source.rglob('*'))
+    inputs = sorted(iter_source_files(source))
     for path in inputs:
         lease_check()
         if path.is_symlink():

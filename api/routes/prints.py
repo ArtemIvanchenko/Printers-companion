@@ -2,14 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import multiprocessing
-import os
-import shutil
 from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -24,7 +21,6 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from api.deps.repositories import get_prints_repository
@@ -36,8 +32,11 @@ from domain.services.estimation import inputs as _estimation_inputs
 from domain.services.estimation import publication as _estimation_publication
 from domain.services.estimation import requests as _estimation_requests
 from domain.services.estimation.contracts import EstimateError
+from domain.services.importing import uploads as _log_uploads
 from domain.services.print_cards import cards as _card_services
 from domain.services.print_cards import attachments as _attachments
+from domain.services.print_cards.comparison import attach_plan_vs_fact
+from domain.services.print_cards import quality as _card_quality
 from domain.services.print_cards import validation as _card_validation
 from domain.services.print_cards.contracts import CardError
 from parsers.common.timestamps import date_hint_datetime
@@ -59,7 +58,7 @@ def _card_call(function, *args, **kwargs):
         status = {"invalid_inputs": 422, "not_found": 404, "conflict": 409,
                   "stale_inputs": 409, "forbidden": 403, "precondition_required": 428,
                   "too_large": 413, "insufficient_storage": 507,
-                  "storage_unavailable": 503}[exc.code]
+                  "storage_unavailable": 503, "log_directory_unavailable": 500}[exc.code]
         raise HTTPException(status, exc.detail) from None
 
 
@@ -248,67 +247,8 @@ async def print_events(request: Request) -> StreamingResponse:
 
 
 def _attach_plan_vs_fact(repo: PrintsRepository, records: list[dict]) -> None:
-    """Add a ``summary`` to each record: what was predicted, what happened, the gap.
-
-    The list is where the operator compares the two, so both have to arrive in
-    one response — the prediction lives in the record's own snapshot while the
-    outcome lives on the linked session, and fetching them separately per row
-    would be a query per print.
-
-    The actual is machine time (scan + recoat) whenever the printer's own
-    time_log covers the session, never the wall-clock span: the estimate models
-    machine time only, so comparing it against a span that includes operator
-    pauses reports an error the geometry never made. On one real build that gap
-    was 18 of 47.6 hours.
-    """
-    from analytics.prediction.accuracy import _actual_hours, _machine_hours_from_logs
-    from domain.models.sessions import BuildSession
-
-    session_ids = [r["session_id"] for r in records if r.get("session_id")]
-    sessions: dict[str, BuildSession] = {}
-    if session_ids:
-        sessions = {
-            s.session_id: s for s in repo.db.scalars(
-                select(BuildSession).where(BuildSession.session_id.in_(session_ids))
-            ).all()
-        }
-
-    for record in records:
-        snapshot = (record.get("metadata_json") or {}).get("prediction") or {}
-        predicted_hours = snapshot.get("print_hours")
-
-        actual_hours = actual_source = idle_hours = layers = None
-        session = sessions.get(record.get("session_id") or "")
-        if session is not None:
-            features = (
-                ((session.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
-            ).get("features") or {}
-            layers = features.get("layers")
-            if features.get("idle_min") is not None:
-                idle_hours = round(features["idle_min"] / 60, 2)
-            machine_hours = _machine_hours_from_logs(
-                session.session_id, snapshot.get("layer_count"), repo.db,
-            )
-            if machine_hours is not None:
-                actual_hours, actual_source = round(machine_hours, 2), "machine_log"
-            else:
-                wall_hours = _actual_hours(session)
-                if wall_hours is not None:
-                    actual_hours, actual_source = round(wall_hours, 2), "wall_span"
-
-        error_pct = None
-        if predicted_hours and actual_hours:
-            error_pct = round((predicted_hours - actual_hours) / actual_hours * 100, 1)
-
-        record["summary"] = {
-            "predicted_hours": round(predicted_hours, 2) if predicted_hours else None,
-            "predicted_cost_rub": snapshot.get("cost_total_rub"),
-            "actual_hours": actual_hours,
-            "actual_source": actual_source,
-            "idle_hours": idle_hours,
-            "layers": layers,
-            "error_pct": error_pct,
-        }
+    """Compatibility adapter for the shared read-only comparison service."""
+    attach_plan_vs_fact(repo, records)
 
 
 @router.get("/defaults")
@@ -558,7 +498,9 @@ def estimate_print_record(
 @router.get("/{record_id}")
 def get_print(record_id: str, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
     """Full print record with files and geometry-aware anomaly locations."""
-    return _card_call(_card_services.get_card, repo, record_id)
+    record = _card_call(_card_services.get_card, repo, record_id)
+    _attach_plan_vs_fact(repo, [record])
+    return record
 
 
 @router.get("/{record_id}/quality-outcomes")
@@ -566,11 +508,7 @@ def list_print_quality_outcomes(
     record_id: str,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> list[dict]:
-    if not repo.get_print_record(record_id):
-        raise HTTPException(404, "Карточка печати не найдена")
-    from storage.repositories.runtime import RuntimeRepository
-
-    return RuntimeRepository(repo.db).list_quality_outcomes(print_record_id=record_id)
+    return _card_call(_card_quality.list_quality_outcomes, repo, record_id)
 
 
 @router.post("/{record_id}/quality-outcomes")
@@ -586,53 +524,17 @@ def create_print_quality_outcome(
     inspection row. This preserves who concluded what and when, and the latest
     final row becomes the ML ground truth.
     """
-    record = repo.get_print_record(record_id)
-    if not record:
-        raise HTTPException(404, "Карточка печати не найдена")
-
-    from domain.services.quality import create_final_print_outcome
-    from storage.repositories.runtime import RuntimeRepository
-
-    try:
-        draft = create_final_print_outcome(
-            payload,
-            print_record_id=record_id,
-            session_id=record.get("session_id"),
-            created_by=workstation_id(request, fallback="operator") or "operator",
-        )
-    except ValidationError as exc:
-        raise HTTPException(422, detail=str(exc)) from None
-
-    outcome = draft.model_dump(mode="json")
-    from storage.repositories.runtime import QualityOutcomeConflict
-
-    try:
-        RuntimeRepository(repo.db).save_quality_outcome(outcome)
-    except QualityOutcomeConflict as exc:
-        raise HTTPException(409, detail=str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(422, detail=str(exc)) from None
-    from analytics.prediction.retraining import enqueue_retraining
-
-    retraining_job = None
+    outcome = _card_call(
+        _card_quality.create_quality_outcome, repo, record_id, payload,
+        actor=workstation_id(request, fallback="operator") or "operator",
+    )
+    # Publication has committed. A failed transaction must not invalidate the
+    # cache, and regeneration must be able to observe the new inspection.
     if outcome.get("session_id"):
-        retraining_job = enqueue_retraining(
-            repo.db,
-            session_id=str(outcome["session_id"]),
-            outcome_id=str(outcome["outcome_id"]),
-            result=str(outcome["result"]),
-            timestamp=str(outcome["timestamp"]),
-        )
-    # Publish the dependent-row change through the existing multi-workstation
-    # print-card event stream.
-    repo._touch_print_record(record_id)
-    # A previously generated report is a snapshot. Clear the in-process read
-    # cache so its next local regeneration includes the new inspection.
-    if record.get("session_id"):
         from api.routes.sessions import _invalidate_cache
 
-        _invalidate_cache(record["session_id"])
-    return {**outcome, "model_retraining_job_id": (retraining_job or {}).get("job_id")}
+        _invalidate_cache(outcome["session_id"])
+    return outcome
 
 
 @router.get("/{record_id}/operator-report")
@@ -641,23 +543,7 @@ def get_print_operator_report(
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
     """Return a compact report even before a card has linked log files."""
-    record = repo.get_print_record(record_id)
-    if not record:
-        raise HTTPException(404, "Карточка печати не найдена")
-
-    from domain.services.operator_report import build_operator_report
-    from storage.repositories.runtime import RuntimeRepository
-
-    runtime = RuntimeRepository(repo.db)
-    session_id = record.get("session_id")
-    payload = runtime.get_session_payload(session_id) if session_id else None
-    outcomes = runtime.list_quality_outcomes(print_record_id=record_id)
-    return build_operator_report(
-        session_id=session_id,
-        group=(payload or {}).get("group") or {},
-        quality_outcomes=outcomes,
-        print_record=record,
-    )
+    return _card_call(_card_quality.get_operator_report, repo, record_id)
 
 
 @router.patch("/{record_id}")
@@ -753,101 +639,13 @@ async def import_logs_for_print(
     pipeline; the card-specific import job attaches its resulting session back
     to this record. A dated filename only hints at the print date when empty.
     """
-    from api.routes.uploads import _ALLOWED_SUFFIXES, _MAX_FILE_MB, _trigger_rescan
-
-    record = repo.get_print_record(record_id)
-    if not record:
-        raise HTTPException(404, "Карточка печати не найдена")
-    _require_local_print(record)
-    # The record is now a plain dict. Release the NAS read transaction before
-    # copying a potentially multi-gigabyte local log batch.
-    repo.db.rollback()
-
-    settings = get_settings()
-    dest = Path(settings.raw_logs_container_path)
-    if not dest.exists():
-        raise HTTPException(500, f"Папка логов не найдена: {dest}")
-
-    saved, skipped = [], []
-    batch_dir: Path | None = None
-    printed_at_hint = None
-    for f in files:
-        name = Path(f.filename or "unknown").name
-        if Path(name).suffix.lower() not in _ALLOWED_SUFFIXES:
-            skipped.append({"name": name, "reason": "неподдерживаемый тип файла"})
-            continue
-        if batch_dir is None:
-            batch_dir = dest / "incoming" / (
-                f"print_{record_id}_"
-                + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-            )
-            batch_dir.mkdir(parents=True, exist_ok=False)
-        total = 0
-        target = batch_dir / name
-        too_big = False
-        digest = hashlib.sha256()
-        tmp_path = f"/tmp/{os.urandom(8).hex()}.upload"
-        try:
-            with open(tmp_path, "wb") as buf:
-                while chunk := await f.read(16 * 1024 * 1024):
-                    total += len(chunk)
-                    if total > _MAX_FILE_MB * 1024 * 1024:
-                        too_big = True
-                        break
-                    digest.update(chunk)
-                    buf.write(chunk)
-            if too_big:
-                os.unlink(tmp_path)
-                skipped.append({"name": name, "reason": f"файл > {_MAX_FILE_MB} МБ"})
-            else:
-                checksum = digest.hexdigest()
-                duplicate = False
-                if target.exists():
-                    from core.utils.files import sha256_file
-
-                    if await asyncio.to_thread(sha256_file, target) == checksum:
-                        duplicate = True
-                        os.unlink(tmp_path)
-                    else:
-                        target = batch_dir / f"{Path(name).stem}__{checksum[:12]}{Path(name).suffix}"
-                # Cross-device copy (tmpfs -> bind mount) of up to 2 GB.
-                if not duplicate:
-                    await asyncio.to_thread(shutil.move, tmp_path, target)
-                saved.append({
-                    "name": name,
-                    "stored_name": target.name,
-                    "size_bytes": total,
-                    "checksum": checksum,
-                    "duplicate": duplicate,
-                })
-                printed_at_hint = printed_at_hint or _date_from_text(name)
-        except BaseException:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
-
-    updates: dict = {}
-    if not record.get("printed_at") and printed_at_hint:
-        updates["printed_at"] = printed_at_hint
-    if printed_at_hint:
-        # Date is a display/candidate hint, not proof of log identity. The
-        # durable card-specific job below provides the actual session lineage.
-        meta = dict(record.get("metadata_json") or {})
-        meta["log_import_hint"] = {"date": printed_at_hint.date().isoformat()}
-        updates["metadata_json"] = meta
-    jobs = _trigger_rescan(
-        settings.raw_logs_container_path,
-        candidates=[batch_dir] if batch_dir is not None else [],
-        db=repo.db,
-        print_record_id=record_id,
-    ) if saved else []
-    if updates:
-        repo.update_print_record(record_id, updates)
-    logger.info("prints: %d log file(s) uploaded for %s", len(saved), record_id)
+    result = await asyncio.to_thread(
+        _card_call, _log_uploads.upload_log_batch, repo,
+        [_log_uploads.LogUpload(file.filename, file.file) for file in files],
+        settings=get_settings(), record_id=record_id, max_file_mb=_log_uploads.MAX_FILE_MB,
+    )
     return {
-        "saved": saved,
-        "skipped": skipped,
-        "jobs": jobs,
+        **result,
         "note": "Подтвердите импорт в верхней панели; одна сессия из этого задания привяжется к карточке. Если сессий несколько, потребуется выбор.",
     }
 

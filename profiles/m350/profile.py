@@ -51,6 +51,8 @@ class M350Profile(PrinterProfilePlugin):
             signal_mappings=signals,
             phase_rules=phases,
             stateflow_mapping=stateflow,
+            excluded_source_patterns=("*_stateFlowData.log",),
+            source_size_limits={"*_stateFlow.log": 10 * 1024 * 1024},
         )
 
     def register_parsers(self, registry: ParserRegistry) -> None:
@@ -74,4 +76,3 @@ def build_registry() -> ParserRegistry:
     registry = ParserRegistry()
     get_profile().register_parsers(registry)
     return registry
-

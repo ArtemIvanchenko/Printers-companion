@@ -14,5 +14,5 @@ def test_reanalysis_stops_when_no_repeated_patterns() -> None:
     plan = plan_historical_reanalysis(window_days=30, max_iterations=10)
     verdict = run_bounded_historical_reanalysis(plan, [{"session_id": "s1", "pause_count": 1}])
     assert verdict["verdict"] == "no_new_pattern"
-    assert verdict["completed_iterations"] == 3
-
+    assert verdict["completed_iterations"] == 1
+    assert verdict["not_implemented_stages"] == ["refresh_feature_store", "aggregate_statistics"]

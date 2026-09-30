@@ -63,16 +63,18 @@ class TestPrintTimePrediction:
         assert "1.200" in est.prediction.explanation
 
     def test_fitted_model_is_model_source_with_sample_size(self):
+        from analytics.prediction.scan_scope import scan_scope, scan_scope_key
+
         params = {
             **BASE_PARAMS,
-            "scan_model_by_mat": {
-                "steel@0.050": {
-                    "beta": [0.001, 0.001, 0.0001, 0.0, 0.0, 0.0],
-                    "n_layers": 842,
-                    "r2": 0.91,
-                }
-            },
+            "printer_id": "test-printer",
         }
+        scope = scan_scope(params, "steel", 0.05)
+        params["scan_model_by_mat"] = {scan_scope_key(scope): {
+            "scan_calibration_scope": scope,
+            "beta": [0.001, 0.001, 0.0001, 0.0, 0.0, 0.0],
+            "n_layers": 842, "r2": 0.91,
+        }}
         slices = slice_stl(CUBE_STL, 0.05)
         est = estimate_print_time(slices, params, "steel", stl_bytes=CUBE_STL)
         assert est.prediction.source == PredictionSource.MODEL

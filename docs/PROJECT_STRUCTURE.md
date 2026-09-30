@@ -15,7 +15,9 @@ profiles/m350/           профиль конкретного станка, с�
 storage/                 SQL-репозитории, MinIO и локальный транспортный outbox
 worker/                  локальные вычисления и передача outbox своего ПК на NAS
 reporting/               JSON/Markdown/LLM-представления результатов
-web_templates/           операторский интерфейс и демонстрационные страницы
+web_templates/           HTML-оболочка интерфейса и демонстрационные страницы
+web_assets/dashboard/    сценарии интерфейса и CSS; без дублирования backend-логики
+web_assets/vendor/       закреплённые браузерные библиотеки/шрифты и лицензии
 deploy/                  запуск, NAS и резервное копирование
 scripts/
   maintenance/          разовые миграции/пересчёты данных
@@ -29,12 +31,15 @@ tests/                   структура повторяет рабочие п
 ## Направление зависимостей
 
 ```text
-API / worker → domain services → analytics / parsers → repositories → models
+API / worker → domain services → analytics / parsers (локальный расчёт)
+                            └→ storage repositories → models (короткий SQL)
 ```
 
 - Маршрут валидирует запрос, ставит долгую работу в очередь и формирует ответ.
 - Предметный сервис не должен импортировать маршрут.
 - Репозиторий отвечает только за сохранение/выборку и не запускает аналитику.
+  Это целевая граница: legacy `storage/repositories/runtime.py` пока объединяет
+  SQL и MinIO/rehydration. Новые session/dashboard read models его не используют.
 - Сырой код сигнала (`SO1`, `Flow T`) остаётся стабильным ключом; русское имя
   приходит из `profiles/signal_catalog.py`.
 - `BuildJob` — производственное задание печати. Фоновые вычисления хранятся в
@@ -60,9 +65,28 @@ API / worker → domain services → analytics / parsers → repositories → mo
 - Скрипты, которые меняют данные, живут в `scripts/maintenance/`, поддерживают
   `--dry-run` и документируют идемпотентность.
 
-## Известный следующий рефакторинг
+## Основные сценарии после разделения
 
-`web_templates/dashboard.html` и `api/routes/prints.py` всё ещё крупнее нормы.
-Их следует дробить вертикально: карточки/архив/телеметрия в статические JS/CSS,
-а расчёт платформы — из HTTP-маршрута в предметный сервис. Массовое перемещение
-без тестового покрытия намеренно не выполняется за один релиз.
+| Сценарий | Граница ответственности |
+|---|---|
+| Импорт | `import_jobs.py` + `importing/`: подготовка, fenced-пакеты событий, атомарная публикация компактного результата |
+| Анализ сессии | `session_analysis.py` готовит признаки; `session_telemetry.py` отделяет полный поток от графика; `session_overview.py` формирует общий снимок |
+| Чтение отчёта | `session_reads.py` → detached SQL, затем `session_reports.py` → MinIO и проверка опубликованного снимка |
+| Повторный анализ | `session_requests.py` ставит исходный ImportJob в owner-local очередь; HTTP 202 |
+| Карточка/качество/вложения | `print_cards/`; HTTP переводит ошибки, не владеет файловой транзакцией |
+| План/факт времени | `print_cards/comparison.py`: общий summary v2 для списка/карточки, только совпадающий scope и полное покрытие |
+| Прогноз | `estimation/`: inputs → calculation → publication; worker не импортирует HTTP |
+| Экспериментальная аналитика | `shadow_analysis.py` + `worker/shadow_tasks.py`: ручное отдельное задание с лимитом, не меняет факты |
+| Восстановление загрузки | `importing/recovery.py`: immutable job ID, SHA, общий publisher с HTTP, без удаления пакета |
+| Интерфейс | SQL-free HTML → `web_assets/dashboard/` → узкие API; исторические панели ленивые |
+| Зависимости | `pyproject.toml` → `scripts/export_requirements.py` → проверяемые `requirements.*.txt` |
+
+## Оставшийся рефакторинг
+
+`api/routes/prints.py` сохраняет широкие list/SSE/legacy-адаптеры; тяжёлый расчёт
+уже в `estimation/`. В `runtime.py` остаются write/rehydration обязанности.
+SQL canonical events имеют MCP/export-потребителей и пока не имеют атомарного
+поколения всей истории. JavaScript вынесен из HTML, но classic globals/inline
+handlers не заменены на полностью изолированные компоненты. Эти переходы требуют
+контрактных тестов, а не только переноса файлов. Результаты и границы текущего
+этапа — `docs/reviews/2026-09-23_architecture_refactor.md`.

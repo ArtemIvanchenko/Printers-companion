@@ -29,6 +29,27 @@ def git_sha() -> str | None:
     return value if value and value not in {"unknown", "dev"} else None
 
 
+def build_manifest() -> dict[str, Any]:
+    """One inspectable build identity for health and saved analytical artifacts.
+
+    A revision alone cannot identify uncommitted source. Never infer a clean
+    checkout at runtime: only the builder can attest that state. Missing build
+    arguments remain explicitly unknown (including old images).
+    """
+    state = os.environ.get("SOURCE_STATE", "unknown").strip()
+    if state not in {"clean", "dirty"}:
+        state = "unknown"
+    built_at = os.environ.get("BUILD_DATE", "").strip()
+    manifest = {
+        "schema_version": 1,
+        "app_version": APP_VERSION,
+        "git_sha": git_sha(),
+        "source_state": state,
+        "built_at": built_at if built_at and built_at != "unknown" else None,
+    }
+    return {**manifest, "build_id": stable_hash(manifest)}
+
+
 def build_provenance(
     component: str,
     *,
@@ -44,6 +65,7 @@ def build_provenance(
         "app_version": APP_VERSION,
         "analysis_version": ANALYSIS_VERSION,
         "git_sha": git_sha(),
+        "build": build_manifest(),
         "input_fingerprint": stable_hash(inputs) if inputs is not None else None,
         "config_hash": stable_hash(config) if config is not None else None,
         "parser_versions": dict(sorted((parser_versions or {}).items())),
@@ -53,4 +75,4 @@ def build_provenance(
     }
 
 
-__all__ = ["stable_hash", "git_sha", "build_provenance"]
+__all__ = ["stable_hash", "git_sha", "build_manifest", "build_provenance"]

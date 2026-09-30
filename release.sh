@@ -13,7 +13,7 @@
 # Requirements:
 #   - docker (with buildx multiplatform support)
 #   - gh CLI (github.com/cli/cli) — used for GHCR auth
-#   - git (clean working tree recommended)
+#   - git (clean working tree required for a reproducible release)
 #   - Flash drive at /Volumes/SANDISK (optional, skip with --no-flash)
 
 set -euo pipefail
@@ -69,21 +69,11 @@ info "Current version: $CURRENT"
 if [[ "$BUMP" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   NEW_VERSION="$BUMP"
 else
+  [[ "$BUMP" =~ ^(major|minor|patch)$ ]] || die "Use major, minor, patch or an exact x.y.z version"
   NEW_VERSION=$(bump_semver "$CURRENT" "$BUMP")
 fi
 
 info "New version:     $NEW_VERSION"
-
-if ! $DRY_RUN; then
-  if ! git diff --quiet HEAD 2>/dev/null; then
-    echo "  [warn]  Working tree is dirty — uncommitted changes will be included."
-  fi
-fi
-
-GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-info "Git commit:      $GIT_COMMIT"
-info "Build date:      $BUILD_DATE"
 
 if $DRY_RUN; then
   echo
@@ -91,6 +81,11 @@ if $DRY_RUN; then
   echo "  Services: ${SERVICES[*]}"
   echo "  Push:     $PUSH   Flash: $FLASH"
   exit 0
+fi
+[[ -z "$(git status --porcelain --untracked-files=normal)" ]] \
+  || die "Working tree is dirty. Commit or separately preserve changes before releasing; nothing was changed."
+if git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null; then
+  die "Tag v${NEW_VERSION} already exists. Release tags are immutable; choose a new version."
 fi
 
 # ── Bump version files ────────────────────────────────────────────────────────
@@ -118,8 +113,16 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 else
   info "Nothing to commit (version unchanged)"
 fi
-run git tag -f -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+run git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
 info "Tagged v${NEW_VERSION}"
+
+# Resolve AFTER the version commit: images and analytical provenance must name
+# the tagged source, not its parent. All service images share this identity.
+GIT_COMMIT=$(git rev-parse HEAD)
+BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+SOURCE_STATE=clean
+info "Git commit:      $GIT_COMMIT"
+info "Build date:      $BUILD_DATE"
 
 # ── GHCR login ───────────────────────────────────────────────────────────────
 if $PUSH && ! $DRY_RUN; then
@@ -143,6 +146,7 @@ COMMON_ARGS=(
   --build-arg "APP_VERSION=${NEW_VERSION}"
   --build-arg "GIT_COMMIT=${GIT_COMMIT}"
   --build-arg "BUILD_DATE=${BUILD_DATE}"
+  --build-arg "SOURCE_STATE=${SOURCE_STATE}"
 )
 
 # Step 1: build shared base image first (core web/infra deps only).

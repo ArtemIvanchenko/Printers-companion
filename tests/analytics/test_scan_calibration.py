@@ -15,7 +15,7 @@ from analytics.prediction.layer_engine import (  # noqa: E402
     GEOMETRY_FEATURES,
     LayerGeometrySeries,
     resolve_scan_model,
-    scan_model_key,
+    machine_mode_key,
     scan_seconds_from_model,
 )
 from analytics.prediction.scan_calibration import (  # noqa: E402
@@ -28,6 +28,7 @@ from analytics.prediction.scan_calibration import (  # noqa: E402
     scan_calibration_report,
 )
 from domain.enums.common import SourceFileFamily  # noqa: E402
+from analytics.prediction.scan_scope import scan_scope, scan_scope_key  # noqa: E402
 from domain.models.prints import MachineParams, PrintRecord  # noqa: E402
 from domain.models.sessions import BuildSession  # noqa: E402
 from domain.schemas.parsing import FileClassification  # noqa: E402
@@ -42,6 +43,15 @@ N_LAYERS = 200
 # hatch/1000 + contour/430 + jump/3000 + n_jumps*0.01 (per laser) + 0.5 фикс.
 TRUE_BETA = [1 / 1000, 1 / 430, 1 / 3000, 0.01, 0.0]
 TRUE_INTERCEPT = 0.5
+
+SCAN_PARAMS = {"printer_id": "test-printer", "hatch_speed_mm_s": 1000.0,
+               "contour_speed_mm_s": 430.0, "jump_speed_mm_s": 3000.0,
+               "hatch_distance_mm": 0.12, "layer_thickness_mm": THICKNESS,
+               "jump_delay_ms": 10.0, "laser_count": LASERS}
+
+
+def _scan_key(material="steel"):
+    return scan_scope_key(scan_scope(SCAN_PARAMS, material, THICKNESS))
 
 
 def _series(scale: float = 1.0) -> LayerGeometrySeries:
@@ -118,12 +128,18 @@ def _linked_pair(db, tmp_path, record_id: str, series: LayerGeometrySeries,
     )
     row = db.get(BuildSession, session_id)
     row.classification = classification
+    row.printer_id = SCAN_PARAMS["printer_id"]
     row.start_ts = datetime(2027, 3, 1, 8, tzinfo=timezone.utc)
     prediction = {
         "input_revision": 1,
         "build_origin_source": "explicit",
         "build_origin_z_mm": 0.0,
         "material": material,
+        "printer_id": SCAN_PARAMS["printer_id"],
+        "layer_thickness_mm": THICKNESS,
+        "laser_count": LASERS,
+        "hatch_distance_mm": SCAN_PARAMS["hatch_distance_mm"],
+        "scan_calibration_scope": scan_scope(SCAN_PARAMS, material, THICKNESS),
         "scan_geometry": _snapshot_geometry(series),
     }
     if geometry_fingerprint is not None:
@@ -232,7 +248,7 @@ class TestFitAndApply:
         db.flush()
 
         result = recalibrate_scan_and_apply(db)
-        key = scan_model_key("steel", THICKNESS)
+        key = _scan_key()
         assert key in result["applied"], result
         model = result["applied"][key]
         assert model["r2"] > 0.99
@@ -240,13 +256,14 @@ class TestFitAndApply:
         assert model["cv_worst_abs_total_err_pct"] < 10.0
         assert abs(model["total_err_pct"]) < 1.0
         assert model["features"] == list(GEOMETRY_FEATURES)
-        cycle_model = result["cycle_applied"][key]
+        cycle_key = machine_mode_key(SCAN_PARAMS["printer_id"], "steel", THICKNESS, LASERS)
+        cycle_model = result["cycle_applied"][cycle_key]
         assert cycle_model["base_overhead_ms"] == pytest.approx(250.0)
         assert cycle_model["n_prints"] == 2
         assert cycle_model["minimum_cycle_ms"] is None
 
         # Stored and resolvable exactly like the estimator does it
-        params = {"scan_model_by_mat": db.get(MachineParams, 1).scan_model_by_mat}
+        params = {**SCAN_PARAMS, "scan_model_by_mat": db.get(MachineParams, 1).scan_model_by_mat}
         resolved = resolve_scan_model(params, "steel", THICKNESS)
         assert resolved is not None
         # Prediction from the fitted model reproduces the synthetic total
@@ -269,7 +286,7 @@ class TestFitAndApply:
         db.flush()
         recalibrate_scan_and_apply(db)
 
-        params = {"scan_model_by_mat": db.get(MachineParams, 1).scan_model_by_mat}
+        params = {**SCAN_PARAMS, "scan_model_by_mat": db.get(MachineParams, 1).scan_model_by_mat}
         assert resolve_scan_model(params, "steel", THICKNESS) is not None
         # Real-data validation showed cross-mode transfer is worse than useless
         # (R² < 0) — a different thickness or material must resolve to nothing.
@@ -357,6 +374,7 @@ class TestFitAndApply:
                 )
                 db.flush()
                 row = db.get(PrintRecord, record_id)
+                db.get(BuildSession, row.session_id).printer_id = machine
                 prediction = dict(row.metadata_json["prediction"])
                 prediction.pop("scan_geometry")
                 prediction.update({
@@ -455,7 +473,7 @@ class TestFitAndApply:
         db.flush()
 
         result = recalibrate_scan_and_apply(db)
-        assert scan_model_key("steel", THICKNESS) in result["applied"]
+        assert _scan_key() in result["applied"]
 
     def test_stale_models_without_candidates_are_removed(self, db):
         db.add(MachineParams(

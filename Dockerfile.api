@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# api image — the only service that runs the heavy SLM / ML / 3D code paths
-# (STL slicing, print-time, defect-risk ML, cross-session change-point) inline.
-# Carries: base + analytics + heavy.
+# Shared API/estimator image: HTTP adapters plus owner-local geometry/ML workers.
+# Carries base + analytics + heavy; expensive jobs run in the estimator process.
 FROM ghcr.io/artemivanchenko/printers-companion:base
 
 # Analytics tier (pre-built wheels, no compiler needed).
@@ -33,10 +32,13 @@ USER app
 ARG APP_VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_DATE=unknown
+ARG SOURCE_STATE=unknown
 ENV APP_VERSION=$APP_VERSION \
     GIT_COMMIT=$GIT_COMMIT \
-    BUILD_DATE=$BUILD_DATE
+    BUILD_DATE=$BUILD_DATE \
+    SOURCE_STATE=$SOURCE_STATE
 LABEL org.opencontainers.image.version="$APP_VERSION" \
       org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.created="$BUILD_DATE" \
-      org.opencontainers.image.source="https://github.com/artemivanchenko/printer-log-analytics"
+      io.printers-companion.source-state="$SOURCE_STATE" \
+      org.opencontainers.image.source="https://github.com/ArtemIvanchenko/Printers-companion"

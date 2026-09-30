@@ -1,11 +1,9 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const vm = require('node:vm');
 
 // Execute the real template functions, without booting unrelated dashboard code.
-const html = fs.readFileSync(path.join(__dirname, '../../web_templates/dashboard.html'), 'utf8');
+const html = require('./dashboard-source.cjs').dashboardSource();
 const source = html.slice(html.indexOf('function _hasMeasuredAccuracyPair('), html.indexOf('async function loadDesignEstimate('));
 const host = {innerHTML: ''};
 const context = vm.createContext({document: {getElementById: () => host}, _esc: value => String(value)});

@@ -4,8 +4,9 @@
 # other service instead of duplicating a standalone python:3.11-slim install.
 FROM ghcr.io/artemivanchenko/printers-companion:base
 
+COPY requirements.mcp.txt /app/
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --progress-bar off "mcp>=1.0.0"
+    pip install --progress-bar off -r requirements.mcp.txt
 
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -19,10 +20,13 @@ CMD ["python", "-m", "mcp_server.main"]
 ARG APP_VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_DATE=unknown
+ARG SOURCE_STATE=unknown
 ENV APP_VERSION=$APP_VERSION \
     GIT_COMMIT=$GIT_COMMIT \
-    BUILD_DATE=$BUILD_DATE
+    BUILD_DATE=$BUILD_DATE \
+    SOURCE_STATE=$SOURCE_STATE
 LABEL org.opencontainers.image.version="$APP_VERSION" \
       org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.created="$BUILD_DATE" \
-      org.opencontainers.image.source="https://github.com/artemivanchenko/printer-log-analytics"
+      io.printers-companion.source-state="$SOURCE_STATE" \
+      org.opencontainers.image.source="https://github.com/ArtemIvanchenko/Printers-companion"

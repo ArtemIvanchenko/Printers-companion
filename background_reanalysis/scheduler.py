@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+from time import monotonic
 
 from background_reanalysis.hypothesis_generator import generate_hypotheses_from_patterns
 from background_reanalysis.insight_repository import create_pattern_insight_draft
@@ -29,6 +30,7 @@ def run_bounded_historical_reanalysis(
     session_features: list[dict[str, Any]],
 ) -> dict[str, Any]:
     completed = 0
+    started = monotonic()
     intermediate: list[dict[str, Any]] = []
     if not session_features:
         return _verdict(plan, 0, "insufficient_data", "insufficient_data", "No session features available.", [], intermediate)
@@ -37,21 +39,26 @@ def run_bounded_historical_reanalysis(
     hypotheses: list[dict[str, Any]] = []
     insights: list[dict[str, Any]] = []
     for index, name in enumerate(ITERATION_NAMES[: plan.max_iterations], start=1):
-        completed = index
+        if monotonic() - started >= plan.compute_budget_seconds:
+            return _verdict(plan, completed, "partial", "budget_exhausted",
+                            "Research time budget exhausted between stages.", insights, intermediate)
         if name == "mine_repeated_anomaly_patterns":
             patterns = mine_repeated_patterns(session_features)
+            completed += 1
             intermediate.append({"iteration": index, "name": name, "patterns": patterns})
             if not patterns:
                 return _verdict(plan, completed, "completed", "no_new_pattern", "No repeated patterns met the configured support threshold.", [], intermediate)
         elif name == "generate_candidate_hypotheses":
             hypotheses = generate_hypotheses_from_patterns(patterns, sample_size=len(session_features))
+            completed += 1
             intermediate.append({"iteration": index, "name": name, "hypotheses": hypotheses})
         elif name == "produce_final_verdict":
             analysis_window = {"start": plan.start.isoformat(), "end": plan.end.isoformat()}
             insights = [create_pattern_insight_draft(hypothesis, analysis_window) for hypothesis in hypotheses]
+            completed += 1
             intermediate.append({"iteration": index, "name": name, "insights": insights})
         else:
-            intermediate.append({"iteration": index, "name": name, "status": "completed"})
+            intermediate.append({"iteration": index, "name": name, "status": "not_implemented"})
 
     verdict_value = "weak_signal_found" if insights else "no_new_pattern"
     return _verdict(
@@ -106,4 +113,7 @@ def _verdict(
             },
         ),
         "evidence_links": intermediate,
+        "mode": "experimental",
+        "budget_enforcement": "between_stages",
+        "not_implemented_stages": [row["name"] for row in intermediate if row.get("status") == "not_implemented"],
     }

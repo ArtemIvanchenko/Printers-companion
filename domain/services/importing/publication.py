@@ -148,6 +148,10 @@ def publish_import(
     for report_id, report in result.reports.items():
         prepared = result.layer_timings.get(report.get("session_id"))
         payload = prepared_reports[report_id]["payload"]
+        snapshot = (result.sessions.get(report.get("session_id"), {}).get("group") or {}).get("analysis_snapshot")
+        if (report.get("analysis_snapshot") != snapshot
+                or payload.get("analysis_snapshot") != snapshot):
+            raise ValueError("Отчёт и сводка принадлежат разным аналитическим снимкам")
         if (
             prepared is None
             or report.get("timing_publication") != prepared.manifest

@@ -322,6 +322,7 @@ def main() -> None:
         logger.warning("PREFLIGHT: %s", warn)
     stop = False
     backoff = ExponentialBackoff(base_delay=5.0, max_delay=60.0)
+    next_receipt_recovery = 0.0
 
     def _request_stop(signum: int, frame: object) -> None:
         nonlocal stop
@@ -337,6 +338,11 @@ def main() -> None:
     
     while not stop:
         try:
+            if time.monotonic() >= next_receipt_recovery:
+                from domain.services.importing.recovery import recover_upload_receipts
+
+                next_receipt_recovery = time.monotonic() + 30.0
+                recover_upload_receipts(settings=settings)
             processed = process_due_import_jobs(lease_owner)
             if processed:
                 logger.info("Processed %s import job(s)", processed)
