@@ -135,6 +135,13 @@ Root pytest, Node boundary tests и offline Compose checks не заменяют
 `.github/workflows/desktop.yml` готовит отдельные unsigned установщики и smoke
 на Mac ARM, Mac Intel и Windows x64. Workflow не изменяет main и не создаёт
 Release/feed. Его наличие не означает, что удалённый CI уже выполнялся.
+05.10.2026 native CI выполнен на всех трёх платформах: frozen host, установщики
+и packaged IPC/window smoke прошли. Исправлены реальная Windows lock contention,
+кавычки PowerShell и GPU headless Intel smoke. Это проверочные PR-пакеты без
+новых опубликованных digests, а не доступный операторский Release. Порядок
+выпуска и текущие ограничения — [инструкция](OPERATOR_GUIDE.md) и
+[отчёт допуска](reviews/2026-10-05_operator_readiness.md).
+
 Четыре opt-in Docker lifecycle теста из `checks/updating/test_docker_lifecycle.py`
 проверяют настоящий engine только при `COMPANION_DOCKER_CHECKS=1`; fixture
 заменяет transport/schema probes, поэтому даже они не доказывают полный NAS e2e.
