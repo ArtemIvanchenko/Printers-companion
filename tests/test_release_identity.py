@@ -72,17 +72,14 @@ def test_release_refuses_ambiguous_sources_without_changing_them(release_repo, c
     assert not log.exists()
 
 
-@pytest.mark.parametrize("first_run", [True, False])
 @pytest.mark.parametrize("running_revision", ["b" * 40, "stale-build"])
-def test_mac_launcher_sets_identity_before_every_build(tmp_path, first_run, running_revision):
+def test_mac_first_launcher_sets_identity_before_build(tmp_path, running_revision):
     launcher = tmp_path / "launch.command"
     shutil.copy2(ROOT / "deploy/launchers/Запустить.command", launcher)
     source = tmp_path / "source"
     source.mkdir()
     (source / "VERSION").write_text("1.2.3\n")
     (source / ".env.example").write_text("# no secrets\n")
-    if not first_run:
-        shutil.copytree(source, tmp_path / "printers-companion")
     binaries = tmp_path / "bin"
     binaries.mkdir()
     executable(binaries / "git", '''#!/usr/bin/env python3
@@ -117,6 +114,24 @@ if 'build' in sys.argv or 'up' in sys.argv:
     assert runs[0]["identity"]["APP_VERSION"] == "1.2.3"
     assert runs[0]["identity"]["SOURCE_STATE"] == "clean"
     assert runs[0]["identity"]["BUILD_DATE"].endswith("Z")
+
+
+def test_mac_repeat_launcher_delegates_to_saved_release_without_rebuilding(tmp_path):
+    launcher = tmp_path / 'launch.command'
+    shutil.copy2(ROOT / 'deploy/launchers/Запустить.command', launcher)
+    source = tmp_path / 'printers-companion'
+    (source / 'scripts/maintenance').mkdir(parents=True)
+    (source / 'scripts/maintenance/update_runtime.py').write_text('# fixture')
+    executable(source / 'update.sh', '#!/bin/bash\nprintf "%s\\n" "$@"\n')
+    binaries = tmp_path / 'bin'
+    binaries.mkdir()
+    for binary in ('git', 'docker', 'open'):
+        executable(binaries / binary, '#!/bin/sh\nexit 0\n')
+    result = subprocess.run(['bash', str(launcher)], env=dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}"),
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0
+    assert '\nlaunch\n' in result.stdout
+    assert not (source / '.env').exists()
 
 
 def test_compose_uses_same_identity_for_all_application_images():
@@ -164,3 +179,27 @@ def test_release_builds_all_images_before_updating_mutable_aliases():
     assert "org.opencontainers.image.revision" in build
     publish = steps[publish_index]["run"]
     assert publish.index('docker push "$IMAGE_REPO:$service-v$APP_VERSION"') < publish.index('docker push "$IMAGE_REPO:$service"')
+
+
+def test_operator_installers_are_bound_to_images_and_release_waits_for_native_checks():
+    workflow = yaml.load((ROOT / '.github/workflows/release.yml').read_text(), Loader=yaml.BaseLoader)
+    jobs = workflow['jobs']
+    assert jobs['desktop']['needs'] == 'publish'
+    assert jobs['desktop']['uses'] == './.github/workflows/desktop.yml'
+    assert jobs['desktop']['with']['images_artifact'] == 'operator-images'
+    assert set(jobs['release']['needs']) == {'publish', 'desktop'}
+    assert jobs['release']['permissions']['contents'] == 'write'
+    capture = next(step['run'] for step in jobs['publish']['steps'] if step.get('name', '').startswith('Capture'))
+    assert 'capture_desktop_images.py' in capture
+    publish = jobs['release']['steps'][-1]['run']
+    assert 'gh release create' in publish and '--verify-tag' in publish
+    desktop = yaml.load((ROOT / '.github/workflows/desktop.yml').read_text(), Loader=yaml.BaseLoader)
+    resources = next(step for step in desktop['jobs']['package']['steps'] if step.get('name', '').startswith('Bundle'))
+    assert '--images' in resources['run'] and '--development' in resources['run']
+
+
+def test_desktop_package_metadata_matches_application_version():
+    version = (ROOT / 'VERSION').read_text().strip()
+    package = json.loads((ROOT / 'desktop/package.json').read_text())
+    lock = json.loads((ROOT / 'desktop/package-lock.json').read_text())
+    assert package['version'] == lock['version'] == lock['packages']['']['version'] == version

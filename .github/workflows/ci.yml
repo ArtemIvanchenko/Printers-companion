@@ -1,8 +1,7 @@
 name: CI
 
-# The desktop launcher updates operator machines with `git pull origin main`,
-# so whatever lands on main goes straight onto the printer's PC. This is the
-# only gate in front of that.
+# A published version must pass the application CI at its exact SHA. Desktop
+# packages have separate host/platform checks; main is not an update channel.
 on:
   push:
     branches: [main]
@@ -46,7 +45,7 @@ jobs:
           # schema. See the migrations job for Alembic coverage.
           DATABASE_URL: sqlite:////tmp/pla-ci.db
           APP_ENV: test
-        run: pytest tests/ -q
+        run: pytest tests/ checks/updating/ -q
 
   migrations:
     # Guards drift the test suite cannot see: conftest builds its schema with

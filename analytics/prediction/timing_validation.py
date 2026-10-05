@@ -110,10 +110,10 @@ def normal_phase_exclusions(payload: dict) -> list[str]:
     return reasons
 
 
-def timing_components_ms(events: Iterable[Any]) -> dict[int, tuple[float, float]]:
-    """Measured burn+pour pairs; conflicts are checked before phase bounds."""
+def timing_components_ms(timings: dict[int, dict]) -> dict[int, tuple[float, float]]:
+    """Burn+pour pairs from calibration_timing_payloads, with their own bounds."""
     out = {}
-    for layer, payload in calibration_timing_payloads(events).items():
+    for layer, payload in timings.items():
         burn, pour = payload.get("burn_ms"), payload.get("pour_ms")
         if (finite_number(burn) and burn > 0 and finite_number(pour)
                 and MIN_POUR_MS <= pour <= MAX_POUR_MS):
@@ -121,20 +121,20 @@ def timing_components_ms(events: Iterable[Any]) -> dict[int, tuple[float, float]
     return out
 
 
-def calibration_burn_ms(events: Iterable[Any]) -> dict[int, float]:
-    """Independent burn measurements, including compatible partial summaries."""
+def calibration_burn_ms(timings: dict[int, dict]) -> dict[int, float]:
+    """Independent burn projection of calibration_timing_payloads, even partial."""
     return {
         layer: float(payload["burn_ms"])
-        for layer, payload in calibration_timing_payloads(events).items()
+        for layer, payload in timings.items()
         if finite_number(payload.get("burn_ms"))
         and MIN_BURN_MS <= payload["burn_ms"] <= MAX_BURN_MS
     }
 
 
-def calibration_cycles_ms(events: Iterable[Any]) -> dict[int, tuple[float, float, float]]:
-    """Complete cycles with plausible phases; long residuals stay observable."""
+def calibration_cycles_ms(timings: dict[int, dict]) -> dict[int, tuple[float, float, float]]:
+    """Complete cycles from calibration_timing_payloads; long residuals remain."""
     out = {}
-    for layer, payload in calibration_timing_payloads(events).items():
+    for layer, payload in timings.items():
         if normal_phase_exclusions(payload):
             continue
         make = payload.get("make_layer_ms")

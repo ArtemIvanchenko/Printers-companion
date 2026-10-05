@@ -18,16 +18,10 @@ Design mirrors ``analytics.prediction.accuracy``: linked (PrintRecord,
 BuildSession) pairs, a windowed per-material median, a ``correction_locked``
 gate, and sanity bounds so an implausible reading doesn't get baked in.
 
-One difference from ``accuracy``'s reliance on the DB ``canonical_events``
-table: that table is populated only by the watcher-confirmed import path
-(``domain.services.import_jobs.execute_confirmed_import``) — the two other
-import paths (container-startup catch-up, the dashboard's manual "rescan")
-persist only the slim session payload. Rather than depend on which path
-brought a session in, this module re-parses each session's ``*_time.log``
-directly from its on-disk path via ``RuntimeRepository.get_session_files(...,
-rehydrate=True)`` — the same rehydration report generation already relies on.
-A session whose source files are no longer on disk is silently skipped (no
-crash, no fabricated number) rather than treated as data.
+Production calibration consumes shared, detached LayerSnapshot evidence.
+Legacy synchronous research callers retain an owner-local raw fallback only
+when no published measurement exists. An empty/invalid publication cannot be
+replaced by an unrelated local file; missing raw remains unknown, not zero.
 """
 from __future__ import annotations
 
@@ -49,7 +43,6 @@ from analytics.prediction.accuracy import (
     printed_at,
     session_classification,
 )
-from domain.enums.common import SourceFileFamily
 from domain.models.prints import MachineParams
 from analytics.prediction.timing_validation import (
     MAX_POUR_MS, MIN_POUR_MS, calibration_timing_payloads, timing_components_ms,
@@ -92,8 +85,9 @@ def layer_seconds_from_events(events: list) -> dict[int, tuple[float, float]]:
     pour calibrates recoat. Combining them and fitting one blanket multiplier
     makes the two independent calibration loops contaminate each other.
     """
+    timings = calibration_timing_payloads(events)
     return {layer: (burn / 1000.0, pour / 1000.0)
-            for layer, (burn, pour) in timing_components_ms(events).items()}
+            for layer, (burn, pour) in timing_components_ms(timings).items()}
 
 
 def machine_seconds_from_events(events: list) -> dict[int, float]:
@@ -112,19 +106,9 @@ def session_layer_seconds_by_layer(
     session_id: str, db: Session,
 ) -> dict[int, tuple[float, float]] | None:
     """Validated per-layer ``(burn, pour)`` seconds for one session."""
-    from analytics.prediction.layer_timings import stored_timing_events
+    from analytics.prediction.layer_timings import legacy_session_timing_events
 
-    stored = stored_timing_events(session_id, db)
-    if stored is not None:
-        return layer_seconds_from_events(stored) or None
-
-    files = _time_log_files(session_id, db)
-    if not files:
-        return None
-    out = layer_seconds_from_events([
-        event for f in files for event in f.parse_result.events
-    ])
-    return out or None
+    return layer_seconds_from_events(legacy_session_timing_events(session_id, db)) or None
 
 
 def session_machine_seconds_by_layer(session_id: str, db: Session) -> dict[int, float] | None:
@@ -152,22 +136,6 @@ def session_recoat_seconds(session_id: str, db: Session) -> list[float] | None:
     """
     timings = session_layer_seconds_by_layer(session_id, db)
     return [pour for _, pour in timings.values()] if timings else None
-
-
-def _time_log_files(session_id: str, db: Session) -> list:
-    """This session's parsed time_log files, or [] when none can be read."""
-    from storage.repositories.runtime import RuntimeRepository
-    from domain.services.compute_affinity import ComputeAffinityError
-
-    try:
-        files = RuntimeRepository(db).get_session_files(session_id, rehydrate=True) or []
-    except ComputeAffinityError:
-        # Stored per-layer facts are shared; raw fallback remains owner-local.
-        return []
-    return [
-        f for f in files
-        if f.classification.family == SourceFileFamily.time_log and f.parse_result
-    ]
 
 
 def recoat_accuracy(db: Session | None = None, *, inputs: CalibrationInputs | None = None) -> dict:

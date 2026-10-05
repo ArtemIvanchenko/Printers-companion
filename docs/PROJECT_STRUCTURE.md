@@ -38,8 +38,9 @@ API / worker → domain services → analytics / parsers (локальный р�
 - Маршрут валидирует запрос, ставит долгую работу в очередь и формирует ответ.
 - Предметный сервис не должен импортировать маршрут.
 - Репозиторий отвечает только за сохранение/выборку и не запускает аналитику.
-  Это целевая граница: legacy `storage/repositories/runtime.py` пока объединяет
-  SQL и MinIO/rehydration. Новые session/dashboard read models его не используют.
+  Legacy `storage/repositories/runtime.py` сохраняет широкие SQL-write обязанности,
+  но MinIO/rehydration перенесены в domain services без обратных delegates.
+  Новые session/dashboard read models используют узкие SQL-репозитории.
 - Сырой код сигнала (`SO1`, `Flow T`) остаётся стабильным ключом; русское имя
   приходит из `profiles/signal_catalog.py`.
 - `BuildJob` — производственное задание печати. Фоновые вычисления хранятся в
@@ -71,8 +72,9 @@ API / worker → domain services → analytics / parsers (локальный р�
 |---|---|
 | Импорт | `import_jobs.py` + `importing/`: подготовка, fenced-пакеты событий, атомарная публикация компактного результата |
 | Анализ сессии | `session_analysis.py` готовит признаки; `session_telemetry.py` отделяет полный поток от графика; `session_overview.py` формирует общий снимок |
-| Чтение отчёта | `session_reads.py` → detached SQL, затем `session_reports.py` → MinIO и проверка опубликованного снимка |
+| Отчёты | `reports.py` → SQL-only артефакты; `session_reports.py` → MinIO/LLM после освобождения SQL, затем version-checked публикация |
 | Повторный анализ | `session_requests.py` ставит исходный ImportJob в owner-local очередь; HTTP 202 |
+| Legacy raw repair | `session_sources.py` разбирает проверенные источники после освобождения SQL; maintenance сверяет входы перед записью |
 | Карточка/качество/вложения | `print_cards/`; HTTP переводит ошибки, не владеет файловой транзакцией |
 | План/факт времени | `print_cards/comparison.py`: общий summary v2 для списка/карточки, только совпадающий scope и полное покрытие |
 | Прогноз | `estimation/`: inputs → calculation → publication; worker не импортирует HTTP |
@@ -83,8 +85,11 @@ API / worker → domain services → analytics / parsers (локальный р�
 
 ## Оставшийся рефакторинг
 
-`api/routes/prints.py` сохраняет широкие list/SSE/legacy-адаптеры; тяжёлый расчёт
-уже в `estimation/`. В `runtime.py` остаются write/rehydration обязанности.
+`api/routes/prints.py` сохраняет SSE-транспорт; каталог — в `print_cards/cards.py`,
+тяжёлый расчёт — только в `estimation/`
+и owner-local worker. API process pool и private sync-адаптеры удалены;
+`APP_ENV=test` не меняет путь исполнения прогноза. В `runtime.py` остаются
+широкие SQL-write обязанности; raw/report IO из него удалены.
 SQL canonical events имеют MCP/export-потребителей и пока не имеют атомарного
 поколения всей истории. JavaScript вынесен из HTML, но classic globals/inline
 handlers не заменены на полностью изолированные компоненты. Эти переходы требуют

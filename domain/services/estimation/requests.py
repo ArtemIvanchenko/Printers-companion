@@ -55,12 +55,18 @@ def enqueue_estimate(
 ) -> dict[str, Any]:
     """Create a local estimate job for this exact geometry/revision.
 
-    Automatic triggers deduplicate the same inputs. A manual "recalculate"
-    always gets a fresh request id, even when the card revision is unchanged.
+    Repeated clicks join an active calculation with the same inputs. A manual
+    rerun gets a fresh request only after the previous calculation finishes.
     """
     from storage.repositories.jobs_repo import JobsRepository
 
     node_id = compute_node_id or get_settings().compute_node_id
+    require_local_print(record, compute_node_id=node_id)
+    # Serialize submissions with card publication, refreshing a revision that
+    # an automatic estimate may have changed since the HTTP admission read.
+    record = repo.get_print_record_for_update(record['record_id'])
+    if record is None:
+        raise EstimateError('not_found', 'Карточка печати не найдена')
     require_local_print(record, compute_node_id=node_id)
     geometry = sorted(
         (f["file_type"], f["checksum"])
@@ -69,12 +75,22 @@ def enqueue_estimate(
     )
     fingerprint = hashlib.sha256(
         json.dumps(
-            {"revision": record["revision"], "geometry": geometry},
-            sort_keys=True,
+            {"revision": record["revision"], "geometry": geometry,
+             "machine": repo.get_machine_params(),
+             "preset": repo.get_active_preset_for_material(record.get('material'))},
+            sort_keys=True, default=str,
         ).encode("utf-8")
     ).hexdigest()[:24]
+    jobs = JobsRepository(repo.db)
+    active = jobs.active_for_inputs(
+        job_type='print_estimate', owner_node_id=node_id,
+        entity_type='print_record', entity_id=record['record_id'],
+        input_fingerprint=fingerprint,
+    )
+    if active is not None:
+        return active
     request_key = os.urandom(12).hex() if force else fingerprint
-    return JobsRepository(repo.db).enqueue(
+    return jobs.enqueue(
         job_type="print_estimate",
         owner_node_id=node_id,
         entity_type="print_record",

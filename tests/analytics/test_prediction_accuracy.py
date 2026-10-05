@@ -350,7 +350,9 @@ class TestMachineTimeActuals:
     def _pair(self, db, tmp_path, record_id, *, log_layers, snapshot_layers,
               span_hours, raw_hours=10.0):
         from datetime import timedelta
+        from pathlib import Path
 
+        from core.utils.files import sha256_file
         from domain.enums.common import SourceFileFamily
         from domain.schemas.parsing import FileClassification
         from domain.services.ingestion import IngestedFile
@@ -364,7 +366,8 @@ class TestMachineTimeActuals:
                 path=log_path, file_name=f"{session_id}_time.log",
                 family=SourceFileFamily.time_log, role="secondary", confidence=1.0,
             ),
-            checksum="x", size_bytes=1, data_quality_status="ok",
+            checksum=sha256_file(Path(log_path)), size_bytes=Path(log_path).stat().st_size,
+            data_quality_status="ok",
             mtime=datetime.now(timezone.utc), parse_result=None,
         )
         RuntimeRepository(db).save_session_payload(
@@ -440,12 +443,18 @@ class TestMachineTimeActuals:
         assert row["wall_span_hours"] == pytest.approx(6.0, abs=0.01)
 
     def test_high_numbered_partial_log_cannot_masquerade_as_complete(self, db, tmp_path):
+        from core.utils.files import sha256_file
+
         self._pair(db, tmp_path, "pr_tail", log_layers=1000, snapshot_layers=1000,
                    span_hours=20.0)
         path = tmp_path / "s_pr_tail_time.log"
         lines = [f"OLD_STATS: {layer} | 9250 | 30000 | 39250 |"
                  for layer in range(6001, 7001)]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        session = db.get(BuildSession, "s_pr_tail")
+        payload = session.context["runtime_payload"]
+        source = {**payload["files"][0], "checksum": sha256_file(path), "size_bytes": path.stat().st_size}
+        session.context = {**session.context, "runtime_payload": {**payload, "files": [source]}}
         db.flush()
 
         row = next(r for r in prediction_accuracy(db)["pairs"] if r["record_id"] == "pr_tail")

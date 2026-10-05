@@ -20,7 +20,7 @@ from scripts.maintenance.desktop_runtime import STATE
 from storage.db.session import session_scope
 from storage.object_store.minio_client import ObjectStore
 from storage.repositories.prints_repo import PrintsRepository
-from storage.repositories.runtime import RuntimeRepository
+from storage.repositories.import_jobs import ImportJobsRepository
 
 CONFIRMED = Path('/Users/admin/Desktop/Подтверждённые печати')
 MODE = re.compile(r'\((steel|aluminum)\s+([0-9.]+)мм')
@@ -160,14 +160,14 @@ def prepare_logs(manifest):
         batch.update({'source_path': str(root), 'fingerprint': fingerprint, 'files': selected})
         job_id = 'import_desktop_' + fingerprint[:24]
         with session_scope() as db:
-            repo = RuntimeRepository(db)
+            repo = ImportJobsRepository(db)
             old = repo.get_import_job(job_id)
         if old is None:
             detected = detect_import_candidate(root, print_record_id=batch['record_id'])
             detected.job.import_job_id = job_id
             confirmed = mark_import_job_confirmed(detected.job, actor='operator-request-desktop-import')
             with session_scope() as db:
-                RuntimeRepository(db).save_import_job(confirmed.job)
+                ImportJobsRepository(db).save_import_job(confirmed.job)
         batch['job_id'] = job_id
         print('Queued', batch['key'], len(selected), flush=True)
     result = {'batches': batches, 'superseded': superseded, 'conflicts': conflicts}
@@ -217,10 +217,14 @@ def prepare_models(manifest, plan):
         card = group['record_id']
         with session_scope() as db:
             meta = dict(db.get(PrintRecord, card).metadata_json or {})
-        if meta.get('desktop_geometry_complete'):
+        if meta.get('desktop_catalog_complete'):
             receipts.append({'record_id': card, 'status': 'already_catalogued'})
             continue
         geometries, errors, sources = [], [], []
+        quality = {
+            'status': 'unconfirmed', 'missing': ['as_run_platform_export'],
+            'note': 'Каталогизация файлов не подтверждает количество копий и размещение всей платформы.',
+        }
         has_stl = any(Path(r['path']).suffix.lower() == '.stl' for r in group['rows'])
         for row in group['rows']:
             suffix = Path(row['path']).suffix.lower()
@@ -230,6 +234,7 @@ def prepare_models(manifest, plan):
             try:
                 if suffix == '.magics':
                     plate = read_plate(row['path'])
+                    quality = plate.geometry_quality
                     meshes = plate.parts
                     native_supports = plate.support_entry_count
                     if not has_stl and meshes:
@@ -254,7 +259,7 @@ def prepare_models(manifest, plan):
             except Exception as exc:
                 errors.append({'file': row['name'], 'error': str(exc)[:500]})
         report = {'record_id': card, 'source_folder': group['source'], 'sources': sources,
-                  'geometry': geometries, 'errors': errors,
+                  'geometry': geometries, 'errors': errors, 'geometry_quality': quality,
                   'limitations_ru': ['Геометрия не доказывает факт печати; нативные поддержки не восстановлены.',
                                      'Прогноз времени не создавался по неподтверждённым параметрам.'],
                   'provenance': build_provenance('desktop_catalog', inputs=[r['sha256'] for r in group['rows']],
@@ -265,7 +270,8 @@ def prepare_models(manifest, plan):
         with session_scope() as db:
             record = db.get(PrintRecord, card)
             metadata = dict(record.metadata_json or {})
-            metadata.update({'desktop_geometry_complete': not errors, 'desktop_geometry_summary': {
+            metadata.update({'desktop_catalog_complete': not errors, 'desktop_geometry_complete': False,
+                             'geometry_quality': quality, 'desktop_geometry_summary': {
                 'files': len(geometries), 'errors': errors, 'source': 'calculated',
                 'native_support_records': sum(g['native_support_records'] for g in geometries),
                 'provenance': report['provenance'],

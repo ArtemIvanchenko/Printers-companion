@@ -106,3 +106,75 @@ def test_timestamp_brackets_define_threshold_layer_range_without_progress_fallba
     [item] = result["items"]
     assert item["layer_range"] == [41, 60]
     assert item["mapping_precision"] == "timestamp_range"
+
+
+def test_uniform_geometry_reference_is_interpolated_once(monkeypatch):
+    calls = {"point": 0, "batch": 0}
+    original_at = LayerGeometrySeries.at
+    original_at_heights = LayerGeometrySeries.at_heights
+
+    def point(series, height):
+        calls["point"] += 1
+        return original_at(series, height)
+
+    def batch(series, heights):
+        calls["batch"] += 1
+        return original_at_heights(series, heights)
+
+    monkeypatch.setattr(LayerGeometrySeries, "at", point)
+    monkeypatch.setattr(LayerGeometrySeries, "at_heights", batch)
+    result = map_anomalies_to_geometry(
+        {"burn_drift": {"outlier_layers": [{"layer": layer} for layer in range(1, 21)]}},
+        _geometry(),
+    )
+
+    assert len(result["items"]) == 20
+    assert calls == {"point": 20, "batch": 1}
+
+
+def test_progress_mapping_prepares_logged_layers_once(monkeypatch):
+    from analytics import geometry_context
+
+    calls = []
+    original = geometry_context._logged_layers
+
+    def logged_layers(telemetry):
+        calls.append(telemetry)
+        return original(telemetry)
+
+    monkeypatch.setattr(geometry_context, "_logged_layers", logged_layers)
+    telemetry = {
+        # Legacy aligned arrays without time labels still support progress.
+        "oxygen": {"SO1": [0.1] * 11},
+        "layer_burn_times": [{"layer": layer} for layer in range(100, 0, -1)],
+    }
+    result = map_anomalies_to_geometry(
+        {"anomalies": [
+            {"signal": "SO1", "kind": "spike", "sample_index": 5},
+            {"signal": "SO1", "kind": "threshold", "sample_ranges": [{
+                "start": {"sample_index": 2}, "end": {"sample_index": 8},
+            }]},
+        ]},
+        _geometry(), telemetry=telemetry,
+    )
+
+    assert len(calls) == 1
+    assert [(item["layer"], item["layer_range"]) for item in result["items"]] == [
+        (50, [21, 80]), (51, None),
+    ]
+    assert all(item["mapping_precision"].startswith("approximate_progress")
+               for item in result["items"])
+
+
+@pytest.mark.parametrize("health", [{}, {"anomalies": [{"signal": "SO1"}]}])
+def test_unmappable_anomalies_do_not_interpolate_reference(monkeypatch, health):
+    def forbidden(*args):
+        pytest.fail("An unmappable anomaly does not need geometric interpolation")
+
+    monkeypatch.setattr(LayerGeometrySeries, "at", forbidden)
+    monkeypatch.setattr(LayerGeometrySeries, "at_heights", forbidden)
+
+    result = map_anomalies_to_geometry(health, _geometry())
+
+    assert result["status"] == "no_mappable_anomalies"
+    assert result["items"] == []

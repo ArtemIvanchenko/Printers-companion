@@ -17,7 +17,7 @@ from domain.services.import_jobs import (
     LeaseCheckUnavailableError,
     RetryableImportError,
     StaleImportLeaseError,
-    retry_import_job,
+    confirm_import_job,
 )
 from domain.services.importing.fence import ImportFence
 from domain.services.importing.publication import prepare_import_reports, publish_import
@@ -25,7 +25,7 @@ from domain.services.ingestion import IngestionService
 from profiles.m350.profile import build_registry, get_profile
 from reporting.json_report.generator import generate_session_json_report
 from storage.db.session import SessionLocal
-from storage.repositories.runtime import RuntimeRepository
+from storage.repositories.import_jobs import ImportJobsRepository
 from worker.lease_heartbeat import LeaseHeartbeat
 
 
@@ -155,6 +155,9 @@ def analyze_folder(folder: str, session_id: str = "local_session") -> dict:
 
 
 def process_due_import_jobs(lease_owner: str | None = None) -> int:
+    from core.maintenance import maintenance_active
+    if maintenance_active():
+        return 0
     processed = 0
     failed = 0
     registry = build_registry()
@@ -163,12 +166,14 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
     lease_owner = lease_owner or process_lease_owner(settings.compute_node_id)
 
     while True:
+        if maintenance_active():
+            break
         # Claim under a row lock, then commit the short transaction before the
         # long local parse.  The WHERE clause includes owner_node_id, so a PC
         # never downloads or executes another operator PC's work.
         now = datetime.now(timezone.utc)
         with SessionLocal() as claim_db:
-            claimed = RuntimeRepository(claim_db).claim_next_import_job(
+            claimed = ImportJobsRepository(claim_db).claim_next_import_job(
                 owner_node_id=settings.compute_node_id,
                 lease_owner=lease_owner,
                 now=now,
@@ -199,7 +204,7 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
 
             def renew_lease() -> bool:
                 with SessionLocal() as heartbeat_db:
-                    renewed = RuntimeRepository(heartbeat_db).renew_import_job_lease(
+                    renewed = ImportJobsRepository(heartbeat_db).renew_import_job_lease(
                         job_id,
                         lease_owner=lease_owner,
                         lease_generation=lease_generation,
@@ -237,7 +242,7 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
                     last_guard_check = checked_at
                     return current
 
-                result = retry_import_job(
+                result = confirm_import_job(
                     claimed,
                     registry=registry,
                     profile=profile,
@@ -271,7 +276,7 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
             # is in a rolled-back state and cannot be used).
             try:
                 with SessionLocal() as db2:
-                    repo2 = RuntimeRepository(db2)
+                    repo2 = ImportJobsRepository(db2)
                     job2 = repo2.get_import_job_for_update(job_id)
                     if (
                         job2
@@ -338,6 +343,10 @@ def main() -> None:
     
     while not stop:
         try:
+            from core.maintenance import maintenance_active
+            if maintenance_active():
+                time.sleep(2)
+                continue
             if time.monotonic() >= next_receipt_recovery:
                 from domain.services.importing.recovery import recover_upload_receipts
 

@@ -96,8 +96,8 @@
     </div>
 
     <!-- Update available banner — shown globally across all tabs. Purely informational:
-         updates only happen via the desktop icon (deploy/launch.ps1 -> update.ps1), never
-         from inside the running container (it has no Docker access anyway). -->
+         native desktop or explicit host updater owns installation; this page
+         never controls Docker or executes an update inside the API container. -->
     <div id="update-banner" style="display:none;background:linear-gradient(90deg,#1e3a5f,#1a4a3a);
          border-bottom:1px solid #2d4a6e;padding:10px 20px;
          display:none;align-items:center;gap:14px;flex-wrap:wrap;">
@@ -105,7 +105,7 @@
         <div style="flex:1;min-width:200px;">
             <div style="color:#60a5fa;font-weight:600;font-size:14px;">Доступно обновление</div>
             <div id="update-banner-msg" style="color:#94a3b8;font-size:12px;margin-top:2px;"></div>
-            <div style="color:#94a3b8;font-size:12px;margin-top:2px;">Закройте систему и запустите иконку на рабочем столе ещё раз — обновление установится автоматически.</div>
+            <div style="color:#94a3b8;font-size:12px;margin-top:2px;">В настольном приложении используйте кнопку «Проверить обновления» в верхней полосе окна. Эта веб-страница только сообщает о версии.</div>
         </div>
         <button onclick="dismissUpdateBanner()"
             style="background:transparent;color:#6b7280;border:none;font-size:18px;cursor:pointer;padding:4px;">✕</button>
@@ -979,7 +979,7 @@
                 <!-- GitHub check card -->
                 <div id="upd-check-card" style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-bottom:16px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-                        <span style="color:#a0aec0;font-size:13px;">GitHub (main)</span>
+                        <span style="color:#a0aec0;font-size:13px;">Опубликованный стабильный релиз</span>
                         <button onclick="refreshUpdateCheck()"
                             style="background:#2d3748;border:none;color:#a0aec0;font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;">
                             🔍 Проверить
@@ -996,8 +996,11 @@
                         <span id="upd-status-label" style="font-size:13px;color:#a0aec0;">Проверка…</span>
                     </div>
                     <div style="margin-top:14px;color:#6b7280;font-size:12px;line-height:1.5;">
-                        Обновление устанавливается автоматически при запуске иконки на рабочем
-                        столе — закройте систему и запустите её ещё раз, чтобы применить.
+                        Дождитесь завершения расчётов. На Mac запустите «Обновить.command»,
+                        на Windows — «Обновить.bat», либо выполните update.sh / update.ps1 apply.
+                        В настольном приложении обновлением управляет кнопка в верхней полосе окна.
+                        Новая версия сначала проверяется; данные и .env сохраняются.
+                        Эта страница не получает доступ к Docker и не запускает обновление сама.
                     </div>
                 </div>
 

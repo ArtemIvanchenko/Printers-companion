@@ -206,7 +206,7 @@ def _actual_hours(session: BuildSession) -> float | None:
     """Wall-clock span in hours for diagnostics only.
 
     ``start_ts``/``end_ts`` are the monitor100-excluded print span computed by
-    ``compute_print_span``. It may include pauses and must never substitute for
+    ``compute_session_spans``. It may include pauses and must never substitute for
     normal machine time in prediction accuracy or calibration.
     """
     if not session.start_ts or not session.end_ts:

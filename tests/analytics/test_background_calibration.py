@@ -197,7 +197,7 @@ def test_snapshot_report_matches_legacy_math_and_never_rehydrates(history, monke
     def forbidden(*args, **kwargs):
         pytest.fail("Detached calibration must not read local files")
 
-    monkeypatch.setattr("storage.repositories.runtime.RuntimeRepository.get_session_files", forbidden)
+    monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", forbidden)
     detached = [prediction_accuracy(inputs=inputs), recoat_accuracy(inputs=inputs), scan_calibration_report(inputs=inputs)]
     for reports in (legacy, detached):
         for models in (reports[2]["candidates"], reports[2]["cycle_candidates"]):

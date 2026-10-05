@@ -35,18 +35,60 @@
                 <thead>
                     <tr><th>ID</th><th>Дата</th><th>Тип</th><th>Материал</th><th>Длительность</th></tr>
                 </thead>
-                <tbody></tbody>
+                <tbody id="session-rows"></tbody>
             </table>
+            <p id="session-status" role="status">Загрузка сессий…</p>
+            <button id="session-more" type="button" hidden>Ещё</button>
         </div>
     </div>
     <script>
-        function esc(v) { const d = document.createElement('div'); d.textContent = v == null ? '-' : String(v); return d.innerHTML; }
-        fetch('http://localhost:8000/sessions/').then(r => r.json()).then(data => {
-            const tbody = document.querySelector('#sessions-table tbody');
-            (data.sessions || []).forEach(s => {
-                tbody.innerHTML += `<tr><td>${esc(s.session_id)}</td><td>${esc(s.start_ts)}</td><td>${esc(s.classification)}</td><td>${esc(s.material)}</td><td>${s.duration_sec ? esc(Math.round(s.duration_sec/60) + ' мин') : '-'}</td></tr>`;
-            });
-        });
+        const rows = document.getElementById('session-rows');
+        const status = document.getElementById('session-status');
+        const more = document.getElementById('session-more');
+        let skip = 0;
+        let loading = false;
+
+        async function loadSessions() {
+            if (loading) return;
+            loading = true;
+            more.disabled = true;
+            status.textContent = 'Загрузка сессий…';
+            try {
+                const response = await fetch(`/sessions?skip=${skip}&limit=50`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const page = await response.json();
+                if (!Array.isArray(page.items) || !Number.isInteger(page.total)) {
+                    throw new Error('Некорректный ответ сервера');
+                }
+                for (const session of page.items) {
+                    const features = session.features || {};
+                    const seconds = features.duration_sec;
+                    const duration = typeof seconds === 'number' && Number.isFinite(seconds)
+                        ? Math.round(seconds / 60) + ' мин' : '-';
+                    const row = document.createElement('tr');
+                    for (const value of [session.session_id, session.start_ts,
+                            session.classification, features.material, duration]) {
+                        const cell = document.createElement('td');
+                        cell.textContent = value == null ? '-' : String(value);
+                        row.appendChild(cell);
+                    }
+                    rows.appendChild(row);
+                }
+                skip += page.items.length;
+                status.textContent = skip ? `Показано ${skip} из ${page.total}.` : 'Нет опубликованных сессий.';
+                more.hidden = skip >= page.total;
+                more.textContent = 'Ещё';
+            } catch (error) {
+                status.textContent = 'Не удалось загрузить сессии: ' + error.message;
+                more.hidden = false;
+                more.textContent = 'Повторить';
+            } finally {
+                more.disabled = false;
+                loading = false;
+            }
+        }
+        more.addEventListener('click', loadSessions);
+        loadSessions();
     </script>
 </body>
 </html>

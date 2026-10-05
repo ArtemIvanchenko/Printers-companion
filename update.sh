@@ -1,86 +1,11 @@
-#!/bin/bash
-set -e -o pipefail
-
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG="$REPO_DIR/update.log"
-DEPLOYED_FILE="$REPO_DIR/.last_deployed"
-
-cd "$REPO_DIR"
-
-git fetch origin main -q
-
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
-LAST_DEPLOYED=$(cat "$DEPLOYED_FILE" 2>/dev/null || echo "")
-
-# Exit only if already at remote HEAD AND last deploy completed successfully.
-# If LAST_DEPLOYED differs from REMOTE, a previous deploy failed mid-way → retry.
-if [ "$LOCAL" = "$REMOTE" ] && [ "$LAST_DEPLOYED" = "$REMOTE" ]; then
-    exit 0
-fi
-
-FROM="${LAST_DEPLOYED:-$LOCAL}"
-
-if [ "$LOCAL" != "$REMOTE" ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M')] Обновление: ${LOCAL:0:8} → ${REMOTE:0:8}" >> "$LOG"
-    git pull --ff-only origin main -q
-fi
-
-# Rebuild base image if base-layer files changed (new deps won't appear otherwise).
-if git diff --name-only "$FROM" "$REMOTE" 2>/dev/null | grep -qE 'Dockerfile\.base|requirements'; then
-    echo "[$(date '+%Y-%m-%d %H:%M')] Пересборка базового образа..." >> "$LOG"
-    docker build -f Dockerfile.base -t ghcr.io/artemivanchenko/printers-companion:base . >> "$LOG" 2>&1
-fi
-
-# Rebuild and restart all currently running app services (dynamic — respects active profiles).
-RUNNING=$(docker compose ps --services --filter status=running 2>/dev/null | tr '\n' ' ')
-SERVICES="${RUNNING:-api worker estimator nas-sync watcher scheduler}"
-# An older installation cannot list newly introduced workers as running.
-# Keep storage-only deployments untouched, but complete an operator stack.
-case " $SERVICES " in
-    *" api "*|*" worker "*)
-        for REQUIRED in estimator nas-sync; do
-            case " $SERVICES " in
-                *" $REQUIRED "*) ;;
-                *) SERVICES="$SERVICES $REQUIRED" ;;
-            esac
-        done
-        ;;
-esac
-NEW_GIT_COMMIT=$(git rev-parse HEAD)
-APP_VERSION=$(tr -d '[:space:]' < VERSION)
-BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-SOURCE_STATE=clean
-[ -z "$(git status --porcelain --untracked-files=normal)" ] || SOURCE_STATE=dirty
-export APP_VERSION BUILD_DATE SOURCE_STATE
-# shellcheck disable=SC2086
-GIT_COMMIT="$NEW_GIT_COMMIT" docker compose up -d --build $SERVICES >> "$LOG" 2>&1
-
-# Storage-only deployments have no API. Operator deployment is not recorded as
-# complete merely because compose created containers.
-case " $SERVICES " in
-    *" api "*)
-        READY_DEADLINE=$((SECONDS + 180))
-        until curl --connect-timeout 2 --max-time 15 -fs http://localhost:8000/health/ready >/dev/null 2>&1; do
-            if [ "$SECONDS" -ge "$READY_DEADLINE" ]; then
-                echo "API/storage readiness was not confirmed; deployment marker unchanged." >&2
-                exit 1
-            fi
-            sleep 2
-        done
-        RUNNING_COMMIT=$(docker compose exec -T api printenv GIT_COMMIT)
-        [ "$RUNNING_COMMIT" = "$NEW_GIT_COMMIT" ] || {
-            echo "Running API revision differs from the requested build; deployment marker unchanged." >&2
-            exit 1
-        }
-        ;;
-esac
-echo "$REMOTE" > "$DEPLOYED_FILE"
-
-NEW_COMMIT=$(git rev-parse --short HEAD)
-curl -s -X POST http://localhost:8000/admin/update/notify \
-  -H "Content-Type: application/json" \
-  -d "{\"commit\":\"$NEW_COMMIT\",\"message\":\"Обновлено до ${REMOTE:0:8}\"}" \
-  >> "$LOG" 2>&1 || true
-
-echo "[$(date '+%Y-%m-%d %H:%M')] Готово ($NEW_COMMIT)" >> "$LOG"
+#!/usr/bin/env bash
+# Thin host wrapper: same standard-library engine as Windows, no git pull.
+set -euo pipefail
+UPDATE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for UPDATE_PYTHON in "$UPDATE_ROOT/.venv/bin/python" python3 /Library/Developer/CommandLineTools/usr/bin/python3; do
+    if "$UPDATE_PYTHON" -c 'import sys; sys.exit(sys.version_info < (3,9))' >/dev/null 2>&1; then
+        exec "$UPDATE_PYTHON" "$UPDATE_ROOT/scripts/maintenance/update_runtime.py" --root "$UPDATE_ROOT" "$@"
+    fi
+done
+echo "Нужен Python 3.9+ для локального обновлятора. Системный Python не изменялся." >&2
+exit 1

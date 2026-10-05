@@ -168,5 +168,5 @@ def accuracy_view(inputs: CalibrationInputs, published: dict | None) -> dict:
     }
     report["timing_source"] = "shared_layer_snapshots"
     report["missing_timing_sessions"] = sorted({session.session_id for _, session in inputs.linked
-                                               if session.session_id not in inputs.events})
+                                               if session.session_id not in inputs.timings})
     return report

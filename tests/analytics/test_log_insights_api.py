@@ -111,3 +111,89 @@ def test_ui_script_is_served_and_uses_text_nodes_for_untrusted_values():
     assert response.status_code == 200
     assert "textContent" in response.text
     assert "innerHTML" not in response.text
+
+
+def test_each_session_timing_stream_is_prepared_once_after_sql_is_released(monkeypatch):
+    from sqlalchemy import event, select
+    from analytics.prediction import timing_snapshot
+    import domain.services.log_insights as service
+
+    seed("once-r1", "once-s1")
+    seed("once-r2", "once-s2", 11000)
+    with SessionLocal() as db:
+        for sid in ("once-s1", "once-s2"):
+            publication = f"publication-{sid}"
+            rows = db.scalars(select(LayerSnapshot).where(LayerSnapshot.session_id == sid)
+                              .order_by(LayerSnapshot.layer)).all()
+            for row in rows:
+                row.context = {"publication_id": publication}
+            session = db.get(BuildSession, sid)
+            session.context = {**session.context, timing_snapshot.MANIFEST_KEY: {
+                "schema": 1, "publication_id": publication, "status": "complete",
+                "row_count": len(rows), "rows_fingerprint": timing_snapshot.stable_hash([
+                    {"layer": row.layer, "features": row.features} for row in rows]),
+            }}
+        db.commit()
+    calls = []
+    digests = []
+    active = 0
+    original = service.calibration_timing_payloads
+    original_hash = timing_snapshot.stable_hash
+
+    def checkout(*args):
+        nonlocal active
+        active += 1
+
+    def checkin(*args):
+        nonlocal active
+        active -= 1
+
+    def prepare(events):
+        assert active == 0
+        calls.append([event["payload"]["burn_ms"] for event in events])
+        return original(events)
+
+    def fingerprint(rows):
+        assert active == 0
+        digests.append(rows)
+        return original_hash(rows)
+
+    with SessionLocal() as db:
+        engine = db.get_bind()
+    event.listen(engine, "checkout", checkout)
+    event.listen(engine, "checkin", checkin)
+    monkeypatch.setattr(service, "calibration_timing_payloads", prepare)
+    monkeypatch.setattr(timing_snapshot, "stable_hash", fingerprint)
+    try:
+        result = service.print_log_insights("once-r2")
+        assert result["repeatability"]["sample_count"] == 1
+        assert sorted(calls) == [[10000], [11000]]
+        assert len(digests) == 2
+    finally:
+        event.remove(engine, "checkout", checkout)
+        event.remove(engine, "checkin", checkin)
+
+
+def test_unlinked_card_does_not_read_unused_candidates_or_session_tables():
+    from sqlalchemy import event
+    from domain.services.log_insights import print_log_insights
+
+    with SessionLocal() as db:
+        db.add(PrintRecord(record_id="unlinked-read", name="unlinked-read"))
+        db.commit()
+        engine = db.get_bind()
+    reads = []
+
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT"):
+            reads.append(statement)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        result = print_log_insights("unlinked-read")
+        assert result["status"] == "needs_reanalysis"
+        assert result["repeatability"]["status"] == "insufficient_identity"
+        assert len(reads) == 1
+        assert "FROM print_records" in reads[0]
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)

@@ -1,79 +1,47 @@
-"""Exercise the updater without touching Git remotes or Docker services."""
+"""Thin compatibility wrappers delegate to the same transactional host engine."""
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
+ROOT = Path(__file__).parents[1]
 
-@pytest.mark.parametrize('running,expected', [
-    ('api\nworker\npostgres\n', {'api', 'worker', 'postgres', 'estimator', 'nas-sync'}),
-    ('api\nestimator\nnas-sync\n', {'api', 'estimator', 'nas-sync'}),
-    ('postgres\nminio\nredis\n', {'postgres', 'minio', 'redis'}),
-    ('', {'api', 'worker', 'estimator', 'nas-sync', 'watcher', 'scheduler'}),
-])
-@pytest.mark.parametrize('api_revision', ['abc123456789', 'stale-build'])
-def test_update_completes_operator_workers_but_preserves_storage_only(tmp_path, running, expected, api_revision):
+
+@pytest.mark.parametrize('exit_code', [0, 3])
+def test_bash_wrapper_preserves_arguments_and_failure_without_git_or_docker(tmp_path, exit_code):
     bash = shutil.which('bash')
     if not bash:
-        pytest.skip('bash is not available')
-    root = Path(__file__).parents[1]
-    shutil.copyfile(root / 'update.sh', tmp_path / 'update.sh')
-    (tmp_path / 'VERSION').write_text('1.2.3\n')
-    commands = {
-        'git': '''#!/bin/sh
-case "$*" in
-  'rev-parse --short HEAD') echo abc1234 ;;
-  'rev-parse HEAD'|'rev-parse origin/main') echo abc123456789 ;;
-esac
-''',
-        'docker': '''#!/bin/sh
-case "$*" in
-  'compose ps --services --filter status=running') printf '%s' "$TEST_RUNNING" ;;
-  'compose up -d --build '*) printf '%s\\n' "$@" > "$TEST_CAPTURE" ;;
-  'compose exec -T api printenv GIT_COMMIT') echo "$TEST_API_REVISION" ;;
-  *) exit 1 ;;
-esac
-''',
-        'curl': '#!/bin/sh\nexit 0\n',
-    }
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
-    for name, source in commands.items():
-        executable = bin_dir / name
-        executable.write_text(source)
-        executable.chmod(0o700)
-    capture = tmp_path / 'compose-arguments'
-    env = {**os.environ, 'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
-           'TEST_RUNNING': running, 'TEST_CAPTURE': str(capture), 'TEST_API_REVISION': api_revision}
-    result = subprocess.run([bash, str(tmp_path / 'update.sh')], env=env,
-                            capture_output=True, text=True)
-    if 'api' in expected and api_revision == 'stale-build':
-        assert result.returncode != 0
-        assert not (tmp_path / '.last_deployed').exists()
-        assert 'revision differs' in result.stderr
-        return
-    assert result.returncode == 0, result.stdout + result.stderr
-    arguments = capture.read_text().splitlines()
-    assert arguments[:4] == ['compose', 'up', '-d', '--build']
-    assert set(arguments[4:]) == expected
-    assert len(arguments[4:]) == len(expected)
-    assert (tmp_path / '.last_deployed').read_text().strip() == 'abc123456789'
+        pytest.skip('bash is unavailable on this Windows runner')
+    root = tmp_path / "Printer's companion с пробелами"
+    (root / 'scripts/maintenance').mkdir(parents=True)
+    (root / '.venv/bin').mkdir(parents=True)
+    shutil.copy2(ROOT / 'update.sh', root / 'update.sh')
+    (root / '.venv/bin/python').symlink_to(sys.executable)
+    script = root / 'scripts/maintenance/update_runtime.py'
+    script.write_text('import json,os,sys\nprint(json.dumps(sys.argv[1:]))\nsys.exit(int(os.environ["TEST_EXIT"]))\n')
+    result = subprocess.run([bash, str(root / 'update.sh'), 'configure', '--env-file', 'папка с пробелами/.env'],
+                            env=dict(os.environ, TEST_EXIT=str(exit_code)), text=True, capture_output=True)
+    assert result.returncode == exit_code
+    assert json.loads(result.stdout) == ['--root', str(root), 'configure', '--env-file', 'папка с пробелами/.env']
 
 
-def test_powershell_updater_completes_workers_and_stamps_build():
-    source = (Path(__file__).parents[1] / 'update.ps1').read_text()
-    assert '$Services -contains "api" -or $Services -contains "worker"' in source
-    assert 'foreach ($Required in @("estimator", "nas-sync"))' in source
-    assert '$Services -notcontains $Required' in source
-    assert '$env:GIT_COMMIT = (git rev-parse HEAD).Trim()' in source
-    assert '$env:SOURCE_STATE' in source
-    assert source.index("/health/ready") < source.index('$Remote | Set-Content $DeployedFile')
-    assert 'git pull --ff-only origin main -q' in source
+def test_wrappers_do_not_update_branches_delete_storage_or_install_host_daemons():
+    for name in ('update.sh', 'update.ps1'):
+        source = (ROOT / name).read_text()
+        assert 'scripts' in source and 'update_runtime.py' in source
+        executable_source = '\n'.join(line for line in source.splitlines() if not line.lstrip().startswith('#'))
+        for forbidden in ('git pull', 'reset --hard', 'down -v', 'docker prune', 'launchctl', 'schtasks'):
+            assert forbidden not in executable_source
+    source = (ROOT / 'update.ps1').read_text()
+    assert 'Get-FileHash' in source and 'SetAccessRuleProtection' in source
+    assert 'exit $LASTEXITCODE' in source
 
 
-def test_local_import_data_is_not_copied_into_images():
-    patterns = (Path(__file__).parents[1] / '.dockerignore').read_text().splitlines()
-    for name in ('.operator-state/', '.codex-tmp/', 'backups/', 'raw_logs/', '.env.secrets'):
+def test_local_import_and_desktop_runtime_data_are_not_copied_into_images():
+    patterns = (ROOT / '.dockerignore').read_text().splitlines()
+    for name in ('.operator-state/', '.update-state/', '.codex-tmp/', 'backups/', 'raw_logs/', '.env.secrets', 'desktop/'):
         assert name in patterns

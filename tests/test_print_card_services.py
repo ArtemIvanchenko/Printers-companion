@@ -283,6 +283,76 @@ def test_card_geometry_mapping_uses_detached_inputs(card_client, monkeypatch):
         event.remove(engine, "checkin", checkin)
 
 
+def test_card_reads_stored_anomalies_with_real_geometry_mapper(card_client):
+    from domain.models.jobs import BackgroundJob
+    from domain.models.sessions import BuildSession
+
+    record = new_card(card_client)
+    snapshot = {
+        "zs": [0.0, 10.0], "z_min": 0.0, "z_max": 10.0,
+        "hatch_mm": [100.0, 100.0], "contour_mm": [40.0, 40.0],
+        "jump_mm": [10.0, 10.0], "n_jumps": [2.0, 2.0], "open_mm": [0.0, 0.0],
+        "layer_thickness_mm": 0.1, "layer_count": 100,
+    }
+    with session_scope() as db:
+        db.add(BuildSession(
+            session_id="card_geometry_projection",
+            origin_compute_node_id=record["origin_compute_node_id"],
+            context={"runtime_payload": {"group": {
+                "health": {
+                    "burn_drift": {"outlier_layers": [{"layer": 21}]},
+                    "anomalies": [{"signal": "SO1", "kind": "spike", "sample_index": 5}],
+                },
+                "telemetry": {
+                    "time": list(range(11)),
+                    "layer_burn_times": [{"layer": layer} for layer in range(1, 101)],
+                },
+                "unused_analysis": {"detail": "not needed for mapping" * 1000},
+            }, "files": [{"unused_source_metadata": "source" * 1000}]}},
+        ))
+        db.add(BackgroundJob(
+            job_id="card_projection_estimate", job_type="print_estimate",
+            owner_node_id=record["origin_compute_node_id"], entity_type="print_record",
+            entity_id=record["record_id"], idempotency_key="card_projection_estimate",
+            payload_json={"unused_estimation_input": "large input" * 1000},
+        ))
+        db.flush()
+        PrintsRepository(db).update_print_record(record["record_id"], {
+            "session_id": "card_geometry_projection",
+            "metadata_json": {"prediction": {
+                "scan_geometry": snapshot,
+                "geometry_quality": {"status": "lower_bound"},
+            }},
+        })
+
+    materialized = []
+
+    def loaded(session, instance):
+        if isinstance(instance, (BuildSession, BackgroundJob)):
+            materialized.append(type(instance).__name__)
+
+    event.listen(Session, "loaded_as_persistent", loaded)
+    try:
+        response = card_client.get(f"/prints/{record['record_id']}")
+    finally:
+        event.remove(Session, "loaded_as_persistent", loaded)
+
+    assert response.status_code == 200
+    assert materialized == ["BuildSession"]
+    assert response.json()["estimate_job"] == {
+        "job_id": "card_projection_estimate", "status": "pending",
+    }
+    result = response.json()["geometry_analysis"]
+    assert result["status"] == "ok"
+    assert [(item["layer"], item["mapping_precision"]) for item in result["items"]] == [
+        (21, "exact_layer"), (51, "approximate_progress"),
+    ]
+    assert result["geometry_confidence"]["level"] == "low"
+    assert result["geometry_confidence"]["build_origin_confirmed"] is False
+    assert all(item["geometry"]["relative_path_length_pct"] == 100.0
+               for item in result["items"])
+
+
 def test_sync_queues_geometry_estimate_for_its_explicit_owner(card_client, tmp_path):
     import hashlib
     from core.config.settings import get_settings

@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from datetime import timezone
 
-from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -45,20 +44,15 @@ def session_publication_token(session: BuildSession) -> str:
 
 def prepare_import_reports(result: ImportExecutionResult) -> dict[str, dict]:
     """Upload immutable report artifacts before entering final publication SQL."""
-    from storage.repositories.runtime import _offload_report, _report_payload, _sanitize_for_json
-
+    from domain.services.session_reports import prepare_report
     from core.config.settings import get_settings
 
     prepared = {}
     for report_id, report in result.reports.items():
-        uri = _offload_report(report_id, report)
-        if uri is None and get_settings().app_env != "test":
+        artifact = prepare_report(report)
+        if artifact["storage_uri"] is None and get_settings().app_env != "test":
             raise ImportPersistenceError("Полный отчёт не сохранён на NAS. Импорт будет повторён.")
-        prepared[report_id] = {
-            "storage_uri": uri,
-            "payload": _sanitize_for_json(jsonable_encoder(_report_payload(report))),
-            "version_metadata": jsonable_encoder(report.get("version_metadata", {})),
-        }
+        prepared[report_id] = artifact
     return prepared
 
 
@@ -75,6 +69,8 @@ def publish_import(
     from domain.services.print_linking import auto_link_print_records
     from storage.repositories.prints_repo import PrintsRepository
     from storage.repositories.runtime import RuntimeRepository
+    from storage.repositories.reports import ReportsRepository
+    from storage.repositories.import_jobs import ImportJobsRepository
 
     current = fence.verify(db)
     if current.print_record_id:
@@ -87,7 +83,7 @@ def publish_import(
         fence.verify(db)
         result.job.lease_owner = None
         result.job.lease_until = None
-        repo.save_import_job(result.job)
+        ImportJobsRepository(db).save_import_job(result.job)
         return
     if (
         set(result.sessions) != set(result.layer_timings)
@@ -104,6 +100,7 @@ def publish_import(
 
     # Same parent lock order as calibration. A second job for this session
     # must re-prepare if a newer result has already replaced its captured base.
+    locked_sessions = {}
     for sid in sorted(result.sessions):
         session = db.scalar(
             select(BuildSession)
@@ -130,6 +127,7 @@ def publish_import(
             "timing_publication_id"
         ) != prepared.manifest.get("publication_id"):
             raise ValueError("Сводка и слои принадлежат разным результатам")
+        locked_sessions[sid] = session
     if result.job.print_record_id:
         record = db.get(PrintRecord, result.job.print_record_id)
         if record is None:
@@ -144,7 +142,7 @@ def publish_import(
     fence.verify(db)
     repo.save_sessions(result.sessions, origin_compute_node_id=fence.owner_node_id)
     for sid, prepared in result.layer_timings.items():
-        replace_layer_timings(sid, prepared, db)
+        replace_layer_timings(locked_sessions[sid], prepared, db)
     for report_id, report in result.reports.items():
         prepared = result.layer_timings.get(report.get("session_id"))
         payload = prepared_reports[report_id]["payload"]
@@ -160,7 +158,7 @@ def publish_import(
             or payload.get("session_id") != report.get("session_id")
         ):
             raise ValueError("Отчёт и слои принадлежат разным результатам")
-        repo.save_prepared_report(report_id, prepared_reports[report_id])
+        ReportsRepository(db).save_prepared(report_id, prepared_reports[report_id])
     repo.save_notifications(result.notifications)
 
     links = []
@@ -194,7 +192,7 @@ def publish_import(
     fence.verify(db)
     result.job.lease_owner = None
     result.job.lease_until = None
-    repo.save_import_job(result.job)
+    ImportJobsRepository(db).save_import_job(result.job)
 
 
 __all__ = ["publish_import", "prepare_import_reports", "session_publication_token", "MANIFEST_KEY"]

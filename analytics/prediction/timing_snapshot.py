@@ -77,17 +77,24 @@ def prepare_layer_timings(
     return PreparedLayerTimings(rows=rows, manifest=manifest)
 
 
-def published_timing_events(rows: list[tuple], manifest: dict | None) -> list[dict] | None:
-    """None = legacy absent. [] = known empty/unverifiable, NEVER raw fallback.
+def read_timing_publication(
+    rows: list[tuple], manifest: dict | None,
+) -> tuple[str, list[dict] | None]:
+    """Validate once and return the publication status together with its events.
+
+    None = legacy absent. [] = known empty/unverifiable, NEVER raw fallback.
 
     Each row is (layer, features, publication_id). Count, generation and digest
     must agree with the committed manifest before any consumer uses these facts.
+    Physical timing admission remains in calibration_timing_payloads.
+    This is a pure projection over detached rows, without SQL or raw-file IO.
     """
-    if timing_publication_status(rows, manifest) == "invalid":
-        return []
+    status = _timing_publication_status(rows, manifest)
+    if status == "invalid":
+        return status, []
     if not rows:
-        return [] if manifest is not None else None
-    return [
+        return status, [] if manifest is not None else None
+    return status, [
         {
             "event_type": "layer_timing_summary",
             "payload": {
@@ -99,34 +106,33 @@ def published_timing_events(rows: list[tuple], manifest: dict | None) -> list[di
     ]
 
 
-def timing_publication_status(rows: list[tuple], manifest: dict | None) -> str:
+def _timing_publication_status(rows: list[tuple], manifest: dict | None) -> str:
     """Shared integrity rule for legacy, empty and versioned publications."""
     if manifest is None and any(tag is not None for _, _, tag in rows):
         return "invalid"  # Versioned rows without their manifest are not legacy.
     if manifest is None:
         return "legacy" if rows else "absent"
-    if manifest is not None:
-        if (
-            not isinstance(manifest, dict)
-            or manifest.get("schema") != SNAPSHOT_SCHEMA
-            or manifest.get("row_count") != len(rows)
-            or not manifest.get("publication_id")
-            or any(tag != manifest["publication_id"] for _, _, tag in rows)
-            or any(
-                type(layer) is not int or layer < 0 or not isinstance(features, dict)
-                for layer, features, _ in rows
-            )
-            or len({layer for layer, _, _ in rows}) != len(rows)
-            or stable_hash(
-                [
-                    {"layer": layer, "features": features}
-                    for layer, features, _ in sorted(rows, key=lambda row: row[0])
-                ]
-            )
-            != manifest.get("rows_fingerprint")
-        ):
-            return "invalid"
-        status = manifest.get("status")
-        if status not in ({"complete"} if rows else {"empty", "no_time_log"}):
-            return "invalid"
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != SNAPSHOT_SCHEMA
+        or manifest.get("row_count") != len(rows)
+        or not manifest.get("publication_id")
+        or any(tag != manifest["publication_id"] for _, _, tag in rows)
+        or any(
+            type(layer) is not int or layer < 0 or not isinstance(features, dict)
+            for layer, features, _ in rows
+        )
+        or len({layer for layer, _, _ in rows}) != len(rows)
+        or stable_hash(
+            [
+                {"layer": layer, "features": features}
+                for layer, features, _ in sorted(rows, key=lambda row: row[0])
+            ]
+        )
+        != manifest.get("rows_fingerprint")
+    ):
+        return "invalid"
+    status = manifest.get("status")
+    if status not in ({"complete"} if rows else {"empty", "no_time_log"}):
+        return "invalid"
     return str(manifest["status"])

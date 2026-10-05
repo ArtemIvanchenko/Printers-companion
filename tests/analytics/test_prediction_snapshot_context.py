@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from api.routes import prints as prints_module
+from domain.services.estimation.calculation import calculate_prediction_snapshot
 
 
 class _Store:
@@ -10,36 +10,36 @@ class _Store:
         return path
 
 
-def test_snapshot_exposes_machine_mode_recoat_geometry_and_cycle(monkeypatch):
-    monkeypatch.setattr(prints_module, "ObjectStore", _Store)
-    monkeypatch.setattr(prints_module, "_combined_prediction", lambda *args, **kwargs: {
-        "available": True,
-        "method": "test:cohatch",
-        "build_axis": "Z",
-        "layer_count": 100,
-        "print_hours": 10.0,
-        "raw_print_hours": 9.0,
-        "raw_scan_hours": 8.0,
-        "raw_recoat_hours": 1.0,
-        "scan_hours": 9.0,
-        "recoat_hours": 1.0,
-        "correction_factor": 1.125,
-        "scan_source": "fitted",
-        "recoat_time_ms": 9250.0,
-        "recoat_time_source": "calibrated",
-        "machine_cycle_hours": 10.25,
-        "layer_overhead_ms": 400.0,
-        "layer_overhead_hours": 0.25,
-        "minimum_layer_cycle_ms": 20_000.0,
-        "minimum_cycle_active_layers": 30,
-        "laser_count": 2,
-        "cost_total_rub": 100.0,
-        "prediction": {"source": "model", "interval": [9.0, 12.0]},
-        "cost_prediction": None,
-        "scan_geometry": {"zs": []},
-        "geometry_totals": {"hatch_mm": 12345.0},
-        "geometry_regions": [{"name": "part.stl", "kind": "part", "z_min_mm": 0, "z_max_mm": 10}],
-    })
+def test_snapshot_exposes_machine_mode_recoat_geometry_and_cycle():
+    def calculate_plate(*args, **kwargs):
+        return {
+            "available": True,
+            "method": "test:cohatch",
+            "build_axis": "Z",
+            "layer_count": 100,
+            "print_hours": 10.0,
+            "raw_print_hours": 9.0,
+            "raw_scan_hours": 8.0,
+            "raw_recoat_hours": 1.0,
+            "scan_hours": 9.0,
+            "recoat_hours": 1.0,
+            "correction_factor": 1.125,
+            "scan_source": "fitted",
+            "recoat_time_ms": 9250.0,
+            "recoat_time_source": "calibrated",
+            "machine_cycle_hours": 10.25,
+            "layer_overhead_ms": 400.0,
+            "layer_overhead_hours": 0.25,
+            "minimum_layer_cycle_ms": 20_000.0,
+            "minimum_cycle_active_layers": 30,
+            "laser_count": 2,
+            "cost_total_rub": 100.0,
+            "prediction": {"source": "model", "interval": [9.0, 12.0]},
+            "cost_prediction": None,
+            "scan_geometry": {"zs": []},
+            "geometry_totals": {"hatch_mm": 12345.0},
+            "geometry_regions": [{"name": "part.stl", "kind": "part", "z_min_mm": 0, "z_max_mm": 10}],
+        }
     prepared = {
         "record": {"record_id": "context", "revision": 2, "metadata_json": {}},
         "platform_files": [{
@@ -52,7 +52,9 @@ def test_snapshot_exposes_machine_mode_recoat_geometry_and_cycle(monkeypatch):
         "powder_cost": None,
     }
 
-    snapshot = prints_module._calculate_prediction_snapshot(prepared)
+    snapshot = calculate_prediction_snapshot(
+        prepared, object_store_factory=_Store, plate_calculator=calculate_plate,
+    )
 
     assert snapshot["printer_id"] == "printer-m350-01"
     assert snapshot["mode_key"] == "steel@0.060"

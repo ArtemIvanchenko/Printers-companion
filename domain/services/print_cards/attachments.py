@@ -258,9 +258,7 @@ def upload_attachment(
         remove_unreferenced_objects([object_uri], store_factory=lambda: store)
     outbox.complete(operation_id, saved)
     logger.info("attached %s (%s, %d bytes) to %s", file_name, file_type, size_bytes, record_id)
-    return AttachmentResult(
-        saved, new_geometry=file_type in GEOMETRY_TYPES and not saved.get("duplicate")
-    )
+    return AttachmentResult(saved)
 
 
 def remove_unreferenced_objects(uris: list[str], *, store_factory=None) -> None:

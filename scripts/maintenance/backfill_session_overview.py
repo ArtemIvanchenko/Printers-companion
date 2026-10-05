@@ -6,18 +6,129 @@ Such sessions have a bare group stub (no features / telemetry / classification),
 which causes the dashboard to show empty graphs and INCOMPLETE_OR_UNKNOWN status.
 
 The script is idempotent — sessions that already have features are skipped.
-Raw log files must still exist on disk (the path stored in IngestedFile.relative_path
-is resolved relative to RAW_LOGS_CONTAINER_PATH from the environment).
+Only owner-local legacy sessions are repaired directly. Published analyses and
+reports are requeued through their original import job, so their projections
+remain coherent. Source reconstruction and overview computation run outside SQL.
 
 Usage (inside the api container, or locally with the right DATABASE_URL):
     python scripts/maintenance/backfill_session_overview.py --dry-run
     python scripts/maintenance/backfill_session_overview.py
 """
 import argparse
+from copy import deepcopy
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+def _session_ids() -> list[str]:
+    from sqlalchemy import select
+    from domain.models.sessions import BuildSession
+    from storage.db.session import SessionLocal
+
+    with SessionLocal() as db:
+        return list(db.scalars(select(BuildSession.session_id).order_by(BuildSession.session_id)))
+
+
+def _snapshot(row) -> dict:
+    return deepcopy({column.key: getattr(row, column.key) for column in row.__table__.columns})
+
+
+def _read_session(session_id: str) -> dict | None:
+    from sqlalchemy import select
+    from domain.models.sessions import BuildSession, ReportArtifact
+    from storage.db.session import SessionLocal
+
+    with SessionLocal() as db:
+        row = db.get(BuildSession, session_id)
+        if row is None:
+            return None
+        result = _snapshot(row)
+        result["has_reports"] = db.scalar(select(ReportArtifact.report_id).where(
+            ReportArtifact.session_id == session_id,
+        ).limit(1)) is not None
+        return result
+
+
+def _require_owner(snapshot: dict) -> None:
+    from core.config.settings import get_settings
+    from domain.services.compute_affinity import require_compute_owner
+
+    require_compute_owner(
+        entity_type="session", entity_id=snapshot["session_id"],
+        origin_compute_node_id=snapshot["origin_compute_node_id"],
+        requested_compute_node_id=get_settings().compute_node_id,
+    )
+
+
+def _published(snapshot: dict) -> bool:
+    context = snapshot["context"] or {}
+    group = ((context.get("runtime_payload") or {}).get("group") or {})
+    timing = context.get("timing_publication") or {}
+    # Legacy layer backfill publishes its own authoritative compact measurements
+    # with source={}; it does not create a coherent session/report generation.
+    # Keep those timings untouched while allowing the other legacy repairs.
+    original_source = not isinstance(timing, dict) or bool(timing.get("source"))
+    return (original_source or "analysis_snapshot" in group
+            or bool(snapshot["analysis_version"]) or snapshot["has_reports"])
+
+
+def _lock_unchanged(db, snapshot: dict):
+    from sqlalchemy import select
+    from core.versioning.provenance import stable_hash
+    from domain.models.sessions import BuildSession, ReportArtifact
+
+    row = db.scalar(select(BuildSession).where(
+        BuildSession.session_id == snapshot["session_id"],
+    ).with_for_update().execution_options(populate_existing=True))
+    if row is None:
+        raise ValueError("Сессия удалена за время расчёта")
+    current = _snapshot(row)
+    _require_owner(current)
+    if stable_hash(current) != stable_hash({key: value for key, value in snapshot.items()
+                                          if key != "has_reports"}):
+        raise ValueError("Сессия изменилась за время расчёта; устаревший результат не записан")
+    has_reports = db.scalar(select(ReportArtifact.report_id).where(
+        ReportArtifact.session_id == snapshot["session_id"],
+    ).limit(1)) is not None
+    if has_reports != snapshot["has_reports"]:
+        raise ValueError("Отчёты сессии изменились за время расчёта; требуется повторный анализ")
+    return row
+
+
+def _queue_reanalysis(snapshot: dict, dry_run: bool) -> dict | None:
+    """Existing publication is repaired by its worker, never by partial JSON edits."""
+    from core.config.settings import get_settings
+    from domain.services.session_requests import request_analysis
+    from storage.db.session import SessionLocal
+
+    _require_owner(snapshot)
+    if dry_run:
+        print(f"[DRY queue] {snapshot['session_id']}: требуется повторный анализ исходного задания")
+        return None
+    with SessionLocal() as db:
+        _lock_unchanged(db, snapshot)
+        result = request_analysis(db, snapshot["session_id"],
+                                  compute_node_id=get_settings().compute_node_id,
+                                  actor="maintenance")
+    print(f"[JOB {result['job_status']}] {snapshot['session_id']}: {result['job_id']}; "
+          "не пересчитано этим скриптом")
+    return result
+
+
+def _parsed_sources(snapshot: dict) -> list:
+    """The read session has already closed before this boundary opens any file."""
+    from domain.services.ingestion import IngestedFile
+    from domain.services.session_sources import SessionSources, rehydrate_session_sources
+
+    payload = (snapshot["context"] or {}).get("runtime_payload") or {}
+    sources = SessionSources(snapshot["session_id"], snapshot["origin_compute_node_id"],
+                             [IngestedFile.model_validate(item) for item in payload.get("files", [])])
+    files = rehydrate_session_sources(sources)
+    if not any(file.parse_result is not None for file in files):
+        raise ValueError("Нет читаемых исходных логов; сохранённые данные не изменены")
+    return files
 
 
 def _needs_backfill(group: dict) -> bool:
@@ -28,82 +139,54 @@ def _needs_backfill(group: dict) -> bool:
 
 
 def backfill(dry_run: bool, force: bool = False) -> None:
-    from domain.services.ingestion import IngestedFile
+    from domain.services.compute_affinity import ComputeAffinityError
     from domain.services.session_overview import build_group_overview
-    from domain.models.entities import BuildSession
     from storage.db.session import SessionLocal
-    from storage.repositories.runtime import _rehydrate_parse_results
 
-    ok = skipped = failed = 0
-
-    with SessionLocal() as db:
-        rows = db.query(BuildSession).all()
-        for row in rows:
-            sid = row.session_id
-            payload = (row.context or {}).get("runtime_payload")
-            if not payload:
-                print(f"[skip] {sid}: no runtime_payload")
-                skipped += 1
+    ok = queued = skipped = failed = 0
+    for sid in _session_ids():
+        snapshot = _read_session(sid)
+        if snapshot is None:
+            skipped += 1
+            continue
+        payload = (snapshot["context"] or {}).get("runtime_payload")
+        group = (payload or {}).get("group") or {}
+        if not payload or (not force and not _needs_backfill(group)):
+            print(f"[skip] {sid}: нет payload или признаки уже рассчитаны")
+            skipped += 1
+            continue
+        try:
+            _require_owner(snapshot)
+            if _published(snapshot):
+                _queue_reanalysis(snapshot, dry_run)
+                queued += 1
                 continue
-
-            group = payload.get("group") or {}
-            if not force and not _needs_backfill(group):
-                print(f"[skip] {sid}: already has features")
-                skipped += 1
-                continue
-
-            files_raw = payload.get("files") or []
-            if not files_raw:
-                print(f"[skip] {sid}: no files in payload")
-                skipped += 1
-                continue
-
-            try:
-                files = [IngestedFile.model_validate(f) for f in files_raw]
-            except Exception as exc:
-                print(f"[fail] {sid}: cannot rebuild IngestedFile list: {exc}")
-                failed += 1
-                continue
-
-            # Re-populate parse results from disk so build_group_overview has
-            # real events/telemetry to work with.
-            files = _rehydrate_parse_results(files)
-
-            try:
-                overview = build_group_overview(
-                    sid,
-                    files,
-                    start_ts=row.start_ts,
-                    end_ts=row.end_ts,
-                    grouping_confidence=group.get("grouping_confidence", 0.0),
-                )
-            except Exception as exc:
-                print(f"[fail] {sid}: build_group_overview error: {exc}")
-                failed += 1
-                continue
-
-            classification = overview.get("classification", "?")
-            layers = (overview.get("features") or {}).get("layers", "?")
-            print(f"[{'DRY' if dry_run else 'OK '}] {sid}: {classification}, layers={layers}")
-
+            files = _parsed_sources(snapshot)
+            overview = build_group_overview(sid, files, start_ts=snapshot["start_ts"],
+                                            end_ts=snapshot["end_ts"],
+                                            grouping_confidence=group.get("grouping_confidence", 0.0))
+            # This is a legacy projection, not a coherent report publication.
+            # Never introduce a modern marker without its matching artifacts.
+            overview.pop("analysis_snapshot", None)
             if not dry_run:
-                stripped_files = [
-                    f.model_dump(mode="json", exclude={"parse_result"}) for f in files
-                ]
-                if row.context is None:
-                    row.context = {}
-                row.context = {
-                    **row.context,
-                    "runtime_payload": {**payload, "files": stripped_files, "group": overview},
-                }
-                # SQLAlchemy won't detect mutation of nested JSON; mark as modified.
-                from sqlalchemy.orm.attributes import flag_modified
-                flag_modified(row, "context")
-                db.commit()
-
+                with SessionLocal() as db:
+                    row = _lock_unchanged(db, snapshot)
+                    row.context = {**(row.context or {}), "runtime_payload": {
+                        **payload, "group": overview,
+                        "files": [file.model_dump(mode="json", exclude={"parse_result"}) for file in files],
+                    }}
+                    db.commit()
+            print(f"[{'DRY' if dry_run else 'OK'}] {sid}: {overview.get('classification', '?')}, "
+                  f"layers={(overview.get('features') or {}).get('layers', '?')}")
             ok += 1
+        except ComputeAffinityError as exc:
+            print(f"[skip] {sid}: {exc}")
+            skipped += 1
+        except Exception as exc:
+            print(f"[fail] {sid}: {exc}")
+            failed += 1
 
-    print(f"\nDone. backfilled={ok}  skipped={skipped}  failed={failed}")
+    print(f"\nDone. legacy_backfilled={ok}  reanalysis_requested={queued}  skipped={skipped}  failed={failed}")
     if dry_run:
         print("(dry-run — nothing was written)")
 

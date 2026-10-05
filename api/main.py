@@ -40,6 +40,7 @@ from api.routes import (
 from core.config.settings import get_settings
 from core.compute_identity import register_compute_node
 from core.logging.config import configure_logging
+from core.maintenance import UpdateAdmissionMiddleware
 from api.middleware import RequestIDMiddleware
 from core.preflight import run_preflight, exit_on_failure
 from core.versioning.version import APP_VERSION
@@ -62,13 +63,14 @@ def _startup_import(raw_logs_path: str) -> None:
 
     logger.info("startup_import: scanning %s for import candidates …", path)
     try:
-        from api.routes.uploads import _trigger_rescan
+        from domain.services.importing.requests import register_import_candidates
 
         # Existing flat log folders must be one import batch. Enumerating every
         # child here produced hundreds of confirmations and prevented files
         # from the same dated print from reaching the grouping algorithm
         # together.
-        jobs = _trigger_rescan(raw_logs_path, candidates=[path])
+        results = register_import_candidates([path], settings=get_settings())
+        jobs = [result.job.model_dump(mode="json") for result in results]
         waiting = sum(job["status"] == "awaiting_operator_confirmation" for job in jobs)
         logger.info(
             "startup_import: %d durable job(s), %d awaiting confirmation",
@@ -182,6 +184,7 @@ app = FastAPI(
 )
 
 app.add_middleware(RequestIDMiddleware)
+app.add_middleware(UpdateAdmissionMiddleware)
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 if origins:

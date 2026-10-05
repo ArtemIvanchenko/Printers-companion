@@ -29,13 +29,17 @@ def geometry_residuals(timings, snapshot, session_id=None, record_id=None):
             raise ValueError("invalid sampled geometry")
     except (KeyError, ValueError, TypeError):
         return {**unavailable, "reason_ru": "Повреждён снимок геометрии."}
-    rows = []
+    points = []
     for layer, values in sorted(timings.items()):
         z = origin + (layer - 0.5) * thickness
         burn = values.get("burn_ms")
         if not finite_number(burn) or not series.z_min <= z <= series.z_max:
             continue
-        expected = sum(b*g for b, g in zip(beta, series.at(z))) / lasers + beta[-1]
+        points.append((layer, z, burn))
+    geometry = series.at_heights([z for _, z, _ in points]).tolist() if points else []
+    rows = []
+    for (layer, z, burn), components in zip(points, geometry):
+        expected = sum(b*g for b, g in zip(beta, components)) / lasers + beta[-1]
         if expected <= 0:
             continue
         observed = burn / 1000
@@ -61,8 +65,7 @@ def geometry_residuals(timings, snapshot, session_id=None, record_id=None):
 
 def scan_reference(params, material, thickness, correction_factor=1.0):
     """Freeze the actual model/physical coefficients used by the estimator."""
-    from analytics.prediction.layer_engine import resolve_scan_model
-    from analytics.prediction.plate_estimator import _DEFAULT_JUMP_SPEED_MM_S
+    from analytics.prediction.layer_engine import DEFAULT_JUMP_SPEED_MM_S, resolve_scan_model
     from core.versioning.provenance import stable_hash
 
     model = resolve_scan_model(params, material, thickness)
@@ -74,7 +77,7 @@ def scan_reference(params, material, thickness, correction_factor=1.0):
     if hatch <= 0:
         return {}
     beta = [1/hatch, 1/float(params.get("contour_speed_mm_s") or hatch),
-            1/float(params.get("jump_speed_mm_s") or _DEFAULT_JUMP_SPEED_MM_S),
+            1/float(params.get("jump_speed_mm_s") or DEFAULT_JUMP_SPEED_MM_S),
             float(params.get("jump_delay_ms") or 0)/1000,
             1/float(params.get("support_speed_mm_s") or hatch), 0]
     return {"beta": [b*correction_factor for b in beta], "source": "heuristic",

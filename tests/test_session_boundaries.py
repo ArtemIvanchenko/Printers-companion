@@ -13,9 +13,11 @@ from api.main import app
 from core.config.settings import get_settings
 from domain.enums.common import ImportJobStatus
 from domain.models.sessions import BuildSession, ImportJob, ReportArtifact
-from domain.services.session_reports import SessionReportError, read_report
+from domain.services.session_reports import SessionReportError, read_report, read_report_by_id, enhance_report
+from reporting.llm.providers.base import LLMResult
 from storage.db.session import SessionLocal, engine, session_scope
 from storage.repositories.runtime import RuntimeRepository
+from storage.repositories.reports import ReportsRepository
 
 
 def seed(*, owner=None, snapshot=None, publication=None, job=False, legacy_job=False):
@@ -47,7 +49,7 @@ def seed(*, owner=None, snapshot=None, publication=None, job=False, legacy_job=F
 @pytest.mark.parametrize("owner", [None, "another-pc"])
 def test_get_reads_published_report_without_parse_or_write(monkeypatch, owner):
     saved = seed(owner=owner)
-    monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **k: pytest.fail("GET reparsed files"))
+    monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **k: pytest.fail("GET reparsed files"))
     writes = []
 
     def track(conn, cursor, statement, parameters, context, executemany):
@@ -86,7 +88,8 @@ def test_mixed_publications_fail_closed(mismatch):
     assert TestClient(app).get("/sessions/session-1/timeline").status_code == 409
 
 
-def test_minio_expansion_releases_sql_first():
+@pytest.mark.parametrize("by_id", [False, True])
+def test_minio_expansion_releases_sql_first(by_id):
     saved = seed()
     with session_scope() as db:
         db.get(ReportArtifact, "report-1").storage_uri = "s3://reports/full.json"
@@ -103,7 +106,8 @@ def test_minio_expansion_releases_sql_first():
     event.listen(engine, "checkin", checkin)
     try:
         with SessionLocal() as db:
-            assert read_report(db, "session-1", object_store_factory=Store) == saved
+            reader, identifier = (read_report_by_id, "report-1") if by_id else (read_report, "session-1")
+            assert reader(db, identifier, object_store_factory=Store) == saved
             assert not db.in_transaction()
     finally:
         event.remove(engine, "checkout", checkout)
@@ -133,11 +137,95 @@ def test_minio_outage_reads_bounded_sql_projection():
         assert read_report(db, "session-1", object_store_factory=Store) == saved
 
 
+def test_report_id_keeps_historical_publication():
+    saved = seed(snapshot={"analysis_id": "old"})
+    with session_scope() as db:
+        session = db.get(BuildSession, "session-1")
+        session.context = {"runtime_payload": {"group": {"analysis_snapshot": {"analysis_id": "new"}}}}
+        db.add(ReportArtifact(report_id="report-2", session_id="session-1", report_type="session",
+            generated_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+            payload={**saved, "report_id": "report-2", "analysis_snapshot": {"analysis_id": "new"}}))
+    client = TestClient(app)
+    assert client.get("/reports/report-1").json() == saved
+    assert client.get("/sessions/session-1/timeline").status_code == 200
+
+
+def test_report_id_rejects_wrong_sql_identity():
+    seed()
+    with session_scope() as db:
+        row = db.get(ReportArtifact, "report-1")
+        row.payload = {**row.payload, "report_id": "wrong"}
+    assert TestClient(app).get("/reports/report-1").status_code == 409
+
+
+@pytest.mark.parametrize("change", [None, "report", "session", "owner", "storage"])
+def test_llm_releases_sql_and_rechecks_publication(change):
+    import asyncio
+
+    saved = seed(snapshot={"analysis_id": "current"}, publication="current")
+    blobs = {}
+    held = set()
+    def checkout(connection, record, proxy):
+        held.add(id(connection))
+    def checkin(connection, record):
+        held.discard(id(connection))
+    class Store:
+        def is_available(self):
+            assert not held
+            return change != "storage"
+        def put_bytes_verified(self, bucket, name, data):
+            assert not held
+            blobs[(bucket, name)] = data
+            return f"s3://{bucket}/{name}"
+        def get_bytes(self, bucket, name):
+            assert not held
+            return blobs[(bucket, name)]
+    class Provider:
+        async def generate_markdown(self, evidence):
+            assert not held
+            if change in {"report", "session", "owner"}:
+                with session_scope() as other:
+                    if change == "report":
+                        row = other.get(ReportArtifact, "report-1")
+                        row.payload = {**row.payload, "llm_runs": [{"content": "parallel"}]}
+                    elif change == "session":
+                        row = other.get(BuildSession, "session-1")
+                        row.context = {**row.context, "operator_changed": True}
+                    else:
+                        other.get(BuildSession, "session-1").origin_compute_node_id = "other-pc"
+            return LLMResult(success=True, content="Дополнение", provider="test")
+    event.listen(engine, "checkout", checkout)
+    event.listen(engine, "checkin", checkin)
+    try:
+        with SessionLocal() as db:
+            call = enhance_report(db, "report-1", compute_node_id=get_settings().compute_node_id,
+                                  provider=Provider(), object_store_factory=Store)
+            if change:
+                with pytest.raises(SessionReportError) as error:
+                    asyncio.run(call)
+                assert error.value.code == {"owner": "forbidden", "storage": "storage_unavailable"}.get(change, "conflict")
+            else:
+                assert asyncio.run(call)["llm"]["content"] == "Дополнение"
+            assert not db.in_transaction()
+        with SessionLocal() as db:
+            published = read_report_by_id(db, "report-1", object_store_factory=Store)
+        if change is None:
+            assert published["llm_markdown"] == "Дополнение"
+            assert len(published["llm_runs"]) == 1
+        elif change == "report":
+            assert published["llm_runs"] == [{"content": "parallel"}]
+        else:
+            assert published == saved
+    finally:
+        event.remove(engine, "checkout", checkout)
+        event.remove(engine, "checkin", checkin)
+
+
 def test_missing_published_report_does_not_trigger_local_analysis(monkeypatch):
     seed()
     with session_scope() as db:
         db.delete(db.get(ReportArtifact, "report-1"))
-    monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **k: pytest.fail("must not parse"))
+    monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **k: pytest.fail("must not parse"))
     assert TestClient(app).get("/sessions/session-1/anomalies").status_code == 409
 
 
@@ -161,6 +249,49 @@ def test_sessions_paginate_in_sql_and_skip_unpublished_rows(monkeypatch):
     assert response.json()["total"] == 8
     assert [row["number"] for row in response.json()["items"]] == [5, 4, 3]
     assert any("LIMIT" in sql and "OFFSET" in sql for sql in statements)
+
+
+def test_sessions_select_groups_without_loading_large_source_inventory():
+    from domain.services.session_reports import list_sessions
+
+    group = {"classification": "REAL_PRINT", "features": {"layers": 10},
+             "analysis_snapshot": {"analysis_id": "one"}}
+    payloads = {
+        "session-a": {"group": group, "files": [{"raw_excerpt": "source" * 200_000}]},
+        "session-b": {"files": []},
+        "session-c": {"group": None},
+        "session-d": {"group": {}},
+    }
+    with session_scope() as db:
+        db.add_all(BuildSession(session_id=sid, context={"runtime_payload": payload},
+                                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+                   for sid, payload in payloads.items())
+        db.add_all([BuildSession(session_id="empty", context={}),
+                    BuildSession(session_id="empty-payload", context={"runtime_payload": {}}),
+                    BuildSession(session_id="null-payload", context={"runtime_payload": None})])
+    projections = []
+
+    def track(conn, cursor, statement, parameters, context, executemany):
+        compiled = context.compiled
+        if compiled is not None and statement.lstrip().upper().startswith("SELECT"):
+            columns = tuple(compiled.statement.selected_columns)
+            if len(columns) == 2:
+                projections.append(columns[1])
+
+    event.listen(engine, "before_cursor_execute", track)
+    try:
+        with SessionLocal() as db:
+            result = list_sessions(db, skip=0, limit=10)
+            assert not db.in_transaction()
+    finally:
+        event.remove(engine, "before_cursor_execute", track)
+    assert result == {
+        "items": [{"session_id": sid, **(payloads[sid].get("group") or {})}
+                  for sid in sorted(payloads, reverse=True)],
+        "total": 4, "skip": 0, "limit": 10, "returned": 4,
+    }
+    assert len(projections) == 1
+    assert projections[0].compare(BuildSession.context["runtime_payload"]["group"])
 
 
 def test_ingest_v2_only_queues_committed_local_work(tmp_path, monkeypatch):
@@ -198,7 +329,7 @@ def test_ingest_rejects_private_browser_batch(tmp_path, monkeypatch):
 @pytest.mark.parametrize("legacy", [False, True])
 def test_reanalysis_queues_original_job_without_opening_paths(monkeypatch, legacy):
     seed(job=True, legacy_job=legacy)
-    monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **k: pytest.fail("HTTP opened logs"))
+    monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **k: pytest.fail("HTTP opened logs"))
     client = TestClient(app)
     for route in ("analyze", "reanalyze"):
         response = client.post(f"/sessions/session-1/{route}")
@@ -277,8 +408,8 @@ def test_operator_report_closes_sql_before_presentation(monkeypatch):
 
 def test_markdown_generation_is_presentation_only(monkeypatch):
     seed()
-    monkeypatch.setattr(RuntimeRepository, "save_report", lambda *a, **k: pytest.fail("formatting wrote report"))
-    monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **k: pytest.fail("formatting opened raw logs"))
+    monkeypatch.setattr(ReportsRepository, "save_prepared", lambda *a, **k: pytest.fail("formatting wrote report"))
+    monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **k: pytest.fail("formatting opened raw logs"))
     monkeypatch.setattr("reporting.markdown_report.generator.generate_markdown_report", lambda report: "# Published")
     response = TestClient(app).post("/sessions/session-1/reports/generate")
     assert response.status_code == 200

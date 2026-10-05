@@ -11,6 +11,95 @@ from storage.repositories.jobs_repo import JobsRepository
 from storage.repositories.prints_repo import PrintsRepository
 
 
+def test_print_scan_strategy_overrides_global_speed_and_keeps_source():
+    from unittest.mock import MagicMock
+    from domain.services.estimation.inputs import _params_with_sources_for_record
+
+    repo = MagicMock()
+    original_speeds = {"steel": 1000.0, "aluminum": 950.0}
+    repo.get_machine_params.return_value = {"hatch_speed_mm_s": 1000.0,
+                                            "hatch_speeds_by_mat": original_speeds}
+    repo.get_active_preset_for_material.return_value = {"preset_id": "old-preset",
+                                                      "hatch_speed_mm_s": 1100.0}
+    record = {"material": "steel", "metadata_json": {"scan_strategy": {
+        "hatch_speed_mm_s": 1330.0, "support_speed_mm_s": 2000.0,
+        "contours_enabled": False, "hatch_angle_deg": 45.0,
+    }}}
+    params, sources = _params_with_sources_for_record(repo, record)
+    assert params["hatch_speed_mm_s"] == 1330.0
+    assert "steel" not in params["hatch_speeds_by_mat"]
+    assert original_speeds == {"steel": 1000.0, "aluminum": 950.0}
+    assert params["contours_enabled"] is False
+    assert sources["hatch_angle_deg"] == {"source": "print_scan_strategy", "value": 45.0}
+
+
+def test_disabled_contours_do_not_require_an_unused_speed():
+    from domain.services.estimation.inputs import missing_for_estimation
+
+    params = {"hatch_speed_mm_s": 1330.0, "hatch_distance_mm": 0.095,
+              "layer_thickness_mm": 0.03, "contours_enabled": False}
+    assert missing_for_estimation(params) == []
+    assert "скорость контуров" in missing_for_estimation({**params, "contours_enabled": True})
+
+
+@pytest.mark.parametrize('status', ['pending', 'running'])
+def test_manual_click_joins_same_active_automatic_estimate(queued_estimate, status):
+    from domain.services.estimation.requests import enqueue_estimate
+
+    record, _ = queued_estimate
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        automatic = enqueue_estimate(repo, record)
+        row = db.get(BackgroundJob, automatic['job_id'])
+        row.status = status
+        row.lease_generation = 7
+        row.lease_owner = 'original-worker'
+        db.flush()
+        manual = enqueue_estimate(repo, record, force=True)
+        assert manual['job_id'] == automatic['job_id']
+        assert row.lease_generation == 7 and row.lease_owner == 'original-worker'
+
+
+def test_manual_rerun_after_completion_is_a_new_job(queued_estimate):
+    from domain.services.estimation.requests import enqueue_estimate
+
+    record, _ = queued_estimate
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        first = enqueue_estimate(repo, record)
+        db.get(BackgroundJob, first['job_id']).status = 'done'
+        db.flush()
+        assert enqueue_estimate(repo, record, force=True)['job_id'] != first['job_id']
+
+
+def test_changed_parameters_do_not_join_old_active_estimate(queued_estimate):
+    from domain.services.estimation.requests import enqueue_estimate
+
+    record, _ = queued_estimate
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        first = enqueue_estimate(repo, record)
+        repo.save_machine_params({'hatch_speed_mm_s': 1800})
+        new = enqueue_estimate(repo, record, force=True)
+        assert new['job_id'] != first['job_id']
+        assert new['payload']['input_fingerprint'] != first['payload']['input_fingerprint']
+
+
+@pytest.mark.parametrize("strategy", [False, "preset", {"contours_enabled": "false"},
+                                      {"hatch_speed_mm_s": 0}, {"laser_count": 1.5},
+                                      {"hatch_speed_mm_s": 10 ** 400}])
+def test_invalid_print_strategy_is_not_treated_as_defaults(strategy):
+    from unittest.mock import MagicMock
+    from domain.services.estimation.contracts import EstimateError
+    from domain.services.estimation.inputs import params_for_record
+
+    repo = MagicMock()
+    repo.get_machine_params.return_value = {}
+    repo.get_active_preset_for_material.return_value = None
+    with pytest.raises(EstimateError):
+        params_for_record(repo, {"material": "steel", "metadata_json": {"scan_strategy": strategy}})
+
+
 @pytest.fixture
 def queued_estimate():
     owner = get_settings().compute_node_id
@@ -286,8 +375,8 @@ def test_calculation_and_interval_hold_no_sql_connection(queued_estimate, monkey
         calls.append("calculation")
         return _snapshot(prepared)
 
-    def interval(snapshot, db=None, *, inputs=None):
-        assert not held and db is None and inputs is not None
+    def interval(snapshot, *, inputs):
+        assert not held and inputs is not None
         calls.append("interval")
 
     monkeypatch.setattr(
@@ -307,6 +396,103 @@ def test_calculation_and_interval_hold_no_sql_connection(queued_estimate, monkey
         event.remove(engine, "checkout", checkout)
         event.remove(engine, "checkin", checkin)
     assert calls == ["calculation", "interval"]
+
+
+def _interval_snapshot(**overrides):
+    return {
+        "material": "steel",
+        "layer_thickness_mm": 0.06,
+        "build_origin_source": "explicit",
+        "build_origin_z_mm": 0.0,
+        "estimate_quality": "standard",
+        "prediction_source": "calculated",
+        "print_hours": 2.0,
+        "machine_cycle_hours": 2.0,
+        "raw_scan_hours": 1.5,
+        "raw_recoat_hours": 0.5,
+        "layer_overhead_ms": None,
+        "prediction_warnings": ["operator warning"],
+        **overrides,
+    }
+
+
+def test_prediction_interval_uses_only_detached_history(monkeypatch):
+    from analytics.prediction.calibration_inputs import CalibrationInputs
+    from domain.services.estimation.calculation import enrich_prediction_interval
+
+    history = CalibrationInputs(linked=[], timing_rows=[], params=None)
+    snapshot = _interval_snapshot()
+    calls = []
+
+    def interval(db, material, thickness, scan, recoat, *, inputs):
+        assert db is None and inputs is history
+        assert (material, thickness, scan, recoat) == ("steel", 0.06, 1.5, 0.5)
+        calls.append("detached")
+        return (3.0, 4.0)
+
+    monkeypatch.setattr("analytics.prediction.accuracy.calibration_interval_hours", interval)
+    enrich_prediction_interval(snapshot, inputs=history)
+    assert snapshot["prediction_interval"] == [3.0, 4.0]
+    assert snapshot["interval_reference"]["input_fingerprint"] == history.input_fingerprint
+    assert snapshot["interval_reference"]["scope"] == "scan_plus_recoat"
+    assert datetime.fromisoformat(snapshot["interval_reference"]["computed_at"]).tzinfo is not None
+    assert snapshot["print_hours"] == 2.0 and snapshot["machine_cycle_hours"] == 2.0
+    assert snapshot["prediction_warnings"][0] == "operator warning"
+    assert len(snapshot["prediction_warnings"]) == 2
+    enrich_prediction_interval(snapshot, inputs=history)
+    assert calls == ["detached", "detached"]
+    assert len(snapshot["prediction_warnings"]) == 2
+
+
+@pytest.mark.parametrize("overrides", [
+    {"prediction_source": "model"},
+    {"layer_overhead_ms": 0.0},
+    {"layer_overhead_ms": 500.0, "minimum_layer_cycle_ms": 15_000.0},
+    {"estimate_quality": "lower_bound"},
+    {"build_origin_source": "minimum_supplied_geometry_z"},
+])
+def test_ineligible_prediction_never_reads_interval_history(monkeypatch, overrides):
+    from analytics.prediction.calibration_inputs import CalibrationInputs
+    from domain.services.estimation.calculation import enrich_prediction_interval
+
+    calls = []
+
+    def unexpected(*args, **kwargs):
+        calls.append("interval")
+        raise AssertionError("ineligible prediction requested an interval")
+
+    monkeypatch.setattr("analytics.prediction.accuracy.calibration_interval_hours", unexpected)
+    snapshot = _interval_snapshot(**overrides)
+    previous = dict(snapshot)
+    enrich_prediction_interval(
+        snapshot, inputs=CalibrationInputs(linked=[], timing_rows=[], params=None),
+    )
+    assert snapshot == previous
+    assert not calls
+
+
+def test_missing_interval_history_does_not_fabricate_uncertainty():
+    from analytics.prediction.calibration_inputs import CalibrationInputs
+    from domain.services.estimation.calculation import enrich_prediction_interval
+
+    snapshot = _interval_snapshot()
+    previous = dict(snapshot)
+    enrich_prediction_interval(
+        snapshot, inputs=CalibrationInputs(linked=[], timing_rows=[], params=None),
+    )
+    assert snapshot == previous
+
+
+def test_prediction_calculation_cannot_accept_a_sql_session():
+    import inspect
+    from domain.services.estimation.calculation import (
+        calculate_prediction_snapshot, combined_prediction, enrich_prediction_interval,
+    )
+
+    for function in (calculate_prediction_snapshot, combined_prediction, enrich_prediction_interval):
+        assert "db" not in inspect.signature(function).parameters
+    parameter = inspect.signature(enrich_prediction_interval).parameters["inputs"]
+    assert parameter.default is inspect.Parameter.empty
 
 
 def test_fresh_worker_process_does_not_import_web_routes():

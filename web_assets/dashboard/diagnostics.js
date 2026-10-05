@@ -103,8 +103,8 @@ async function loadVersionInfo() {
 // =========================================================
 // UPDATE — read-only status. Updates are NEVER triggered from here:
 // the container has no Docker access and can't perform one anyway.
-// The only place an update actually happens is the desktop icon
-// (deploy/launch.ps1 -> update.ps1), on every launch. This section
+// Updates happen in the native window or an explicit developer host command,
+// never inside this iframe/API. Ordinary launch keeps the saved version. This section
 // just tells the operator whether a newer version exists on GitHub,
 // so they know it's worth relaunching.
 // =========================================================
@@ -122,9 +122,15 @@ async function refreshUpdateCheck() {
             el('upd-latest-commit').textContent = d.latest_commit;
             el('upd-latest-msg').textContent    = d.latest_message || '';
         }
-        if (d.update_available) {
+        if (d.identity_conflict) {
+            dot.style.background = '#f59e0b';
+            label.textContent = 'Версия совпадает, но SHA отличается от релиза. Автообновление запрещено.';
+        } else if (d.ahead_of_release) {
+            dot.style.background = '#6b7280';
+            label.textContent = 'Установлена версия новее стабильного релиза; откат автоматически не выполняется.';
+        } else if (d.update_available) {
             dot.style.background   = '#f59e0b';
-            label.textContent      = `Доступно обновление → ${d.latest_commit}`;
+            label.textContent      = `Доступен стабильный релиз ${d.latest_version || ''} → ${d.latest_commit}`;
             if (!_updateDismissed) {
                 const banner = document.getElementById('update-banner');
                 const msg    = document.getElementById('update-banner-msg');

@@ -113,10 +113,12 @@ def test_archive_expansion_obeys_private_source_boundary(source_tree, tmp_path, 
     root, _, private, _ = source_tree
     source = private if explicit_private else root
     destination = tmp_path / "expanded"
-    expand_log_inputs(source, destination, {})
-    assert {path.name for path in destination.iterdir()} == (
+    _, _, checksums = expand_log_inputs(source, destination, {})
+    expected = (
         {"private.log"} if explicit_private else {"ordinary.log", "machine.log"}
     )
+    assert {path.name for path in destination.iterdir()} == expected
+    assert checksums == {name: sha256_file(destination / name) for name in expected}
 
 
 def test_watcher_ignores_private_candidates_and_changes(source_tree):

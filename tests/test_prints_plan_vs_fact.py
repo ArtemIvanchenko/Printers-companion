@@ -168,8 +168,7 @@ class TestPlanVsFactSummary:
         assert client.get("/prints/pr_same").json()["summary"] == _summary("pr_same")
 
     def test_missing_compact_rows_never_parse_raw_logs(self, db, monkeypatch):
-        from storage.repositories.runtime import RuntimeRepository
-        monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **k: pytest.fail("raw fallback"))
+        monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **k: pytest.fail("raw fallback"))
         _session(db, "s_raw", duration_min=264)
         _record(db, "pr_raw", session_id="s_raw", predicted_hours=4.1)
         assert _summary("pr_raw")["actual_hours"] is None
@@ -240,6 +239,56 @@ class TestPublishedNormalCycle:
         monkeypatch.setattr(comparison, "comparison_summary", without_sql)
         comparison.attach_plan_vs_fact(PrintsRepository(db), [record])
         assert record["summary"]["actual_hours"] == 4.42
+
+    def test_comparison_checks_the_publication_digest_once(self, db, monkeypatch):
+        from analytics.prediction import timing_snapshot
+        from domain.services.print_cards import comparison
+        from storage.repositories.prints_repo import PrintsRepository
+
+        _cycle_evidence(db)
+        repo = PrintsRepository(db)
+        record = repo.get_print_record("pr_cycle")
+        original = timing_snapshot.stable_hash
+        calls = []
+
+        def fingerprint(rows):
+            assert not db.in_transaction()
+            calls.append(rows)
+            return original(rows)
+
+        monkeypatch.setattr(timing_snapshot, "stable_hash", fingerprint)
+        comparison.attach_plan_vs_fact(repo, [record])
+        assert record["summary"]["actual_hours"] == 4.42
+        assert len(calls) == 1
+
+    def test_catalogue_reads_count_before_local_comparison(self, db, monkeypatch):
+        from domain.services.print_cards import cards, comparison
+        from storage.repositories.prints_repo import PrintsRepository
+
+        _cycle_evidence(db)
+        repo = PrintsRepository(db)
+        counted = False
+        original_count = repo.count_print_records
+        original_summary = comparison.comparison_summary
+
+        def count_before_release(**filters):
+            nonlocal counted
+            assert db.in_transaction()
+            counted = True
+            return original_count(**filters)
+
+        def compare_without_sql(*args):
+            assert counted and not db.in_transaction()
+            return original_summary(*args)
+
+        monkeypatch.setattr(repo, "count_print_records", count_before_release)
+        monkeypatch.setattr(comparison, "comparison_summary", compare_without_sql)
+        records, total = cards.list_cards(repo, query=" pr_cycle ", material=" ALSI10MG ")
+
+        assert total == 1 and len(records) == 1
+        assert records[0]["files"] == []
+        assert records[0]["summary"]["actual_hours"] == 4.42
+        assert not db.in_transaction()
 
 
 class TestUnlinkedSessions:

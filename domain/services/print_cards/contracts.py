@@ -18,8 +18,6 @@ class CardError(Exception):
 class AttachmentResult:
     payload: dict[str, Any]
     queued: bool = False
-    # Temporary compatibility with the synchronous test-only estimate hook.
-    new_geometry: bool = False
 
 
 @dataclass(frozen=True)

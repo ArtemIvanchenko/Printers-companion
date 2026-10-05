@@ -6,7 +6,7 @@ import logging
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from domain.services.estimation.contracts import EstimateError
 from domain.services.estimation.inputs import (
@@ -15,6 +15,9 @@ from domain.services.estimation.inputs import (
     geometry_fingerprint,
 )
 from storage.object_store.minio_client import ObjectStore
+
+if TYPE_CHECKING:
+    from analytics.prediction.calibration_inputs import CalibrationInputs
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,6 @@ def combined_prediction(
     params: dict,
     powder_cost: float | None,
     geometry_cache: Any | None = None,
-    db: Any | None = None,
 ) -> dict:
     """Time + cost estimate over a full print platform (parts + supports STLs).
 
@@ -72,41 +74,6 @@ def combined_prediction(
         return {"available": False, "reason": "Не удалось нарезать модель — проверьте файлы"}
 
     prediction = est.prediction.to_dict() if est.prediction else None
-    # The physics/calibrated path has no interval of its own (print_time.py has
-    # no DB access) — attach one from calibration history here, when there is
-    # enough of it. Left None (not fabricated) for the fitted/MODEL path and
-    # for materials below MIN_PAIRS_FOR_CALIBRATION. A failure here must not
-    # sink the whole estimate — it is extra precision info, not the estimate
-    # itself.
-    if (
-        prediction is not None
-        and db is not None
-        and prediction["source"] in ("calculated", "calibrated")
-        and est.layer_overhead_ms is None
-    ):
-        try:
-            from analytics.prediction.accuracy import calibration_interval_hours
-
-            interval = calibration_interval_hours(
-                db,
-                material,
-                float(params["layer_thickness_mm"]),
-                est.raw_scan_hours,
-                est.raw_recoat_hours,
-            )
-            if interval is not None:
-                prediction["interval"] = list(interval)
-                warning = _calibration_mismatch_warning(
-                    est.print_hours,
-                    interval,
-                    material,
-                    float(params["layer_thickness_mm"]),
-                )
-                if warning:
-                    prediction.setdefault("warnings", []).append(warning)
-        except Exception:
-            logger.exception("prints: calibration interval lookup failed")
-
     return {
         "available": True,
         "n_parts": sum(1 for b in est.bodies if b.kind == "part"),
@@ -219,7 +186,6 @@ def calculate_prediction_snapshot(
     prepared: dict[str, Any],
     *,
     geometry_cache: Any | None = None,
-    db: Any | None = None,
     computed_by: str | None = None,
     object_store_factory=None,
     plate_calculator=None,
@@ -231,6 +197,9 @@ def calculate_prediction_snapshot(
     platform_files = prepared["platform_files"]
     material = prepared["material"]
     params = prepared["params"]
+    from analytics.prediction.layer_engine import scan_geometry_options
+
+    geometry_options = scan_geometry_options(params)
 
     store = (object_store_factory or ObjectStore)()
     with tempfile.TemporaryDirectory(prefix="printer-estimator-") as temporary_dir:
@@ -267,7 +236,6 @@ def calculate_prediction_snapshot(
             params,
             prepared["powder_cost"],
             geometry_cache=geometry_cache,
-            db=db,
         )
     if not result.get("available"):
         raise EstimateError("invalid_inputs", f"Расчёт недоступен: {result.get('reason')}")
@@ -384,6 +352,8 @@ def calculate_prediction_snapshot(
                     "hatch_distance_mm",
                     "layer_thickness_mm",
                     "laser_count",
+                    "contours_enabled",
+                    "hatch_angle_deg",
                 )
             }
         ),
@@ -403,6 +373,7 @@ def calculate_prediction_snapshot(
             "material": material,
             "layer_thickness_mm": params.get("layer_thickness_mm"),
             "hatch_distance_mm": params.get("hatch_distance_mm"),
+            "scan_geometry_options": geometry_options,
             "laser_count": result.get("laser_count", params.get("laser_count")),
             "layer_overhead_ms": result.get("layer_overhead_ms"),
             "minimum_layer_cycle_ms": result.get("minimum_layer_cycle_ms"),
@@ -467,30 +438,29 @@ def needs_prediction_interval(snapshot: dict) -> bool:
     return True
 
 
-def enrich_prediction_interval(snapshot: dict, db: Any = None, *, inputs=None) -> None:
-    """Compute from detached history; db is a legacy synchronous adapter only."""
+def enrich_prediction_interval(snapshot: dict, *, inputs: CalibrationInputs) -> None:
+    """Refine an eligible scan+recoat estimate using detached history only."""
     if not needs_prediction_interval(snapshot):
         return
     try:
         from analytics.prediction.accuracy import calibration_interval_hours
 
         interval = calibration_interval_hours(
-            db,
+            None,
             str(snapshot["material"]),
             float(snapshot["layer_thickness_mm"]),
             float(snapshot.get("raw_scan_hours") or 0.0),
             float(snapshot.get("raw_recoat_hours") or 0.0),
-            **({"inputs": inputs} if inputs is not None else {}),
+            inputs=inputs,
         )
         if interval is None:
             return
         snapshot["prediction_interval"] = list(interval)
-        if inputs is not None:
-            snapshot["interval_reference"] = {
-                "input_fingerprint": inputs.input_fingerprint,
-                "computed_at": datetime.now(timezone.utc).isoformat(),
-                "scope": "scan_plus_recoat",
-            }
+        snapshot["interval_reference"] = {
+            "input_fingerprint": inputs.input_fingerprint,
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "scope": "scan_plus_recoat",
+        }
         warning = _calibration_mismatch_warning(
             float(snapshot["print_hours"]),
             interval,

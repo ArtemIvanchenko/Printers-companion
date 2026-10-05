@@ -1,15 +1,17 @@
 """Tests for the print archive: /prints CRUD, file attachments, /settings/machine."""
+import asyncio
 import hashlib
 import io
+import json
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
 from api.main import app
-from api.routes.prints import _calibration_mismatch_warning
+from domain.services.estimation.calculation import _calibration_mismatch_warning
+from domain.services.estimation.contracts import EstimateError
 from core.config.settings import get_settings
 from storage.repositories.prints_repo import PrintsRepository
 
@@ -82,6 +84,79 @@ def _create_record(name="Тестовая деталь", material="steel") -> di
     response = client.post("/prints", json={"name": name, "material": material})
     assert response.status_code == 200
     return response.json()
+
+
+class TestPrintEventStream:
+    class ConnectedRequest:
+        async def is_disconnected(self):
+            return False
+
+    def test_late_subscriber_receives_baseline_before_the_next_change(self, monkeypatch):
+        from api.routes import prints
+
+        baseline = {"count": 1, "revision_sum": 2, "updated_at": "2026-10-01T10:00:00"}
+        changed = {**baseline, "revision_sum": 3}
+        monkeypatch.setattr(prints, "_PRINT_SYNC_SUBSCRIBERS", set())
+        monkeypatch.setattr(prints, "_PRINT_SYNC_STATE", baseline)
+
+        async def verify():
+            # An already running monitor has published a state to other tabs.
+            monkeypatch.setattr(prints, "_PRINT_SYNC_TASK", asyncio.current_task())
+            class ConcurrentChangeRequest:
+                sent_change = False
+
+                async def is_disconnected(self):
+                    if not self.sent_change:
+                        # Polling can coalesce changes at this await boundary.
+                        queue = next(iter(prints._PRINT_SYNC_SUBSCRIBERS))
+                        if queue.full():
+                            queue.get_nowait()
+                        queue.put_nowait(changed)
+                        self.sent_change = True
+                    return False
+
+            response = await prints.print_events(ConcurrentChangeRequest())
+            stream = response.body_iterator
+            try:
+                assert response.media_type == "text/event-stream"
+                first = await asyncio.wait_for(anext(stream), timeout=1)
+                assert first == "event: print-records\ndata: " + json.dumps(baseline) + "\n\n"
+                second = await asyncio.wait_for(anext(stream), timeout=1)
+                assert second == "event: print-records\ndata: " + json.dumps(changed) + "\n\n"
+            finally:
+                await stream.aclose()
+            assert not prints._PRINT_SYNC_SUBSCRIBERS
+
+        asyncio.run(verify())
+
+    def test_first_subscriber_starts_one_monitor_and_receives_fresh_state(self, monkeypatch):
+        from api.routes import prints
+
+        state = {"count": 2, "revision_sum": 5, "updated_at": None}
+        monkeypatch.setattr(prints, "_PRINT_SYNC_SUBSCRIBERS", set())
+        monkeypatch.setattr(prints, "_PRINT_SYNC_TASK", None)
+        monkeypatch.setattr(prints, "_PRINT_SYNC_STATE", {"old": True})
+        monkeypatch.setattr(prints, "_print_sync_state", lambda: state)
+
+        async def verify():
+            response = await prints.print_events(self.ConnectedRequest())
+            stream = response.body_iterator
+            monitor = None
+            try:
+                first = await asyncio.wait_for(anext(stream), timeout=1)
+                assert first == "event: print-records\ndata: " + json.dumps(state) + "\n\n"
+                monitor = prints._PRINT_SYNC_TASK
+                assert monitor is not None and not monitor.done()
+            finally:
+                await stream.aclose()
+                if monitor is not None:
+                    monitor.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await monitor
+            assert not prints._PRINT_SYNC_SUBSCRIBERS
+            assert prints._PRINT_SYNC_TASK is None and prints._PRINT_SYNC_STATE is None
+
+        asyncio.run(verify())
 
 
 class TestCalibrationMismatchWarning:
@@ -286,7 +361,7 @@ class TestScanParamsResolution:
             return self._preset
 
     def _resolve(self, record, machine=None, preset=None):
-        from api.routes.prints import params_for_record
+        from domain.services.estimation.inputs import params_for_record
         return params_for_record(self._Repo(machine, preset), {"material": "steel", **record})
 
     def test_preset_overrides_the_machine_default(self):
@@ -327,7 +402,7 @@ class TestScanParamsResolution:
         assert self._resolve({}, machine=None, preset=None) == {}
 
     def test_parameter_sources_follow_the_same_precedence_without_claiming_confirmation(self):
-        from api.routes.prints import _params_with_sources_for_record
+        from domain.services.estimation.inputs import _params_with_sources_for_record
 
         repo = self._Repo(
             {"layer_thickness_mm": 0.03, "hatch_distance_mm": 0.12},
@@ -797,8 +872,8 @@ class TestStreamingModelIO:
         assert _StreamingOnlyStore.uploaded == payload
         assert not _StreamingOnlyStore.staged_path.exists()
 
-    def test_estimator_downloads_to_paths_and_removes_them(self, monkeypatch):
-        from api.routes import prints as prints_module
+    def test_estimator_downloads_to_paths_and_removes_them(self):
+        from domain.services.estimation.calculation import calculate_prediction_snapshot
 
         payload = b"binary-stl"
         checksum = hashlib.sha256(payload).hexdigest()
@@ -837,8 +912,6 @@ class TestStreamingModelIO:
                 "cost_prediction": None,
             }
 
-        monkeypatch.setattr(prints_module, "ObjectStore", _StreamingOnlyStore)
-        monkeypatch.setattr(prints_module, "_combined_prediction", fake_combined)
         prepared = {
             "record": {
                 "record_id": "pr_stream_input",
@@ -856,7 +929,9 @@ class TestStreamingModelIO:
             "powder_cost": None,
         }
 
-        snapshot = prints_module._calculate_prediction_snapshot(prepared)
+        snapshot = calculate_prediction_snapshot(
+            prepared, object_store_factory=_StreamingOnlyStore, plate_calculator=fake_combined,
+        )
 
         assert snapshot["method"] == "test:path"
         assert observed_paths and not observed_paths[0].exists()
@@ -973,9 +1048,9 @@ class TestMissingParamsAreNamed:
 
 class TestGeometryQuality:
     def test_known_incomplete_plate_is_blocked_before_estimation(self):
-        from api.routes.prints import _assert_geometry_usable
+        from domain.services.estimation.inputs import _assert_geometry_usable
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(EstimateError) as exc:
             _assert_geometry_usable({
                 "metadata_json": {"geometry_quality": {
                     "status": "incomplete", "note": "нет части деталей",
@@ -984,7 +1059,7 @@ class TestGeometryQuality:
         assert "геометрия карточки помечена как неполная" in str(exc.value)
 
     def test_lower_bound_plate_remains_estimatable(self):
-        from api.routes.prints import _assert_geometry_usable
+        from domain.services.estimation.inputs import _assert_geometry_usable
 
         _assert_geometry_usable({
             "metadata_json": {"geometry_quality": {"status": "lower_bound"}},

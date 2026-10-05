@@ -10,9 +10,7 @@ class TestSessionsAPI:
         """Mock RuntimeRepository."""
         repo = MagicMock()
         repo.get_session_payload.return_value = None
-        repo.get_session_files.return_value = None
         repo.list_session_payloads.return_value = []
-        repo.save_report = MagicMock()
         repo.commit = MagicMock()
         return repo
 
@@ -76,8 +74,6 @@ class TestSessionsReportGeneration:
     def mock_repo(self):
         """Mock RuntimeRepository."""
         repo = MagicMock()
-        repo.get_session_files.return_value = []
-        repo.save_report = MagicMock()
         repo.commit = MagicMock()
         return repo
 
@@ -99,7 +95,6 @@ class TestSessionsReportGeneration:
 
         assert result["report_id"] == "report_123"
         mock_read.assert_called_once_with(mock_repo.db, "session_123", include_markdown=False)
-        mock_repo.save_report.assert_not_called()
         mock_repo.flush.assert_not_called()
 
     @patch("domain.services.session_reports.read_report")
@@ -136,7 +131,6 @@ class TestSessionApproval:
     def mock_repo(self):
         """Mock RuntimeRepository."""
         repo = MagicMock()
-        repo.get_session_files.return_value = []
         repo.get_session_payload.return_value = {
             "group": {"features": {"duration_sec": 3600}}
         }

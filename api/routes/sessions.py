@@ -184,12 +184,11 @@ def approve_session(
     from storage.db.session import session_scope
 
     _require_local_session(session_id, repo)
-    files = repo.get_session_files(session_id)
-    if files is None:
+    session_payload = repo.get_session_payload(session_id)
+    if not session_payload:
         raise HTTPException(status_code=404, detail="Session not found")
 
     # Extract features from the session payload
-    session_payload = repo.get_session_payload(session_id)
     features = (session_payload or {}).get("group", {}).get("features", {})
 
     confirmed_by = (payload or {}).get("confirmed_by", "unknown")

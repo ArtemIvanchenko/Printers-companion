@@ -142,7 +142,12 @@ def main() -> None:
     signal.signal(signal.SIGINT, request_stop)
     logger.info("NAS sync started for %s at %s", settings.compute_node_id, outbox.root)
     while not stopped:
-        state = process_next(outbox=outbox, settings=settings)
+        from core.maintenance import write_admission
+        # This shared OS lock joins the API write drain: an already-started NAS
+        # publication finishes before the host freezes/kills this consumer.
+        # Marker checking inside admission also closes the check→claim race.
+        with write_admission() as admitted:
+            state = process_next(outbox=outbox, settings=settings) if admitted else None
         if state is None:
             time.sleep(settings.nas_sync_poll_seconds)
     logger.info("NAS sync stopped")

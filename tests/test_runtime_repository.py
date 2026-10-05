@@ -168,7 +168,7 @@ class TestSessionClassificationColumn:
         assert db.get(BuildSession, "s_keep").classification == "REAL_PRINT"
 
 
-class TestRuntimeRepositoryReports:
+class TestReportsRepository:
     """Test report-related methods."""
 
     def test_save_report_new(self, mock_db_session):
@@ -181,8 +181,12 @@ class TestRuntimeRepositoryReports:
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        repo = RuntimeRepository(mock_db_session)
-        repo.save_report(report)
+        from storage.repositories.reports import ReportsRepository
+
+        repo = ReportsRepository(mock_db_session)
+        repo.save_prepared(report["report_id"], {
+            "storage_uri": None, "payload": report, "version_metadata": {},
+        })
 
         mock_db_session.add.assert_called_once()
         mock_db_session.flush.assert_called_once()

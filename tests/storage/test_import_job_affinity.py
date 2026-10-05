@@ -1,12 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
 from core.config.settings import Settings
-from api.routes.imports import create_detected_import
+from domain.services.importing.requests import prepare_import_candidate, publish_import_candidate
 from domain.enums.common import ImportJobStatus
 from domain.models.sessions import ImportJob
 from domain.services.import_jobs import detect_import_candidate
 from storage.db.session import SessionLocal
-from storage.repositories.runtime import RuntimeRepository
+from storage.repositories.import_jobs import ImportJobsRepository
 
 
 def _queued(path, node_id: str):
@@ -27,7 +27,7 @@ def test_same_container_path_is_scoped_to_its_operator_pc(tmp_path):
     (source / "time.log").write_text("x", encoding="utf-8")
 
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         job_a = _queued(source, "operator-01")
         job_b = _queued(source, "operator-02")
         repo.save_import_job(job_a)
@@ -35,7 +35,7 @@ def test_same_container_path_is_scoped_to_its_operator_pc(tmp_path):
         db.commit()
 
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         claimed_a = repo.claim_next_import_job(
             owner_node_id="operator-01",
             lease_owner="operator-01:worker",
@@ -50,7 +50,7 @@ def test_same_container_path_is_scoped_to_its_operator_pc(tmp_path):
         ) is None
 
     with SessionLocal() as db:
-        claimed_b = RuntimeRepository(db).claim_next_import_job(
+        claimed_b = ImportJobsRepository(db).claim_next_import_job(
             owner_node_id="operator-02",
             lease_owner="operator-02:worker",
         )
@@ -65,13 +65,13 @@ def test_reclaimed_import_increments_fencing_generation(tmp_path):
     now = datetime.now(timezone.utc)
 
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         job = _queued(source, "operator-01")
         repo.save_import_job(job)
         db.commit()
 
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         old = repo.claim_next_import_job(
             owner_node_id="operator-01",
             lease_owner="old-worker",
@@ -83,7 +83,7 @@ def test_reclaimed_import_increments_fencing_generation(tmp_path):
         db.commit()
 
     with SessionLocal() as db:
-        new = RuntimeRepository(db).claim_next_import_job(
+        new = ImportJobsRepository(db).claim_next_import_job(
             owner_node_id="operator-01",
             lease_owner="new-worker",
             now=now,
@@ -100,13 +100,13 @@ def test_import_heartbeat_is_owner_and_generation_fenced(tmp_path):
     now = datetime.now(timezone.utc)
 
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         job = _queued(source, "operator-01")
         repo.save_import_job(job)
         db.commit()
 
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         claimed = repo.claim_next_import_job(
             owner_node_id="operator-01",
             lease_owner="current-worker",
@@ -134,7 +134,7 @@ def test_import_heartbeat_is_owner_and_generation_fenced(tmp_path):
         assert lease_until == now + timedelta(seconds=130)
 
 
-def test_late_card_link_preserves_an_already_claimed_worker_lease(tmp_path, monkeypatch):
+def test_late_card_link_preserves_an_already_claimed_worker_lease(tmp_path):
     source = tmp_path / "watcher-upload-race"
     source.mkdir()
     (source / "time.log").write_text("x", encoding="utf-8")
@@ -143,16 +143,14 @@ def test_late_card_link_preserves_an_already_claimed_worker_lease(tmp_path, monk
         compute_node_id="operator-race",
         require_operator_import_confirmation=False,
     )
-    monkeypatch.setattr("api.routes.imports.get_settings", lambda: settings)
-
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         job = _queued(source, "operator-race")
         repo.save_import_job(job)
         db.commit()
 
     with SessionLocal() as db:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         claimed = repo.claim_next_import_job(
             owner_node_id="operator-race",
             lease_owner="operator-race:worker",
@@ -160,10 +158,10 @@ def test_late_card_link_preserves_an_already_claimed_worker_lease(tmp_path, monk
         db.commit()
         assert claimed is not None
 
+    candidate = prepare_import_candidate(source, settings=settings)
     with SessionLocal() as db:
-        result = create_detected_import(
-            str(source),
-            RuntimeRepository(db),
+        result = publish_import_candidate(
+            db, candidate, settings=settings,
             print_record_id="pr_exact",
         )
         db.commit()
@@ -185,13 +183,11 @@ def test_duplicate_manifest_is_hashed_before_main_nas_transaction(tmp_path, monk
         compute_node_id="operator-local-hash",
         require_operator_import_confirmation=False,
     )
-    monkeypatch.setattr("api.routes.imports.get_settings", lambda: settings)
-
     old_job = _queued(old_source, settings.compute_node_id)
     old_job.status = ImportJobStatus.done
     old_job.checksum_manifest = {"time.log": "same-sha"}
     with SessionLocal() as seed_db:
-        RuntimeRepository(seed_db).save_import_job(old_job)
+        ImportJobsRepository(seed_db).save_import_job(old_job)
         seed_db.commit()
 
     with SessionLocal() as db:
@@ -201,9 +197,38 @@ def test_duplicate_manifest_is_hashed_before_main_nas_transaction(tmp_path, monk
             return {"time.log": "same-sha"}
 
         monkeypatch.setattr(
-            "domain.services.import_jobs.calculate_checksum_manifest",
+            "domain.services.importing.requests.calculate_checksum_manifest",
             local_manifest,
         )
-        result = create_detected_import(str(new_source), RuntimeRepository(db))
+        candidate = prepare_import_candidate(new_source, settings=settings)
+        result = publish_import_candidate(db, candidate, settings=settings)
 
         assert result.job.import_job_id == old_job.import_job_id
+
+
+def test_import_repository_preserves_the_callers_unit_of_work(tmp_path):
+    source = tmp_path / "direct-sql-repository"
+    source.mkdir()
+    (source / "time.log").write_text("x", encoding="utf-8")
+    job = _queued(source, "operator-direct")
+    with SessionLocal() as db:
+        imports = ImportJobsRepository(db)
+        imports.save_import_job(job)
+        assert imports.db is db
+        assert any(isinstance(row, ImportJob) for row in db.new)
+        db.flush()  # The caller owns flush, just as before the extraction.
+        restored = imports.get_import_job(job.import_job_id).model_dump()
+        # SQLite drops the UTC tag on SQL datetime columns, unlike PostgreSQL.
+        for key, value in restored.items():
+            if isinstance(value, datetime) and value.tzinfo is None:
+                restored[key] = value.replace(tzinfo=timezone.utc)
+        assert restored == job.model_dump()
+        assert imports.count_import_jobs("operator-direct") == 1
+        assert imports.latest_import_job("operator-direct").import_job_id == job.import_job_id
+        assert [row.import_job_id for row in imports.list_import_jobs_by_source_path(
+            owner_node_id="operator-direct", source_path=str(source),
+        )] == [job.import_job_id]
+        assert db.in_transaction()
+        db.rollback()
+    with SessionLocal() as db:
+        assert ImportJobsRepository(db).get_import_job(job.import_job_id) is None

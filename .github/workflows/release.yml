@@ -66,3 +66,60 @@ jobs:
             docker tag "$IMAGE_REPO:$service-v$APP_VERSION" "$IMAGE_REPO:$service"
             docker push "$IMAGE_REPO:$service"
           done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Capture and verify immutable operator images
+        run: python scripts/maintenance/capture_desktop_images.py --context default --output "$RUNNER_TEMP/operator-images.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-images
+          path: ${{ runner.temp }}/operator-images.json
+          if-no-files-found: error
+
+  desktop:
+    needs: publish
+    uses: ./.github/workflows/desktop.yml
+    with:
+      images_artifact: operator-images
+
+  release:
+    needs: [publish, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: companion-test-*
+          path: installers
+      - uses: actions/download-artifact@v4
+        with:
+          name: operator-images
+          path: release-assets
+      - name: Collect installers and checksums, never publish an unsigned feed
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib, shutil
+          root = pathlib.Path('release-assets')
+          installers = list(pathlib.Path('installers').rglob('Printer-Companion-*'))
+          selected = [p for p in installers if p.suffix in {'.dmg', '.zip', '.exe'}]
+          assert len(selected) == 5, f'Expected 2 Mac DMGs, 2 ZIPs and Windows EXE, got {len(selected)}'
+          for source in selected:
+              target = root / source.name
+              assert not target.exists(), f'Duplicate installer: {source.name}'
+              shutil.copyfile(source, target)
+          hashes = [hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name for p in sorted(root.iterdir()) if p.is_file()]
+          (root / 'SHA256SUMS.txt').write_text('\n'.join(hashes) + '\n')
+          PY
+      - name: Publish only after all platform builds and Docker lifecycle pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --verify-tag --title "Printer’s Companion $VERSION" \
+            --notes-file "docs/releases/v$VERSION.md"

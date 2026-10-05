@@ -16,6 +16,28 @@ from tests.analytics.test_scan_calibration import (
 from storage.db.session import SessionLocal
 
 
+@pytest.mark.parametrize('name', ['_fit', '_fit_beta', '_group_weights', '_gate', '_fit_layer_cycle_model'])
+def test_legacy_fit_exports_use_one_detached_numerical_implementation(name):
+    from analytics.prediction import scan_calibration, scan_fitting
+
+    assert getattr(scan_calibration, name) is getattr(scan_fitting, name)
+    assert getattr(scan_fitting, name).__module__ == 'analytics.prediction.scan_fitting'
+
+
+def test_detached_fitting_has_no_database_storage_or_http_imports():
+    import ast
+    import inspect
+    from analytics.prediction import scan_fitting
+
+    module = ast.parse(inspect.getsource(scan_fitting))
+    for node in ast.walk(module):
+        if isinstance(node, ast.ImportFrom):
+            name = node.module or ''
+            assert not name.startswith(('storage', 'domain', 'api', 'sqlalchemy', 'core.config'))
+        elif isinstance(node, ast.Import):
+            assert all(not alias.name.startswith(('storage', 'domain', 'api', 'sqlalchemy')) for alias in node.names)
+
+
 def _artifact(params=None):
     params = {**SCAN_PARAMS, **(params or {})}
     scope = scan_scope(params, "steel", THICKNESS)
@@ -32,6 +54,7 @@ def _artifact(params=None):
     {"active_preset_id": "another-preset"}, {"firmware_version": "new"},
     {"process_strategy_version": "new"}, {"slicer_version": "new"},
     {"hatch_speeds_by_mat": {"steel": 2000}},
+    {"contours_enabled": False}, {"hatch_angle_deg": 45.0},
 ])
 def test_changed_scan_input_never_reuses_previous_beta(change):
     params, model = _artifact()

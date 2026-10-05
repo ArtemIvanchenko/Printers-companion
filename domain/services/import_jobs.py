@@ -1,6 +1,7 @@
 import logging
 import tempfile
-import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -13,7 +14,7 @@ from domain.enums.common import ImportJobStatus
 from domain.services.ingestion import IngestionService
 from domain.services.importing.fence import ImportFence, StaleImportLeaseError
 from analytics.prediction.timing_snapshot import PreparedLayerTimings
-from domain.services.session_grouping import group_files_into_sessions
+from domain.services.session_grouping import SessionGroup, group_files_into_sessions
 from operator_journal.notifications import (
     NotificationMessage,
     build_copying_retry_message,
@@ -256,26 +257,6 @@ def mark_import_job_confirmed(
     return _result(job, [])
 
 
-def retry_import_job(
-    job: ImportJobRecord,
-    registry: ParserRegistry,
-    profile: PrinterProfilePlugin | None = None,
-    actor: str = "operator",
-    settings: Settings | None = None,
-    now: datetime | None = None,
-    lease_guard: Callable[[], bool] | None = None,
-) -> ImportExecutionResult:
-    return confirm_import_job(
-        job,
-        registry=registry,
-        profile=profile,
-        actor=actor,
-        settings=settings,
-        now=now,
-        lease_guard=lease_guard,
-    )
-
-
 def queue_import_job_retry(
     job: ImportJobRecord,
     actor: str = "operator",
@@ -350,27 +331,19 @@ def snapshot_source(source_path: Path) -> dict[str, dict[str, Any]]:
     return snapshot
 
 
-def execute_confirmed_import(
+@contextmanager
+def _prepared_import_sources(
     job: ImportJobRecord,
-    registry: ParserRegistry,
-    profile: PrinterProfilePlugin | None = None,
-    settings: Settings | None = None,
-    now: datetime | None = None,
-    lease_guard: Callable[[], bool] | None = None,
-) -> ImportExecutionResult:
-    settings = settings or get_settings()
-    now = now or datetime.now(timezone.utc)
+    *,
+    settings: Settings,
+    now: datetime,
+    lease_guard: Callable[[], bool] | None,
+) -> Iterator[tuple[Path, dict[str, str]]]:
+    """Archive before parsing; keep extracted files alive until analysis ends."""
     source_path = Path(job.source_path)
     work_root = source_path
     cleanup: tempfile.TemporaryDirectory[str] | None = None
-    fence = (ImportFence(job.import_job_id, job.owner_node_id, job.lease_owner, job.lease_generation)
-             if job.lease_owner and job.lease_generation > 0 else None)
-    if fence is None and settings.app_env != "test":
-        raise StaleImportLeaseError("Импорт должен выполняться через очередь с действующим правом на задание.")
-
     try:
-        job.status = ImportJobStatus.importing
-        job.updated_at = now
         _require_current_lease(lease_guard)
         # NAS is the durable source of truth, but never the compute node.  The
         # local worker streams the immutable ZIP before even extracting it. A
@@ -382,15 +355,6 @@ def execute_confirmed_import(
                 source_path,
                 required=settings.app_env != "test",
             )
-            cleanup = tempfile.TemporaryDirectory(prefix="printer-log-import-")
-            work_root = Path(cleanup.name)
-            from domain.services.log_archives import expand_log_inputs
-            expanded_objects, archive_members = expand_log_inputs(
-                source_path, work_root, job.source_objects,
-                lease_check=lambda: _require_current_lease(lease_guard),
-            )
-            job.source_objects.update(expanded_objects)
-            job.checksum_manifest = calculate_checksum_manifest(work_root)
         else:
             job.checksum_manifest = calculate_checksum_manifest(work_root)
             job.source_objects = archive_raw_import(
@@ -400,17 +364,20 @@ def execute_confirmed_import(
                 checksum_manifest=job.checksum_manifest,
                 required=settings.app_env != "test",
             )
-            archive_members = {}
-            if any(path.suffix.lower() == '.zip' for path in iter_source_files(work_root) if path.is_file()):
-                from domain.services.log_archives import expand_log_inputs
-                cleanup = tempfile.TemporaryDirectory(prefix="printer-log-import-")
-                work_root = Path(cleanup.name)
-                expanded_objects, archive_members = expand_log_inputs(
-                    source_path, work_root, job.source_objects,
-                    lease_check=lambda: _require_current_lease(lease_guard),
-                )
-                job.source_objects.update(expanded_objects)
-                job.checksum_manifest = calculate_checksum_manifest(work_root)
+        archive_members = {}
+        if job.source_kind == "zip" or any(
+            path.suffix.lower() == '.zip'
+            for path in iter_source_files(work_root) if path.is_file()
+        ):
+            from domain.services.log_archives import expand_log_inputs
+
+            cleanup = tempfile.TemporaryDirectory(prefix="printer-log-import-")
+            work_root = Path(cleanup.name)
+            expanded_objects, archive_members, job.checksum_manifest = expand_log_inputs(
+                source_path, work_root, job.source_objects,
+                lease_check=lambda: _require_current_lease(lease_guard),
+            )
+            job.source_objects.update(expanded_objects)
         job.audit_trail.append(
             _audit(
                 "raw_logs_archived_to_nas",
@@ -429,6 +396,61 @@ def execute_confirmed_import(
             )
         )
 
+        yield work_root, archive_members
+    finally:
+        if cleanup is not None:
+            cleanup.cleanup()
+
+
+def _prepare_group_artifacts(
+    group: SessionGroup,
+    timing_manifest: dict[str, Any],
+    profile: PrinterProfilePlugin | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prepare one shared analysis and its projections, without SQL or NAS writes."""
+    from domain.services.session_analysis import prepare_session_analysis
+    from domain.services.session_overview import build_group_overview
+
+    analysis = prepare_session_analysis(group.files, profile=profile)
+    overview = build_group_overview(
+        group.group_id, group.files,
+        start_ts=group.start_ts, end_ts=group.end_ts,
+        grouping_confidence=float(group.confidence) if group.confidence else 0.0,
+        analysis=analysis,
+    )
+    overview["timing_publication_id"] = timing_manifest["publication_id"]
+    payload = {
+        "files": [file.model_dump(mode="json", exclude={"parse_result"}) for file in group.files],
+        "group": overview,
+    }
+    report = generate_session_json_report(
+        group.group_id, group.files, analysis=analysis, overview=overview,
+    )
+    report["timing_publication"] = timing_manifest
+    report["markdown"] = generate_markdown_report(report)
+    return payload, report
+
+
+def execute_confirmed_import(
+    job: ImportJobRecord,
+    registry: ParserRegistry,
+    profile: PrinterProfilePlugin | None = None,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+    lease_guard: Callable[[], bool] | None = None,
+) -> ImportExecutionResult:
+    settings = settings or get_settings()
+    now = now or datetime.now(timezone.utc)
+    fence = (ImportFence(job.import_job_id, job.owner_node_id, job.lease_owner, job.lease_generation)
+             if job.lease_owner and job.lease_generation > 0 else None)
+    if fence is None and settings.app_env != "test":
+        raise StaleImportLeaseError("Импорт должен выполняться через очередь с действующим правом на задание.")
+
+    job.status = ImportJobStatus.importing
+    job.updated_at = now
+    with _prepared_import_sources(
+        job, settings=settings, now=now, lease_guard=lease_guard,
+    ) as (work_root, archive_members):
         ingest_result = IngestionService(registry, profile).parse(work_root)
         for item in ingest_result.files:
             if item.checksum != job.checksum_manifest.get(item.relative_path):
@@ -450,8 +472,6 @@ def execute_confirmed_import(
 
         job.status = ImportJobStatus.analyzing
         job.updated_at = now
-        # Lazy import: build_group_overview pulls the analytics stack.
-        from domain.services.session_overview import build_group_overview
         for group in groups:
             _require_current_lease(lease_guard)
             # Use the deterministic group id so this (watcher/confirmation) path
@@ -484,7 +504,7 @@ def execute_confirmed_import(
             # Prepare only. Existing visible rows and the explicit empty marker
             # are replaced later, together with the final overview and fence.
             from analytics.prediction.timing_snapshot import prepare_layer_timings
-            from storage.repositories.runtime import mirror_logs_to_object_store
+            from domain.services.session_sources import mirror_logs_to_object_store
 
             _require_current_lease(lease_guard)
             layer_timings[session_id] = prepare_layer_timings(
@@ -493,27 +513,10 @@ def execute_confirmed_import(
             )
             mirror_logs_to_object_store(session_id, group.files, immutable=True)
 
-            # Enrich exactly like the startup/upload paths: features, telemetry,
-            # health, classification, data_quality. Storing the bare group stub
-            # (the old behaviour) made the dashboard show these sessions as
-            # INCOMPLETE/empty — this was the root cause of "half the graphs
-            # are empty" when the watcher import path was active.
-            from domain.services.session_analysis import prepare_session_analysis
-
-            analysis = prepare_session_analysis(group.files, profile=profile)
-            overview = build_group_overview(
-                session_id, group.files,
-                start_ts=group.start_ts, end_ts=group.end_ts,
-                grouping_confidence=float(group.confidence) if group.confidence else 0.0,
-                analysis=analysis,
+            payload, report = _prepare_group_artifacts(
+                group, layer_timings[session_id].manifest, profile,
             )
-            overview["timing_publication_id"] = layer_timings[session_id].manifest["publication_id"]
-            stripped_files = [f.model_dump(mode="json", exclude={"parse_result"}) for f in group.files]
-            sessions[session_id] = {"files": stripped_files, "group": overview}
-            report = generate_session_json_report(session_id, group.files, analysis=analysis, overview=overview)
-            report["log_insights"] = overview.get("log_insights") or {}
-            report["timing_publication"] = layer_timings[session_id].manifest
-            report["markdown"] = generate_markdown_report(report)
+            sessions[session_id] = payload
             reports[report["report_id"]] = report
             job.session_ids.append(session_id)
             job.report_ids.append(report["report_id"])
@@ -545,9 +548,6 @@ def execute_confirmed_import(
         )
         return _result(job, [notification], sessions=sessions, reports=reports,
                        layer_timings=layer_timings, previous_session_tokens=previous_session_tokens)
-    finally:
-        if cleanup is not None:
-            cleanup.cleanup()
 
 
 def calculate_checksum_manifest(root: Path) -> dict[str, str]:
@@ -630,19 +630,6 @@ def archive_raw_import(
             f"NAS rejected raw log {path.name}: {exc}"
         ) from exc
     return objects
-
-
-def safe_extract_zip(archive: zipfile.ZipFile, target_dir: Path) -> None:
-    from domain.services.log_archives import validated_members
-    root = target_dir.resolve()
-    for member in validated_members(archive):
-        destination = (root / member.filename).resolve()
-        # Use path-relative containment, not str.startswith: a sibling dir that
-        # shares the prefix (e.g. root='/tmp/imp', dest='/tmp/imp-evil/x') would
-        # wrongly pass a startswith check and escape the extraction root.
-        if destination != root and root not in destination.parents:
-            raise ValueError(f"Unsafe ZIP member path: {member.filename}")
-    archive.extractall(root)
 
 
 def build_missing_context_questions(session_id: str, report: dict[str, Any]) -> list[dict[str, Any]]:

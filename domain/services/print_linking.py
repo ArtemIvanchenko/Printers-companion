@@ -1,11 +1,9 @@
-"""Auto-linking of log sessions to print records by print date.
+"""Evidence-based linking of log sessions to print records.
 
-Idempotent sweep: every unlinked PrintRecord is matched against sessions
-whose ``start_ts`` falls within ±window of the record's print date
-(``printed_at``, falling back to ``created_at``). Only unambiguous 1:1
-pairs are linked — when a record matches several sessions or a session
-matches several records, nothing happens until the operator resolves it
-manually (PATCH /prints/{id} с session_id).
+Dates open a candidate window; they never prove a pair. Completed card-upload
+lineage or independent layer evidence must pass the shared pair-matching rules.
+Competing evidence needs a sufficient margin, and several cards proposing the
+same session remain ambiguous until the operator resolves them manually.
 
 Call after any import path creates sessions; safe to run repeatedly.
 """
@@ -27,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 def _as_utc(ts: datetime) -> datetime:
     return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
+
+def _unclaimed_sessions():
+    """Filter claimed sessions in SQL, including claims by another workstation."""
+    return select(BuildSession).where(~select(PrintRecord.record_id).where(
+        PrintRecord.session_id == BuildSession.session_id,
+    ).exists())
 
 
 def _link(
@@ -172,7 +177,7 @@ def auto_link_print_records(
     *,
     origin_compute_node_id: str | None = None,
 ) -> list[dict]:
-    """Link unlinked print records to sessions by date. Returns created links.
+    """Link only independently supported pairs. Returns created links.
 
     The caller commits; this function only mutates rows.
     """
@@ -189,20 +194,10 @@ def auto_link_print_records(
     if not records:
         return []
 
-    taken = {
-        sid for sid in db.scalars(
-            select(PrintRecord.session_id).where(PrintRecord.session_id.is_not(None))
-        )
-    }
-    sessions = [
-        s for s in db.scalars(
-            select(BuildSession).where(
-                BuildSession.start_ts.is_not(None),
-                BuildSession.origin_compute_node_id == origin_compute_node_id,
-            )
-        ).all()
-        if s.session_id not in taken
-    ]
+    sessions = db.scalars(_unclaimed_sessions().where(
+        BuildSession.start_ts.is_not(None),
+        BuildSession.origin_compute_node_id == origin_compute_node_id,
+    )).all()
     if not sessions:
         return []
 
@@ -295,20 +290,13 @@ def session_candidates(db: Session, record_id: str, window_hours: float | None =
         return []
     window = timedelta(hours=window_hours or get_settings().print_link_window_hours)
     anchor = _as_utc(record.printed_at or record.created_at)
-    taken = {
-        sid for sid in db.scalars(
-            select(PrintRecord.session_id).where(PrintRecord.session_id.is_not(None))
-        )
-    }
     out = []
     for s in db.scalars(
-        select(BuildSession).where(
+        _unclaimed_sessions().where(
             BuildSession.start_ts.is_not(None),
             BuildSession.origin_compute_node_id == record.origin_compute_node_id,
         )
     ).all():
-        if s.session_id in taken:
-            continue
         delta = abs(_as_utc(s.start_ts) - anchor)
         if delta <= window:
             duration_min = None
@@ -345,16 +333,8 @@ def unlinked_sessions(db: Session) -> list[dict]:
     """
     from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS
 
-    taken = {
-        sid for sid in db.scalars(
-            select(PrintRecord.session_id).where(PrintRecord.session_id.is_not(None))
-        )
-    }
-
     out: list[dict] = []
-    for s in db.scalars(select(BuildSession)).all():
-        if s.session_id in taken:
-            continue
+    for s in db.scalars(_unclaimed_sessions()).all():
         group = ((s.context or {}).get("runtime_payload", {}) or {}).get("group", {}) or {}
         features = group.get("features") or {}
         classification = group.get("classification") or s.classification or ""
