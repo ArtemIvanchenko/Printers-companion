@@ -8,6 +8,9 @@ const { Updates } = require('./lib/updates.cjs');
 
 app.setName("Printer's Companion");
 const smoke = process.argv.includes('--smoke');
+// Hosted Intel runners have no usable GPU. Only the isolated smoke uses
+// software rendering; normal operator launch keeps hardware acceleration.
+if (smoke) app.disableHardwareAcceleration();
 const smokeDir = process.env.PRINTER_COMPANION_SMOKE_DIR;
 if (smoke && smokeDir && path.isAbsolute(smokeDir)) app.setPath('userData', smokeDir);
 let window; let runtime; let allowQuit = false; let updates; let closing = false; let deferredUpdate;

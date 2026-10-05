@@ -113,8 +113,9 @@ def installation_lock(directory: Path):
     private_directory(directory)
     # Never unlink a flock file: another process may already hold its inode.
     with (directory / "update.lock").open("a+b") as stream:
-        stream.seek(0)
-        if stream.read(1) == b"":
+        # Windows locks the byte against reads too. Inspect the file size,
+        # not another updater's locked byte, before attempting our own lock.
+        if os.fstat(stream.fileno()).st_size == 0:
             stream.write(b"0")
             stream.flush()
         stream.seek(0)
