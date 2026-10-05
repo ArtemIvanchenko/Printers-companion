@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 """One-shot backfill: store per-layer burn/pour for sessions imported earlier.
 
-New imports store these rows as they go (api/routes/sessions.py). Sessions that
+New imports publish these rows through the local import worker. Sessions that
 predate that still carry their timings only inside the raw log, so calibration
 for them keeps depending on the file being on this machine's disk — exactly the
 dependency the storage was introduced to remove.
 
-Reads each session's time_log the old way (from disk, or from the mirrored copy
-in object storage) and writes the conclusions into layer_snapshots. Idempotent:
-re-running replaces what a session already has.
+Reads owner-local legacy time_log files (disk or the session mirror) outside SQL
+and writes prepared conclusions in a short, checked transaction. Any published
+timing snapshot, including empty or rejected evidence, is preserved. Modern
+analyses without timings are requeued through their original import job.
 
 Usage (inside the api container, or locally with the right DATABASE_URL):
     python scripts/backfill_layer_timings.py --dry-run
@@ -22,49 +23,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def backfill(dry_run: bool) -> int:
-    from sqlalchemy import select
-
-    from analytics.prediction.layer_timings import store_layer_timings, stored_timings
-    from domain.models.sessions import BuildSession
+    from analytics.prediction.layer_timings import replace_layer_timings, stored_timing_events
+    from analytics.prediction.timing_snapshot import prepare_layer_timings
+    from core.config.settings import get_settings
+    from domain.services.compute_affinity import ComputeAffinityError
+    from scripts.maintenance.backfill_session_overview import (
+        _lock_unchanged, _parsed_sources, _published, _queue_reanalysis,
+        _read_session, _require_owner, _session_ids,
+    )
     from storage.db.session import SessionLocal
-    from storage.repositories.runtime import RuntimeRepository
 
-    stored_total = skipped = already = 0
-
-    with SessionLocal() as db:
-        repo = RuntimeRepository(db)
-        for session_id in db.scalars(select(BuildSession.session_id)).all():
-            if stored_timings(session_id, db):
+    stored_total = skipped = already = queued = failed = 0
+    for session_id in _session_ids():
+        snapshot = _read_session(session_id)
+        if snapshot is None:
+            skipped += 1
+            continue
+        try:
+            _require_owner(snapshot)
+            with SessionLocal() as db:
+                published = stored_timing_events(session_id, db) is not None
+            if published:
                 already += 1
                 continue
-            files = repo.get_session_files(session_id, rehydrate=True) or []
-            if dry_run:
-                # Count what would be written without touching the DB.
-                from domain.enums.common import SourceFileFamily
-                n = sum(
-                    1
-                    for f in files
-                    if f.classification.family == SourceFileFamily.time_log and f.parse_result
-                    for e in f.parse_result.events
-                    if getattr(e, "event_type", None) == "layer_timing_summary"
-                )
-            else:
-                n = store_layer_timings(session_id, files, db)
+            if _published(snapshot):
+                _queue_reanalysis(snapshot, dry_run)
+                queued += 1
+                continue
+            files = _parsed_sources(snapshot)
+            prepared = prepare_layer_timings(files, owner_node_id=get_settings().compute_node_id)
+            n = len(prepared.rows)
+            if not dry_run:
+                with SessionLocal() as db:
+                    session = _lock_unchanged(db, snapshot)
+                    if stored_timing_events(session_id, db) is not None:
+                        raise ValueError("Снимок слоёв появился за время расчёта; он не заменён")
+                    n = replace_layer_timings(session, prepared, db)
+                    db.commit()
             if n:
                 verb = "было бы сохранено" if dry_run else "сохранено"
                 print(f"  ✓ {session_id}: {verb} слоёв — {n}")
                 stored_total += n
             else:
-                print(f"  — {session_id}: нет читаемого time_log")
+                print(f"  — {session_id}: нет допустимых измерений time_log")
                 skipped += 1
-
-        if dry_run:
-            db.rollback()
-        else:
-            db.commit()
+        except ComputeAffinityError as exc:
+            print(f"  — {session_id}: {exc}")
+            skipped += 1
+        except Exception as exc:
+            print(f"  ! {session_id}: {exc}")
+            failed += 1
 
     verb = "было бы записано" if dry_run else "записано"
-    print(f"\n{verb} слоёв: {stored_total} | уже было: {already} | без логов: {skipped}")
+    print(f"\n{verb} слоёв: {stored_total} | уже опубликовано: {already} | пропущено: {skipped} "
+          f"| повторный анализ: {queued} | ошибки: {failed}")
     return stored_total
 
 

@@ -1,13 +1,9 @@
 """Admin endpoints: version, logs, import status, update status.
 
-Updates happen ONLY when the operator clicks the desktop icon
-(deploy/launch.ps1 -> update.ps1) — there is deliberately no way to trigger
-an update from inside the running container. The container has no Docker
-access anyway, so it could never actually perform an update; earlier
-versions of this file wrote a flag file that a background Task Scheduler
-job / launchd agent picked up independently of the icon, which defeated the
-"single trigger" design. Don't reintroduce that — see deploy/launch.ps1's
-docstring for the intended flow.
+The native desktop window or an explicit developer host command performs the
+update. Ordinary launch resumes the saved version; main is not an update feed.
+API remains read-only about host updates: no Docker socket, shell execution,
+scheduled host helper or remotely callable installation endpoint.
 """
 from __future__ import annotations
 
@@ -18,11 +14,12 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-import httpx
 import redis as _redis
 from fastapi import APIRouter, Request
 
 from core.config.settings import get_settings
+from core.updating.releases import UpdateError, stable_release, update_comparison
+from core.versioning.provenance import build_manifest
 from core.versioning.constants import (
     ANALYSIS_VERSION,
     APP_VERSION,
@@ -37,8 +34,6 @@ _START_TIME = datetime.now(timezone.utc)
 _REDIS_KEY   = "pla:update:last_event"
 _REDIS_TTL   = 60 * 60 * 24 * 90
 
-_GITHUB_REPO   = "ArtemIvanchenko/Printers-companion"
-_GITHUB_BRANCH = "main"
 
 
 # ── Redis helpers ─────────────────────────────────────────────────────────────
@@ -117,12 +112,13 @@ async def get_logs(n: int = 200, level: str | None = None) -> list[dict]:
 def import_status() -> dict:  # sync: queries the DB, must not run on the loop
     from storage.db.session import session_scope
     from storage.repositories.runtime import RuntimeRepository
+    from storage.repositories.import_jobs import ImportJobsRepository
     try:
         with session_scope() as db:
-            repo = RuntimeRepository(db)
             # Only the count is displayed — don't deserialise every payload for it.
-            session_count = len(repo.list_session_ids())
+            session_count = len(RuntimeRepository(db).list_session_ids())
             node_id = get_settings().compute_node_id
+            repo = ImportJobsRepository(db)
             import_job_count = repo.count_import_jobs(owner_node_id=node_id)
             last_job = repo.latest_import_job(owner_node_id=node_id)
         return {
@@ -141,31 +137,14 @@ def import_status() -> dict:  # sync: queries the DB, must not run on the loop
 
 @router.get("/update/check")
 async def check_for_update() -> dict:
-    """Compare running GIT_COMMIT with the latest commit on GitHub main."""
-    current = _git_commit()
+    """Read-only comparison with a published stable release; no host access."""
+    current = build_manifest().get("git_sha") or "unknown"
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"https://api.github.com/repos/{_GITHUB_REPO}/commits/{_GITHUB_BRANCH}",
-                headers={"Accept": "application/vnd.github.v3+json"},
-            )
-            r.raise_for_status()
-            data = r.json()
-        latest_sha   = data["sha"]
-        latest_short = latest_sha[:8]
-        version_unknown = current in ("unknown", "")
-        update_available = not version_unknown and current != latest_short
-        return {
-            "update_available": update_available,
-            "version_unknown": version_unknown,
-            "current_commit": current,
-            "latest_commit": latest_short,
-            "latest_date": data["commit"]["committer"]["date"],
-            "latest_message": data["commit"]["message"].split("\n")[0][:80],
-        }
-    except Exception as exc:
+        release = await asyncio.to_thread(stable_release)
+        return update_comparison(APP_VERSION, current, release)
+    except UpdateError as exc:
         logger.warning("GitHub update check failed: %s", exc)
-        return {"update_available": False, "error": str(exc), "current_commit": current}
+        return {"channel": "stable", "update_available": False, "error": str(exc), "current_commit": current[:8]}
 
 
 # ── Update: history ───────────────────────────────────────────────────────────
@@ -178,8 +157,7 @@ async def update_history() -> dict:
 
 @router.post("/update/notify")
 async def update_notify(request: Request) -> dict:
-    """Called by deploy/update.ps1 (via the desktop icon) after a successful
-    local update, to record the timestamp for the dashboard's version card."""
+    """Informational event after verified host update, not a readiness proof."""
     try:
         body = await request.json()
     except Exception:

@@ -1,4 +1,4 @@
-"""Reader for Materialise Magics project files (.magics) — plate geometry.
+"""Reader for Materialise Magics project files (.magics) — stored mesh bodies.
 
 Format, established empirically on this shop's files and cross-checked against
 the operator's print archive (decoded plate height matched the recorded build
@@ -7,7 +7,9 @@ height exactly; part volume matched within 0.6%):
 * Container: a ZIP archive whose signatures are branded ``MT`` where PKZIP
   writes ``PK`` (local file header, central directory, end record).
 * ``Stl{uuid}_vertices``: little-endian int32 XYZ triples, unit = 0.1 µm
-  (divide by 10 000 for millimetres). Plate coordinates.
+  (divide by 10 000 for millimetres). Stored body coordinates; instance
+  placement from ``header.xml`` is not decoded. A mesh block is not proof
+  that every repeated part on the platform was recovered.
 * ``Stl{uuid}_surfaces``: little-endian uint32 triangle vertex indices.
 * ``SupportSurfaces_*``: Magics' internal support definitions. These are NOT
   plain meshes (index/parameter streams, length not even word-aligned) and are
@@ -49,7 +51,7 @@ _STL_ENTRY = re.compile(r"(Stl\{[0-9a-f-]{36}\})_vertices")
 
 @dataclass
 class MagicsPlate:
-    """Decoded contents of one .magics project."""
+    """Decoded mesh blocks, not a verified complete build-platform layout."""
 
     parts: list["trimesh.Trimesh"] = field(default_factory=list)  # noqa: F821
     markers: list["trimesh.Trimesh"] = field(default_factory=list)  # noqa: F821
@@ -59,6 +61,19 @@ class MagicsPlate:
     @property
     def has_native_supports(self) -> bool:
         return self.support_entry_count > 0
+
+    @property
+    def geometry_quality(self) -> dict:
+        missing = ["project_instance_placement"]
+        if self.has_native_supports:
+            missing.append("native_support_geometry")
+        return {
+            "status": "unconfirmed", "missing": missing,
+            "note": (
+                "Из Magics прочитаны исходные тела, но число экземпляров и их размещение "
+                "не восстановлены из проекта. Нужен подтверждённый экспорт всей платформы."
+            ),
+        }
 
 
 def is_magics_file(path: str | Path) -> bool:
@@ -78,7 +93,7 @@ def open_magics_zip(path: str | Path) -> zipfile.ZipFile:
 
 
 def read_plate(path: str | Path) -> MagicsPlate:
-    """Decode every printable body of the plate into trimesh meshes (mm)."""
+    """Decode printable mesh blocks into trimesh (mm), retaining layout limits."""
     import numpy as np
     import trimesh
 
@@ -115,6 +130,8 @@ def read_plate(path: str | Path) -> MagicsPlate:
         )
     if not plate.parts:
         plate.warnings.append("В файле не найдено ни одного печатаемого тела.")
+    else:
+        plate.warnings.append(plate.geometry_quality["note"])
     return plate
 
 

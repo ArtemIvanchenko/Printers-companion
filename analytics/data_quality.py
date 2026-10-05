@@ -81,7 +81,7 @@ def _print_event_times(files: list[Any]) -> list[datetime]:
     """Sorted event/transition timestamps, excluding the monitor100 daemon log.
 
     monitor100 runs continuously and would inject spurious 'gaps' around the
-    actual print window — same rationale as session_overview.compute_print_span.
+    actual print window — same rationale as session_overview.compute_session_spans.
     """
     times: list[datetime] = []
     for f in files:

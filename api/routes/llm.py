@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from api.deps.repositories import get_runtime_repository
 from core.config.settings import get_settings
-from domain.services.compute_affinity import ComputeAffinityError
+from domain.services import session_reports
 from reporting.llm.discovery import discover_lmstudio
-from reporting.llm.evidence_package import build_evidence_package
 from reporting.llm.providers.factory import get_llm_provider
 from reporting.llm.providers.lmstudio import LMStudioProvider
-from storage.repositories.runtime import RuntimeRepository
+from storage.db.session import get_db
+from sqlalchemy.orm import Session
 
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -61,43 +60,26 @@ def llm_providers() -> list[dict]:
 
 
 @reports_router.get("/{report_id}")
-def get_report(report_id: str, repo: RuntimeRepository = Depends(get_runtime_repository)) -> dict:
-    report = repo.get_report(report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    return report
+def get_report(report_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return session_reports.read_report_by_id(db, report_id)
+    except session_reports.SessionReportError as exc:
+        raise _report_error(exc) from exc
+
+
+def _report_error(exc: session_reports.SessionReportError) -> HTTPException:
+    return HTTPException(status_code={"not_found": 404, "conflict": 409,
+                                     "forbidden": 403, "storage_unavailable": 503}[exc.code],
+                         detail=exc.detail)
 
 
 @reports_router.post("/{report_id}/llm-enhance")
 async def llm_enhance_report(
     report_id: str,
-    repo: RuntimeRepository = Depends(get_runtime_repository),
+    db: Session = Depends(get_db),
 ) -> dict:
-    report = repo.get_report(report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    session_id = report.get("session_id")
-    if session_id:
-        try:
-            session = repo.require_session_compute_owner(
-                str(session_id),
-                requested_compute_node_id=get_settings().compute_node_id,
-            )
-        except ComputeAffinityError as exc:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "LLM-дополнение отчёта выполняется только на ПК-владельце "
-                    f"сессии. {exc}"
-                ),
-            ) from exc
-        if session is None:
-            raise HTTPException(status_code=409, detail="Report session no longer exists")
-    evidence = build_evidence_package(report).model_dump(mode="json")
-    result = await get_llm_provider().generate_markdown(evidence)
-    if result.success:
-        report["llm_markdown"] = result.content
-    report.setdefault("llm_runs", []).append(result.__dict__)
-    repo.save_report(report)
-    repo.flush()
-    return {"report_id": report_id, "llm": result.__dict__}
+    try:
+        return await session_reports.enhance_report(db, report_id,
+            compute_node_id=get_settings().compute_node_id)
+    except session_reports.SessionReportError as exc:
+        raise _report_error(exc) from exc

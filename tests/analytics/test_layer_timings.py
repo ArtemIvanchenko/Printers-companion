@@ -175,14 +175,16 @@ class TestCalibrationsReadTheStoredRows:
     """The point of storing: no file access, so a colleague's print works too."""
 
     def test_raw_fallback_checks_conflicts_across_daily_files(self, db, monkeypatch):
-        from storage.repositories.runtime import RuntimeRepository
-
         _session(db, "s_daily_conflict")
+        db.get(BuildSession, "s_daily_conflict").context = {
+            "runtime_payload": {"files": [], "group": {}},
+        }
+        db.flush()
         files = [
             _time_log_file({1: (30000, 9000, 39300), 2: (31000, 9000, 40300)}),
             _time_log_file({1: (30000, 10000, 40300)}),
         ]
-        monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **kw: files)
+        monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **kw: files)
         assert session_machine_seconds_by_layer("s_daily_conflict", db) == {2: 40.0}
         assert session_burn_by_layer("s_daily_conflict", db) == {2: 31.0}
         assert session_recoat_seconds("s_daily_conflict", db) == [9.0]
@@ -258,14 +260,13 @@ class TestLegacyStoredEvidence:
 
     @pytest.mark.parametrize("burn", [50, 3600001])
     def test_database_scan_and_cycle_bounds_match_raw_path(self, db, monkeypatch, burn):
-        from storage.repositories.runtime import RuntimeRepository
 
         _session(db, "s_legacy_burn")
         db.add(LayerSnapshot(session_id="s_legacy_burn", layer=1, features={
             "burn_ms": burn, "pour_ms": 9000, "make_layer_ms": burn + 9300,
         }))
         db.flush()
-        monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **kw: pytest.fail(
+        monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **kw: pytest.fail(
             "Rejected stored evidence must not resurrect a different local file",
         ))
         assert session_burn_by_layer("s_legacy_burn", db) is None
@@ -273,7 +274,6 @@ class TestLegacyStoredEvidence:
         assert session_layer_overhead_ms_by_layer("s_legacy_burn", db) is None
 
     def test_known_invalid_database_rows_never_fall_back_to_local_copy(self, db, monkeypatch):
-        from storage.repositories.runtime import RuntimeRepository
 
         _session(db, "s_known_invalid")
         db.add(LayerSnapshot(session_id="s_known_invalid", layer=1, features={
@@ -281,7 +281,7 @@ class TestLegacyStoredEvidence:
             "timing_valid": False,
         }))
         db.flush()
-        monkeypatch.setattr(RuntimeRepository, "get_session_files", lambda *a, **kw: pytest.fail(
+        monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", lambda *a, **kw: pytest.fail(
             "Known invalid stored evidence is not missing evidence",
         ))
         assert session_machine_seconds_by_layer("s_known_invalid", db) is None

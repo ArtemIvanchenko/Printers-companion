@@ -9,9 +9,11 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from domain.models.events import LayerSnapshot
+from domain.models.jobs import BackgroundJob
 from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession
 from storage.db.session import SessionLocal
+from worker.estimate_tasks import process_next_estimate
 
 client = TestClient(app)
 
@@ -35,14 +37,22 @@ class _DiskBackedStoreContract:
         return destination
 
 
-def _stored_snapshot(record_id: str) -> dict:
-    """The prediction as stored on the record.
-
-    The estimate endpoint hands the work to a background task and returns
-    "started" — TestClient runs those before returning, so by the time this is
-    called the snapshot is on the record.
-    """
+def _stored_snapshot(record_id: str, *, job_id: str | None = None) -> dict:
+    """Run the production queue consumer, then read its fenced publication."""
+    _run_estimate_worker()
+    if job_id is not None:
+        with SessionLocal() as db:
+            job = db.get(BackgroundJob, job_id)
+            assert job.status == "done", job.error
     return client.get(f"/prints/{record_id}").json()["metadata_json"]["prediction"]
+
+
+def _run_estimate_worker() -> None:
+    # Bound the drain so a failed/retrying job cannot hang the test indefinitely.
+    for _ in range(20):
+        if not process_next_estimate("phase3-test-worker"):
+            return
+    pytest.fail("estimate worker did not drain the test queue")
 
 
 class TestAccuracyReport:
@@ -192,6 +202,7 @@ class TestEstimateRecordEndpoint:
             def remove_object(self, b, o): return _Store.data.pop((b, o), None) is not None
 
         monkeypatch.setattr("api.routes.prints.ObjectStore", _Store)
+        monkeypatch.setattr("domain.services.estimation.calculation.ObjectStore", _Store)
         client.put("/settings/machine", json={
             "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 500, "hatch_distance_mm": 0.1,
             "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9000,
@@ -203,14 +214,14 @@ class TestEstimateRecordEndpoint:
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
             data={"file_type": "stl"},
         )
-        # The estimate runs as a background task (a real plate takes minutes,
-        # see the endpoint's docstring). TestClient drains those before
-        # returning, so the snapshot is already stored by the time this asserts.
+        # HTTP only submits a durable job; the same worker as production
+        # must complete it before a prediction can appear.
+        _run_estimate_worker()  # Finish the upload job before requesting a manual rerun.
         r = client.post(f"/prints/{rec['record_id']}/estimate")
         assert r.status_code == 200
         assert r.json()["status"] == "started"
 
-        snap = client.get(f"/prints/{rec['record_id']}").json()["metadata_json"]["prediction"]
+        snap = _stored_snapshot(rec["record_id"], job_id=r.json()["job_id"])
         assert snap["print_hours"] > 0
         assert snap["raw_print_hours"] > 0
         # Plate estimator: parts via pyslm, supports via the section model
@@ -240,6 +251,7 @@ class TestEstimateRecordEndpoint:
             def remove_object(self, b, o): return _Store.data.pop((b, o), None) is not None
 
         monkeypatch.setattr("api.routes.prints.ObjectStore", _Store)
+        monkeypatch.setattr("domain.services.estimation.calculation.ObjectStore", _Store)
         client.put("/settings/machine", json={
             "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 500, "hatch_distance_mm": 0.1,
             "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9000,
@@ -254,9 +266,10 @@ class TestEstimateRecordEndpoint:
                 files={"file": (name, io.BytesIO(stl), "model/stl")},
                 data={"file_type": "stl"},
             )
+        _run_estimate_worker()
         r = client.post(f"/prints/{rid}/estimate")
         assert r.status_code == 200, r.text
-        snap = _stored_snapshot(rid)
+        snap = _stored_snapshot(rid, job_id=r.json()["job_id"])
         assert snap["n_parts"] == 2
 
         # Scan = сумма двух деталей → должен быть больше, чем у каждой по отдельности
@@ -265,15 +278,17 @@ class TestEstimateRecordEndpoint:
         client.post(f"/prints/{rec1['record_id']}/files",
             files={"file": ("cube10.stl", io.BytesIO(CUBE_STL), "model/stl")},
             data={"file_type": "stl"})
-        client.post(f"/prints/{rec1['record_id']}/estimate")
-        snap1 = _stored_snapshot(rec1["record_id"])
+        _run_estimate_worker()
+        request1 = client.post(f"/prints/{rec1['record_id']}/estimate")
+        snap1 = _stored_snapshot(rec1["record_id"], job_id=request1.json()["job_id"])
 
         rec2 = client.post("/prints", json={"name": "только куб20"}).json()
         client.post(f"/prints/{rec2['record_id']}/files",
             files={"file": ("cube20.stl", io.BytesIO(TALL_STL), "model/stl")},
             data={"file_type": "stl"})
-        client.post(f"/prints/{rec2['record_id']}/estimate")
-        snap2 = _stored_snapshot(rec2["record_id"])
+        _run_estimate_worker()
+        request2 = client.post(f"/prints/{rec2['record_id']}/estimate")
+        snap2 = _stored_snapshot(rec2["record_id"], job_id=request2.json()["job_id"])
 
         # scan ≈ Σ одиночных (разные высоты → разные recoat)
         combined_hours = snap["print_hours"]
@@ -296,20 +311,21 @@ class TestEstimateRecordEndpoint:
             def remove_object(self, b, o): return _Store.data.pop((b, o), None) is not None
 
         monkeypatch.setattr("api.routes.prints.ObjectStore", _Store)
+        monkeypatch.setattr("domain.services.estimation.calculation.ObjectStore", _Store)
         client.put("/settings/machine", json={
             "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 500, "hatch_distance_mm": 0.1,
             "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9000,
             "powder_cost_rub_per_kg": 7000, "material_densities": {"steel": 7.9},
         })
         rec = client.post("/prints", json={"name": "авто-прогноз"}).json()
-        # TestClient выполняет background tasks до возврата ответа
         client.post(
             f"/prints/{rec['record_id']}/files",
             files={"file": ("part.stl", io.BytesIO(CUBE_STL), "model/stl")},
             data={"file_type": "stl"},
         )
         stored = client.get(f"/prints/{rec['record_id']}").json()
-        pred = (stored["metadata_json"] or {}).get("prediction")
+        assert (stored["metadata_json"] or {}).get("prediction") is None
+        pred = _stored_snapshot(rec["record_id"])
         assert pred is not None
         assert pred["print_hours"] > 0
         assert pred["raw_print_hours"] > 0
@@ -327,6 +343,7 @@ class TestEstimateRecordEndpoint:
             def remove_object(self, b, o): return _Store.data.pop((b, o), None) is not None
 
         monkeypatch.setattr("api.routes.prints.ObjectStore", _Store)
+        monkeypatch.setattr("domain.services.estimation.calculation.ObjectStore", _Store)
         client.put("/settings/machine", json={"hatch_speed_mm_s": None, "laser_count": None})
         rec = client.post("/prints", json={"name": "без параметров"}).json()
         r = client.post(
@@ -335,6 +352,7 @@ class TestEstimateRecordEndpoint:
             data={"file_type": "stl"},
         )
         assert r.status_code == 200  # загрузка успешна, авто-прогноз тихо пропущен
+        _run_estimate_worker()
         stored = client.get(f"/prints/{rec['record_id']}").json()
         assert (stored["metadata_json"] or {}).get("prediction") is None
 
@@ -361,6 +379,7 @@ class TestGeometryCacheAcrossRecords:
             def remove_object(self, b, o): return _Store.data.pop((b, o), None) is not None
 
         monkeypatch.setattr("api.routes.prints.ObjectStore", _Store)
+        monkeypatch.setattr("domain.services.estimation.calculation.ObjectStore", _Store)
         client.put("/settings/machine", json={
             "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 500, "hatch_distance_mm": 0.1,
             "layer_thickness_mm": 0.05, "laser_count": 2, "recoat_time_ms": 9000,
@@ -374,8 +393,9 @@ class TestGeometryCacheAcrossRecords:
             files={"file": ("cube.stl", io.BytesIO(CUBE_STL), "model/stl")},
             data={"file_type": "stl"},
         )
-        client.post(f"/prints/{rec['record_id']}/estimate")
-        return _stored_snapshot(rec["record_id"])
+        _run_estimate_worker()
+        request = client.post(f"/prints/{rec['record_id']}/estimate")
+        return _stored_snapshot(rec["record_id"], job_id=request.json()["job_id"])
 
     def _cache_row_count(self) -> int:
         from domain.models.prints import PlateGeometryCache

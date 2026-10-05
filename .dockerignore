@@ -18,6 +18,12 @@ venv
 htmlcov
 .coverage
 .operator-state/
+.update-state/
+desktop/
+docs/research/
+checks/
+**/.update-state/
+launch.log
 .codex-tmp/
 .claude/
 CLAUDE.md

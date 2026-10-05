@@ -84,24 +84,19 @@ if not exist "%REPO_DIR%\" (
 
 :: 4. Проверить обновления (каждый запуск — кроме только что собранного первого)
 if %JUST_BUILT%==0 (
-    echo Проверяю обновления...
-    cd %REPO_DIR%
-    git pull --ff-only origin main >> ..\%LOG% 2>&1
-    if errorlevel 1 (
-        echo ПРЕДУПРЕЖДЕНИЕ: не удалось проверить обновления. Запускаю текущую версию.
-        echo WARNING: git pull failed >> ..\%LOG%
-    ) else (
-        echo Пересобираю образы...
-        call :build_identity
-        docker compose -f docker-compose.yml build >> ..\%LOG% 2>&1
-        if errorlevel 1 (
-            echo ОШИБКА: пересборка не удалась. Подробности в launch.log.
-            cd ..
-            pause
-            exit /b 1
-        )
+    if not exist "%REPO_DIR%\scripts\maintenance\update_runtime.py" (
+        echo Требуется однократное обновление старой установки до релиза с новым обновлятором.
+        pause
+        exit /b 1
     )
-    cd ..
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO_DIR%\update.ps1" launch
+    if errorlevel 1 (
+        echo Запуск или восстановление не подтверждены. Данные сохранены.
+        pause
+        exit /b 1
+    )
+    start %URL%
+    exit /b 0
 )
 
 :: 5. Запустить систему

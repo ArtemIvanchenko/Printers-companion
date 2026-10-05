@@ -76,3 +76,70 @@ test('history is fetched only on opening its panel, with bounded page size',asyn
     await h.context.loadHistoryPanel('sessions');
     assert.equal(h.requests.filter(url=>url.startsWith('/dashboard/history/')).length,1);
 });
+
+function legacySessionsHarness(pages) {
+    const nodes = new Map(), requests = [];
+    const makeNode = () => ({
+        textContent:'', children:[], hidden:true, disabled:false, listeners:{},
+        appendChild(node){this.children.push(node);},
+        addEventListener(kind, callback){this.listeners[kind]=callback;},
+        set innerHTML(value){throw new Error('Session data must not use an HTML sink');},
+    });
+    const document = {
+        getElementById(id){if(!nodes.has(id))nodes.set(id,makeNode());return nodes.get(id);},
+        createElement:makeNode,
+    };
+    const context = vm.createContext({document, fetch:async url=>{
+        requests.push(url);
+        const page=pages.shift();
+        return {ok:!page.status, status:page.status || 200, json:async()=>page};
+    }});
+    const template=fs.readFileSync(path.join(root,'web_templates/sessions.html'),'utf8');
+    const script=template.match(/<script>([\s\S]*?)<\/script>/)[1];
+    return {context,nodes,requests,initial:vm.runInContext(script,context)};
+}
+
+test('legacy sessions use same-origin published items, feature fields and bounded pages',async()=>{
+    const attack='<img src=x onerror="globalThis.pwned=true">';
+    const h=legacySessionsHarness([
+        {items:[{session_id:attack,start_ts:'2026-03-23',classification:'REAL_PRINT',
+                 features:{material:attack,duration_sec:0}},
+                {session_id:'unknown',features:{duration_sec:null}}],total:3},
+        {items:[{session_id:'last',features:{material:'AlSi10Mg',duration_sec:3600}}],total:3},
+    ]);
+    await h.initial;
+    const rows=h.nodes.get('session-rows').children;
+    const more=h.nodes.get('session-more');
+    assert.deepEqual(h.requests,['/sessions?skip=0&limit=50']);
+    assert.equal(rows[0].children[0].textContent,attack);
+    assert.equal(rows[0].children[3].textContent,attack);
+    assert.equal(rows[0].children[4].textContent,'0 мин');
+    assert.equal(rows[1].children[3].textContent,'-');
+    assert.equal(rows[1].children[4].textContent,'-');
+    assert.equal(h.context.pwned,undefined);
+    assert.equal(more.hidden,false);
+    assert.equal(h.nodes.get('session-status').textContent,'Показано 2 из 3.');
+    await more.listeners.click();
+    assert.deepEqual(h.requests,['/sessions?skip=0&limit=50','/sessions?skip=2&limit=50']);
+    assert.equal(rows.length,3);
+    assert.equal(rows[2].children[4].textContent,'60 мин');
+    assert.equal(more.hidden,true);
+});
+
+test('legacy sessions distinguish HTTP or invalid-contract failures from empty data and retry',async()=>{
+    const h=legacySessionsHarness([{status:503},{sessions:[],total:0},{items:[],total:0}]);
+    await h.initial;
+    const more=h.nodes.get('session-more'), status=h.nodes.get('session-status');
+    assert.match(status.textContent,/HTTP 503/);
+    assert.equal(more.disabled,false);
+    assert.equal(more.textContent,'Повторить');
+    await more.listeners.click();
+    assert.match(status.textContent,/Некорректный ответ сервера/);
+    assert.equal(more.hidden,false);
+    await more.listeners.click();
+    assert.equal(status.textContent,'Нет опубликованных сессий.');
+    assert.equal(more.hidden,true);
+    assert.equal(h.nodes.get('session-rows').children.length,0);
+    assert.equal(h.requests.length,3);
+    assert(h.requests.every(url=>url==='/sessions?skip=0&limit=50'));
+});

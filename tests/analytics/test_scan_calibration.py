@@ -24,6 +24,7 @@ from analytics.prediction.scan_calibration import (  # noqa: E402
     MIN_PRINTS_FOR_FIT,
     _burn_seconds_by_layer,
     _fit_layer_cycle_model,
+    _pairs_from_record,
     recalibrate_scan_and_apply,
     scan_calibration_report,
 )
@@ -83,6 +84,26 @@ def _snapshot_geometry(series: LayerGeometrySeries) -> dict:
     return {**series.to_snapshot(), "layer_thickness_mm": THICKNESS, "laser_count": LASERS}
 
 
+def test_pairs_keep_sparse_layer_order_and_sample_boundary_admission():
+    series = _series()
+    series.z_min = -3
+    series.zs = [z - 3 for z in series.zs]
+    snapshot = {"scan_geometry": _snapshot_geometry(series)}
+    burn = {199: 9.5, 200: 11, 7: 3.25, 0: 2, 1: 1.75, 201: 10}
+    pairs = _pairs_from_record(snapshot, burn)
+    expected = []
+    saved_series = LayerGeometrySeries.from_snapshot(snapshot["scan_geometry"])
+    # The last centre is slightly above the rounded stored sample. Preserve
+    # the existing strict admission; a batch must not clamp it into training.
+    assert series.z_min + (200 - 0.5) * THICKNESS > saved_series.zs[-1]
+    for layer in (1, 7, 199):
+        z = series.z_min + (layer - 0.5) * THICKNESS
+        # Compare the persisted (rounded) series, as the real fit does.
+        expected.append([value / LASERS for value in saved_series.at(z)] + [1.0])
+    assert pairs == (expected, [1.75, 3.25, 9.5])
+    assert _pairs_from_record(snapshot, {0: 2, 200: 11, 201: 10}) is None
+
+
 @pytest.fixture
 def db():
     with SessionLocal() as session:
@@ -109,6 +130,9 @@ def _linked_pair(db, tmp_path, record_id: str, series: LayerGeometrySeries,
                  classification: str = "REAL_PRINT",
                  geometry_fingerprint: str | None = None,
                  make_ms_by_layer: dict[int, float] | None = None) -> None:
+    from pathlib import Path
+    from core.utils.files import sha256_file
+
     session_id = f"s_{record_id}"
     log_path = _write_time_log(
         tmp_path, session_id, burn_ms_by_layer, make_ms_by_layer,
@@ -119,7 +143,8 @@ def _linked_pair(db, tmp_path, record_id: str, series: LayerGeometrySeries,
             path=log_path, file_name=f"{session_id}_time.log",
             family=SourceFileFamily.time_log, role="secondary", confidence=1.0,
         ),
-        checksum="x", size_bytes=1, data_quality_status="ok",
+        checksum=sha256_file(Path(log_path)), size_bytes=Path(log_path).stat().st_size,
+        data_quality_status="ok",
         mtime=datetime.now(timezone.utc), parse_result=None,
     )
     RuntimeRepository(db).save_session_payload(

@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from api.routes.prints import _prepare_prediction_inputs
+from domain.services.estimation.inputs import prepare_prediction_inputs
+from domain.services.estimation.contracts import EstimateError
 from api.routes.sessions import _generate_report, _report_for_read
 from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession, ReportArtifact
@@ -18,7 +19,7 @@ def _settings(node_id: str):
     return SimpleNamespace(compute_node_id=node_id)
 
 
-def test_pc2_cannot_prepare_pc1_print_estimate(monkeypatch):
+def test_pc2_cannot_prepare_pc1_print_estimate():
     with SessionLocal() as db:
         db.add(PrintRecord(
             record_id="pr_owned_by_pc1",
@@ -27,11 +28,10 @@ def test_pc2_cannot_prepare_pc1_print_estimate(monkeypatch):
         ))
         db.flush()
 
-        monkeypatch.setattr("api.routes.prints.get_settings", lambda: _settings("pc-2"))
-        with pytest.raises(HTTPException) as caught:
-            _prepare_prediction_inputs(PrintsRepository(db), "pr_owned_by_pc1")
+        with pytest.raises(EstimateError) as caught:
+            prepare_prediction_inputs(PrintsRepository(db), "pr_owned_by_pc1", compute_node_id="pc-2")
 
-    assert caught.value.status_code == 403
+    assert caught.value.code == "forbidden"
 
 
 def test_pc2_cannot_reanalyze_pc1_session(monkeypatch):
@@ -76,8 +76,7 @@ def test_foreign_shared_get_uses_saved_report_without_rehydrate(monkeypatch):
 
         monkeypatch.setattr("api.routes.sessions.get_settings", lambda: _settings("pc-2"))
         monkeypatch.setattr(
-            RuntimeRepository,
-            "get_session_files",
+            "domain.services.session_sources.rehydrate_session_sources",
             lambda *args, **kwargs: pytest.fail("foreign GET attempted raw rehydration"),
         )
         assert _report_for_read("session_pc1_saved", RuntimeRepository(db)) == saved

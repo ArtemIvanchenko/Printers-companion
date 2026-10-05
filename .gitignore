@@ -14,6 +14,14 @@ backups/
 .streamlit/
 .env.secrets
 .operator-state/
+.update-state/
+desktop/node_modules/
+desktop/dist/
+desktop/runtime-resources/
+desktop/.build/
+*.spec
+raw_logs/
+launch.log
 .codex-tmp/
 
 # Generated / temp files (use explicit paths, not wildcards)
@@ -30,3 +38,6 @@ control/
 docker-compose.override.yml
 .claude/
 CLAUDE.md
+
+# Local evidence from printer/operator files, not public release source.
+docs/research/*.json

@@ -28,6 +28,7 @@ from domain.services.estimation.inputs import require_local_print
 from domain.services.import_jobs import detect_import_candidate, snapshot_source
 from domain.services.print_cards.contracts import CardError
 from parsers.common.timestamps import date_hint_datetime
+from storage.repositories.import_jobs import ImportJobsRepository
 from storage.repositories.prints_repo import PrintsRepository
 from storage.repositories.runtime import RuntimeRepository
 
@@ -131,12 +132,12 @@ def publish_prepared_browser_upload(
     The caller commits. Reconciliation may race the original request after an
     uncertain commit: never overwrite an existing job's status or worker lease.
     """
-    runtime = RuntimeRepository(repo.db)
+    imports = ImportJobsRepository(repo.db)
     job = result.job
     if job.owner_node_id != settings.compute_node_id:
         raise CardError("forbidden", "Публикация браузерного пакета разрешена только его ПК-владельцу.")
-    runtime.lock_import_candidate(job.owner_node_id, job.source_path)
-    existing = runtime.get_import_job_for_update(job.import_job_id)
+    imports.lock_import_candidate(job.owner_node_id, job.source_path)
+    existing = imports.get_import_job_for_update(job.import_job_id)
     if existing is not None:
         if (existing.owner_node_id != job.owner_node_id
                 or existing.source_path != job.source_path
@@ -145,13 +146,13 @@ def publish_prepared_browser_upload(
             raise CardError("conflict", "Задание из квитанции не соответствует сохранённому импорту; нужна проверка оператора.")
         return existing
     # A different job cannot take ownership of this private batch, either.
-    other = runtime.list_import_jobs_by_source_path(owner_node_id=job.owner_node_id,
+    other = imports.list_import_jobs_by_source_path(owner_node_id=job.owner_node_id,
                                                     source_path=job.source_path)
     if other:
         raise CardError("conflict", "Локальный пакет уже связан с другим заданием импорта.")
     record = _require_card(repo, job.print_record_id, settings, locked=True) if job.print_record_id else None
-    runtime.save_import_job(job)
-    runtime.save_notifications(result.notifications)
+    imports.save_import_job(job)
+    RuntimeRepository(repo.db).save_notifications(result.notifications)
     if record is not None and printed_at_hint:
         updates = {"metadata_json": {**(record.get("metadata_json") or {}),
                                      "log_import_hint": {"date": printed_at_hint.date().isoformat()}}}

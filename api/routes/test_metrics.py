@@ -8,81 +8,100 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
+from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
 from analytics.test_metrics import compute_test_metrics
-from api.deps.repositories import get_runtime_repository
+from core.config.settings import get_settings
+from core.versioning.provenance import stable_hash
 from domain.enums.common import SourceFileFamily
-from storage.repositories.runtime import RuntimeRepository
+from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
+from domain.services.session_sources import SessionSources, read_session_sources
+from storage.db.session import get_db
+from storage.repositories.session_reads import SessionReadsRepository
 
 router = APIRouter(prefix="/test-metrics", tags=["test-metrics"])
 
 _CACHE_MAX = 32
 _cache: OrderedDict[str, dict] = OrderedDict()
+_cache_lock = Lock()
 
 
-def _cache_get(session_id: str) -> dict | None:
-    if session_id not in _cache:
-        return None
-    _cache.move_to_end(session_id)
-    return _cache[session_id]
+def _cache_get(key: str) -> dict | None:
+    with _cache_lock:
+        if key not in _cache:
+            return None
+        _cache.move_to_end(key)
+        return _cache[key]
 
 
-def _cache_set(session_id: str, value: dict) -> None:
-    _cache[session_id] = value
-    _cache.move_to_end(session_id)
-    while len(_cache) > _CACHE_MAX:
-        _cache.popitem(last=False)
+def _cache_set(key: str, value: dict) -> None:
+    with _cache_lock:
+        _cache[key] = value
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
 
 
-def _find_sensors_log_path(session_id: str, repo: RuntimeRepository) -> Path:
-    files = repo.get_session_files(session_id)
-    if files is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    for f in files:
+def _find_sensors_log_path(sources: SessionSources) -> tuple[Path, str]:
+    for f in sources.files:
         if f.classification.family == SourceFileFamily.sensors_log:
             path = Path(f.path)
             if path.exists():
-                return path
+                stat = path.stat()
+                key = stable_hash({"session_id": sources.session_id, "owner": sources.owner_node_id,
+                                   "source_sha256": f.checksum, "path": str(path),
+                                   "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+                return path, key
     raise HTTPException(
         status_code=404,
         detail="У этой сессии нет доступного sensors.log (файл не найден или уже удалён с диска)",
     )
 
 
-def _latest_session_id(repo: RuntimeRepository) -> str:
-    sessions = list(repo.list_session_payloads())
-    if not sessions:
-        raise HTTPException(status_code=404, detail="Нет ни одной сессии")
-    session_id, _payload = max(
-        sessions, key=lambda item: (item[1].get("group") or {}).get("start_ts") or ""
-    )
+def _latest_session_id(db: Session) -> str:
+    try:
+        session_id = SessionReadsRepository(db).latest_id(compute_node_id=get_settings().compute_node_id)
+    finally:
+        db.rollback()
+    if session_id is None:
+        raise HTTPException(status_code=404, detail="На этом ПК нет собственной сессии для экспериментального расчёта")
     return session_id
 
 
 @router.get("/latest")
 def get_latest_test_metrics(
-    refresh: bool = False, repo: RuntimeRepository = Depends(get_runtime_repository)
+    refresh: bool = False, db: Session = Depends(get_db)
 ) -> dict:
-    session_id = _latest_session_id(repo)
-    return _get_test_metrics(session_id, refresh, repo)
+    session_id = _latest_session_id(db)
+    return _get_test_metrics(session_id, refresh, db)
 
 
 @router.get("/{session_id}")
 def get_test_metrics(
-    session_id: str, refresh: bool = False, repo: RuntimeRepository = Depends(get_runtime_repository)
+    session_id: str, refresh: bool = False, db: Session = Depends(get_db)
 ) -> dict:
-    return _get_test_metrics(session_id, refresh, repo)
+    return _get_test_metrics(session_id, refresh, db)
 
 
-def _get_test_metrics(session_id: str, refresh: bool, repo: RuntimeRepository) -> dict:
+def _get_test_metrics(session_id: str, refresh: bool, db: Session) -> dict:
+    sources = read_session_sources(db, session_id)
+    if sources is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        require_compute_owner(entity_type="session", entity_id=session_id,
+                              origin_compute_node_id=sources.owner_node_id,
+                              requested_compute_node_id=get_settings().compute_node_id)
+    except ComputeAffinityError as exc:
+        raise HTTPException(status_code=403, detail=f"Экспериментальный расчёт выполняется на ПК-владельце. {exc}") from exc
+    path, cache_key = _find_sensors_log_path(sources)
     if not refresh:
-        cached = _cache_get(session_id)
+        cached = _cache_get(cache_key)
         if cached is not None:
             return cached
 
-    path = _find_sensors_log_path(session_id, repo)
     result = compute_test_metrics(path) | {"session_id": session_id}
-    _cache_set(session_id, result)
+    _cache_set(cache_key, result)
     return result

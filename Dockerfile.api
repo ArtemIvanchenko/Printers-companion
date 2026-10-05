@@ -41,4 +41,5 @@ LABEL org.opencontainers.image.version="$APP_VERSION" \
       org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.created="$BUILD_DATE" \
       io.printers-companion.source-state="$SOURCE_STATE" \
+      io.printers-companion.update-protocol="1" \
       org.opencontainers.image.source="https://github.com/ArtemIvanchenko/Printers-companion"

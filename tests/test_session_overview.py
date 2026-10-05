@@ -1,14 +1,17 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from domain.enums.common import DataQualityStatus
 from domain.schemas.parsing import (
     CanonicalEventDraft,
     FileClassification,
     ParsedTableBatch,
     ParseResult,
+    StateTransitionDraft,
 )
 from domain.services.ingestion import IngestedFile
-from domain.services.session_overview import build_group_overview
+from domain.services.session_overview import build_group_overview, compute_session_spans
 
 
 def _burn_file() -> IngestedFile:
@@ -59,6 +62,44 @@ def _event_file() -> IngestedFile:
             metadata={"line_count": 3},
         ),
     )
+
+
+def test_spans_share_one_raw_pass_but_keep_distinct_print_and_burn_windows():
+    source = _event_file()
+    source.parse_result.events = [
+        CanonicalEventDraft(event_type="finish", ts=datetime(2026, 3, 24, 1)),
+        CanonicalEventDraft(event_type="note", ts=datetime(2026, 3, 23, 23), layer=0),
+        CanonicalEventDraft(event_type="Burn_event", ts=datetime(2026, 3, 24, 0)),
+        CanonicalEventDraft(event_type="note", ts=datetime(2026, 3, 23, 23, 30), phase=" BURN "),
+        CanonicalEventDraft(event_type="burn_event", layer=2),
+    ]
+    source.parse_result.transitions = [StateTransitionDraft(
+        ts_start=datetime(2026, 3, 23, 22), ts_end=datetime(2026, 3, 24, 12),
+        parser_version="test",
+    )]
+    monitor = source.model_copy(deep=True)
+    monitor.parse_result.file_family = "monitor100_log"
+    monitor.parse_result.events[0].ts = datetime(2026, 3, 20)
+    monitor.parse_result.transitions[0].ts_start = datetime(2026, 3, 26)
+    original = source.model_copy(deep=True)
+    spans = compute_session_spans([monitor, source])
+    assert spans == (
+        (datetime(2026, 3, 23, 22), datetime(2026, 3, 24, 1)),
+        (datetime(2026, 3, 23, 23), datetime(2026, 3, 24, 0)),
+    )
+    assert source == original
+
+
+@pytest.mark.parametrize("copies", [0, 1, 2])
+def test_burn_span_needs_distinct_timestamped_events(copies):
+    source = _event_file()
+    timestamp = datetime(2026, 3, 23, tzinfo=timezone.utc)
+    source.parse_result.events = [
+        CanonicalEventDraft(event_type="burn_event", ts=timestamp) for _ in range(copies)
+    ]
+    print_span, burn_span = compute_session_spans([source])
+    assert print_span == ((timestamp, timestamp) if copies else (None, None))
+    assert burn_span == (None, None)
 
 
 def test_overview_has_classification_and_dashboard_features():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from copy import deepcopy
 from typing import Any
 
@@ -20,6 +21,8 @@ _PRESET_SCANNING_KEYS = (
     "jump_speed_mm_s",
     "jump_delay_ms",
 )
+_PRINT_SCANNING_KEYS = (*_PRESET_SCANNING_KEYS, "support_speed_mm_s", "laser_count",
+                        "contours_enabled", "hatch_angle_deg")
 
 
 # Fields the time/cost estimators cannot work without
@@ -43,11 +46,9 @@ _FIELD_LABELS = {
     "laser_count": "количество лазеров",
 }
 
-# This machine is single-laser (M350/M450M — see scripts/bulk_import_prints.py).
-# Defaulting is safe and correct here, and it is the difference between a
-# working estimate and a blocked one: presets carry the four scanning
-# parameters but not this, so without a default nothing can be estimated until
-# someone finds the one empty field on the settings page.
+# Conservative configured fallback, NOT a statement about the physical machine.
+# The operator's MasterSLM screenshots show two channels and per-model assignment;
+# channel capacity alone does not prove a balanced two-laser scan.
 _DEFAULT_LASER_COUNT = 1
 
 
@@ -62,7 +63,9 @@ def effective_params(params: dict | None) -> dict:
 def missing_for_estimation(params: dict | None) -> list[str]:
     """Names of the estimation-critical fields that are still empty."""
     filled = effective_params(params)
-    return [_FIELD_LABELS.get(f, f) for f in _REQUIRED_FOR_ESTIMATION if filled.get(f) is None]
+    return [_FIELD_LABELS.get(f, f) for f in _REQUIRED_FOR_ESTIMATION
+            if filled.get(f) is None
+            and not (f == "contour_speed_mm_s" and filled.get("contours_enabled") is False)]
 
 
 def params_configured(params: dict | None) -> bool:
@@ -93,7 +96,7 @@ def params_for_record(repo: PrintsRepository, record: dict) -> dict:
 def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tuple[dict, dict]:
     """Scanning parameters for one print, most specific source winning.
 
-    machine_params (global) < material preset < the print's own fields.
+    machine_params (global) < material preset < print fields < print scan strategy.
 
     Both per-print overrides exist because this shop changes them per job while
     the machine holds one global value:
@@ -131,6 +134,38 @@ def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tup
         if record.get(field):
             params[field] = record[field]
             sources[field] = {"source": "print_record", "value": record[field]}
+    strategy = (record.get("metadata_json") or {}).get("scan_strategy")
+    if strategy is None:
+        strategy = {}
+    if not isinstance(strategy, dict):
+        raise EstimateError("invalid_inputs", "scan_strategy карточки должен быть объектом")
+    for key in _PRINT_SCANNING_KEYS:
+        if key in strategy:
+            value = strategy[key]
+            if key != "contours_enabled":
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise EstimateError("invalid_inputs", f"Недопустимый параметр scan_strategy: {key}")
+                try:
+                    value = float(value)
+                except OverflowError as exc:
+                    raise EstimateError(
+                        "invalid_inputs", f"Недопустимый параметр scan_strategy: {key}",
+                    ) from exc
+                if (not math.isfinite(value)
+                        or (key == "jump_delay_ms" and value < 0)
+                        or (key not in {"hatch_angle_deg", "jump_delay_ms"} and value <= 0)
+                        or (key == "laser_count" and int(value) != value)):
+                    raise EstimateError("invalid_inputs", f"Недопустимый параметр scan_strategy: {key}")
+            elif not isinstance(value, bool):
+                raise EstimateError("invalid_inputs", "contours_enabled должен быть true или false")
+            params[key] = value
+            sources[key] = {"source": "print_scan_strategy", "value": strategy[key]}
+    if "hatch_speed_mm_s" in strategy:
+        # The explicit job value must not lose to a material's global speed map.
+        params["hatch_speeds_by_mat"] = {
+            key: value for key, value in (params.get("hatch_speeds_by_mat") or {}).items()
+            if key != record["material"]
+        }
     origin = (record.get("metadata_json") or {}).get("build_origin_z_mm")
     # Optional configured identities; absent values remain unknown, not inferred
     # from a Monitor100 positional field or a similarly named file.
@@ -190,6 +225,13 @@ def prepare_prediction_inputs(
             + ". Заполните их в Настройки → Параметры машины.",
         )
     params = effective_params(params)
+    from analytics.prediction.layer_engine import scan_geometry_options
+    from analytics.prediction.stl_slicer import EstimationError
+
+    try:
+        params.update(scan_geometry_options(params))
+    except EstimationError as exc:
+        raise EstimateError("invalid_inputs", str(exc)) from exc
 
     # A print card can identify a physical printer through its linked session
     # (or a forward-compatible metadata field before logs are linked).  The

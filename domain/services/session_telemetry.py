@@ -178,7 +178,10 @@ def analysis_telemetry(
         moment = datetime.fromtimestamp(timestamp, ZoneInfo(zone)).replace(tzinfo=None)
         row_index = len(timestamps)
         timestamps.append(moment.isoformat())
-        clocks.append(moment.strftime("%d.%m %H:%M:%S"))
+        clocks.append(
+            f"{moment.day:02d}.{moment.month:02d} "
+            f"{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}"
+        )
         for key in values.keys() - columns.keys():
             columns[key] = [None] * row_index
         for key in columns:

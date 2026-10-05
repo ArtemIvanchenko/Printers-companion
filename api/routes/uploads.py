@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, UploadFile
 
 from api.upload_limits import read_upload_capped
 from core.config.settings import get_settings
+from domain.services.importing import requests as _import_requests
 from domain.services.importing import uploads as _log_uploads
 from domain.services.print_cards.contracts import CardError
 
@@ -61,64 +62,16 @@ async def rescan_logs() -> dict:
     dest = Path(settings.raw_logs_container_path)
     if not dest.exists():
         raise HTTPException(500, f"Папка логов не найдена: {dest}")
-    jobs = _trigger_rescan(settings.raw_logs_container_path, candidates=[dest])
+    results = await asyncio.to_thread(
+        _import_requests.register_import_candidates, [dest], settings=settings,
+    )
+    jobs = [result.job.model_dump(mode="json") for result in results]
     waiting = sum(job["status"] == "awaiting_operator_confirmation" for job in jobs)
     return {
         "status": "ok",
         "jobs": jobs,
         "message": f"Найдено заданий: {len(jobs)}; ожидают подтверждения: {waiting}.",
     }
-
-
-def _enqueue_import_candidates(
-    paths: list[Path],
-    db=None,
-    *,
-    print_record_id: str | None = None,
-) -> list[dict]:
-    """Persist import work before returning; no in-process task can be lost."""
-    from api.routes.imports import create_detected_import
-    from storage.db.session import session_scope
-    from storage.repositories.runtime import RuntimeRepository
-
-    def persist(repo: RuntimeRepository) -> list[dict]:
-        jobs: list[dict] = []
-        for candidate in paths:
-            result = create_detected_import(
-                str(candidate),
-                repo,
-                print_record_id=print_record_id,
-            )
-            jobs.append(result.job.model_dump(mode="json"))
-        return jobs
-
-    if db is not None:
-        return persist(RuntimeRepository(db))
-    with session_scope() as owned_db:
-        return persist(RuntimeRepository(owned_db))
-
-
-def _trigger_rescan(
-    path: str,
-    candidates: list[Path] | None = None,
-    db=None,
-    *,
-    print_record_id: str | None = None,
-) -> list[dict]:
-    """Convert filesystem candidates into the same durable import jobs.
-
-    The default is deliberately one folder job. A flat printer export contains
-    many complementary logs for several sessions; enumerating children turns
-    every file into an isolated pseudo-session and floods the operator with
-    confirmation cards.
-    """
-    folder = Path(path)
-    paths = candidates if candidates is not None else [folder]
-    return _enqueue_import_candidates(
-        paths,
-        db=db,
-        print_record_id=print_record_id,
-    )
 
 
 # ── Step 3: new-print form ─────────────────────────────────────────────────────

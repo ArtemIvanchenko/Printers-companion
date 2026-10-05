@@ -1,25 +1,28 @@
-from collections import defaultdict
 import json
 
 from domain.schemas.parsing import CanonicalEventDraft
 
 
 def deduplicate_events(events: list[CanonicalEventDraft], time_bucket_seconds: int = 2) -> tuple[list[CanonicalEventDraft], list[dict[str, object]]]:
-    buckets: dict[tuple[object, ...], list[CanonicalEventDraft]] = defaultdict(list)
+    buckets: dict[tuple[object, ...], tuple[float | int, list[CanonicalEventDraft]]] = {}
     for event in events:
         # Distinct measured payloads/retry attempts are never duplicates just
         # because they share a clock bucket (or have no absolute timestamp).
         payload_key = json.dumps(event.payload, sort_keys=True, default=str)
         if event.ts is None:
+            sort_key = event.source.source_line or 0
             key = ("no_ts", event.event_type, event.layer, event.source.raw_excerpt, payload_key)
         else:
-            bucket = int(event.ts.timestamp() // time_bucket_seconds)
+            sort_key = event.ts.timestamp()
+            bucket = int(sort_key // time_bucket_seconds)
             key = (bucket, event.event_type, event.layer, event.subsystem, payload_key)
-        buckets[key].append(event)
+        # Keep the first fact's precise time, not the bucket boundary or the
+        # earliest duplicate. It remains the canonical event after merging.
+        buckets.setdefault(key, (sort_key, []))[1].append(event)
 
-    merged: list[CanonicalEventDraft] = []
+    merged: list[tuple[float | int, CanonicalEventDraft]] = []
     diagnostics: list[dict[str, object]] = []
-    for group in buckets.values():
+    for sort_key, group in buckets.values():
         # Never annotate the original parser fact. Timing validation and other
         # projections may still need its unmodified payload/source evidence.
         canonical = group[0].model_copy(deep=True)
@@ -42,5 +45,6 @@ def deduplicate_events(events: list[CanonicalEventDraft], time_bucket_seconds: i
                     "count": len(group),
                 }
             )
-        merged.append(canonical)
-    return sorted(merged, key=lambda event: event.ts.timestamp() if event.ts else (event.source.source_line or 0)), diagnostics
+        merged.append((sort_key, canonical))
+    merged.sort(key=lambda item: item[0])
+    return [event for _, event in merged], diagnostics

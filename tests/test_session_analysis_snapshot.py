@@ -1,6 +1,6 @@
 """Cross-projection contracts, complete inputs and no chart-induced decisions."""
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -50,10 +50,91 @@ def test_snapshot_is_shared_without_recomputing_features(monkeypatch):
     assert report["version_metadata"]["input_fingerprint"]
 
 
+def test_import_group_artifacts_are_local_and_preserve_separate_report_tree(monkeypatch):
+    from analytics.prediction.timing_snapshot import prepare_layer_timings
+    from domain.services.import_jobs import _prepare_group_artifacts
+    from domain.services.session_grouping import SessionGroup
+    import domain.services.session_analysis as analysis_module
+
+    files = [event_file([CanonicalEventDraft(event_type="pause", ts=datetime(2026, 7, 18, 12))])]
+    group = SessionGroup(group_id="local-artifacts", files=files, confidence=0.75)
+    manifest = prepare_layer_timings(files, owner_node_id="local-node").manifest
+    calls = []
+    original_prepare = analysis_module.prepare_session_analysis
+
+    def prepare_once(*args, **kwargs):
+        calls.append(1)
+        return original_prepare(*args, **kwargs)
+
+    def no_remote_work(*args, **kwargs):
+        pytest.fail("SQL/object-store work inside local analysis preparation")
+
+    monkeypatch.setattr(analysis_module, "prepare_session_analysis", prepare_once)
+    monkeypatch.setattr("storage.db.session.SessionLocal", no_remote_work)
+    monkeypatch.setattr("storage.object_store.minio_client.ObjectStore.__init__", no_remote_work)
+    payload, report = _prepare_group_artifacts(group, manifest, get_profile())
+    assert calls == [1]
+    assert "parse_result" not in payload["files"][0]
+    assert payload["group"]["analysis_snapshot"] == report["analysis_snapshot"]
+    assert report["session_id"] == group.group_id
+    assert payload["group"]["timing_publication_id"] == manifest["publication_id"]
+    assert report["timing_publication"] == manifest
+    assert report["markdown"].startswith("# Session Report")
+    assert report["log_insights"] == payload["group"]["log_insights"]
+    assert report["log_insights"] is not payload["group"]["log_insights"]
+    report["log_insights"]["marker"] = "not published"
+    assert "marker" not in payload["group"]["log_insights"]
+
+
 def test_different_measured_attempts_are_not_semantic_duplicates():
     first = CanonicalEventDraft(event_type="layer_timing_summary", payload={"layer": 1, "burn_ms": 1000})
     second = first.model_copy(update={"payload": {"layer": 1, "burn_ms": 2000}})
     assert len(deduplicate_events([first, second])[0]) == 2
+
+
+@pytest.mark.parametrize("tzinfo", [None, timezone.utc])
+def test_dedup_reuses_first_fact_time_without_changing_order_or_raw_facts(tzinfo):
+    calls = []
+
+    class CountingDatetime(datetime):
+        def timestamp(self):
+            calls.append(self)
+            return super().timestamp()
+
+    def fact(kind, microseconds=None, line=1, confidence=1.0):
+        return CanonicalEventDraft(
+            event_type=kind, confidence=confidence,
+            ts=CountingDatetime(2026, 7, 18, 12, 0, 0, microseconds, tzinfo=tzinfo)
+                if microseconds is not None else None,
+            source={"source_line": line, "raw_excerpt": f"line {line}"},
+            payload={"nested": {"value": 1}},
+        )
+
+    events = [
+        fact("pause", 900000, line=10, confidence=0.4),
+        fact("burn_event", 500000),
+        fact("pause", 100000, line=11, confidence=0.9),
+        fact("error", 600000, confidence=0.3),
+        fact("finish", 500000),
+        fact("error", 700000, confidence=0.8),
+        fact("note", line=4),
+        fact("note", line=1),
+    ]
+    original = deepcopy(events)
+    merged, diagnostics = deduplicate_events(events)
+    assert len(calls) == 6  # once per timestamped input, never again while sorting
+    assert [event.event_type for event in merged] == [
+        "note", "note", "burn_event", "finish", "error", "pause",
+    ]
+    assert [event.source.source_line for event in merged[:2]] == [1, 4]
+    assert merged[-1].ts == events[0].ts  # first fact, not the earlier duplicate
+    assert merged[-1].confidence == 0.9
+    assert merged[-2].confidence == 0.8
+    assert [row["event_type"] for row in diagnostics] == ["pause", "error"]
+    assert [row["source_line"] for row in merged[-1].payload["deduplicated_provenance"]] == [10, 11]
+    merged[-1].payload["nested"]["value"] = 99
+    merged[-1].source.source_line = 99
+    assert events == original
 
 
 def test_mismatching_snapshot_is_rejected():

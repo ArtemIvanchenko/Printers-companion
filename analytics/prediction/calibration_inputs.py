@@ -10,8 +10,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from analytics.prediction.timing_validation import calibration_burn_ms, calibration_cycles_ms, timing_components_ms
-from analytics.prediction.timing_snapshot import MANIFEST_KEY, published_timing_events
+from analytics.prediction.timing_validation import (
+    calibration_burn_ms, calibration_cycles_ms, calibration_timing_payloads, timing_components_ms,
+)
+from analytics.prediction.timing_snapshot import MANIFEST_KEY, read_timing_publication
 from core.versioning.provenance import stable_hash
 from domain.models.events import LayerSnapshot
 from domain.models.prints import MachineParams, PrintRecord
@@ -62,29 +64,31 @@ class CalibrationInputs:
         return stable_hash(self.params)
 
     @cached_property
-    def events(self) -> dict[str, list[dict]]:
+    def timings(self) -> dict[str, dict[int, dict]]:
+        """One admitted timing set per session, shared by the three projections."""
         grouped: dict[str, list[tuple]] = {sid: [] for sid, manifest in self.timing_publications.items()
                                          if manifest is not None}
         for index, (sid, layer, features) in enumerate(self.timing_rows):
             tag = self.timing_row_tags[index] if index < len(self.timing_row_tags) else None
             grouped.setdefault(sid, []).append((layer, features, tag))
-        return {sid: published_timing_events(rows, self.timing_publications.get(sid)) or []
+        return {sid: calibration_timing_payloads(
+                    read_timing_publication(rows, self.timing_publications.get(sid))[1] or [])
                 for sid, rows in grouped.items()}
 
     @cached_property
     def components(self) -> dict[str, dict[int, tuple[float, float]]]:
         return {sid: {layer: (burn / 1000, pour / 1000)
-                      for layer, (burn, pour) in timing_components_ms(events).items()}
-                for sid, events in self.events.items()}
+                      for layer, (burn, pour) in timing_components_ms(timings).items()}
+                for sid, timings in self.timings.items()}
 
     @cached_property
     def burns(self) -> dict[str, dict[int, float]]:
-        return {sid: {layer: burn / 1000 for layer, burn in calibration_burn_ms(events).items()}
-                for sid, events in self.events.items()}
+        return {sid: {layer: burn / 1000 for layer, burn in calibration_burn_ms(timings).items()}
+                for sid, timings in self.timings.items()}
 
     @cached_property
     def cycles(self) -> dict[str, dict[int, tuple[float, float, float]]]:
-        return {sid: calibration_cycles_ms(events) for sid, events in self.events.items()}
+        return {sid: calibration_cycles_ms(timings) for sid, timings in self.timings.items()}
 
 
 def load_calibration_inputs(db: Session, *, for_update: bool = False) -> CalibrationInputs:

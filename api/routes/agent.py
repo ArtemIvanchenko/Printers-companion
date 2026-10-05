@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.repositories import get_runtime_repository
-from api.routes.imports import create_detected_import, handle_import_callback
 from core.config.settings import get_settings
 from core.security.auth import require_service_token
 from core.security.ratelimit import agent_limiter, rate_limit
+from domain.services.importing import requests as import_requests
 from operator_journal.notifications import build_import_confirmation_message, build_import_summary_message
 from operator_journal.parser import parse_operator_text
+from storage.repositories.import_jobs import ImportJobsRepository
 from storage.repositories.runtime import RuntimeRepository
 
 
@@ -99,12 +100,15 @@ def notification_failed(
 @router.post("/import-detected")
 def agent_import_detected(
     payload: dict,
-    repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
     source_path = payload.get("source_path")
     if not source_path:
         raise HTTPException(status_code=400, detail="source_path is required")
-    result = create_detected_import(source_path, repo)
+    settings = get_settings()
+    try:
+        result = import_requests.register_import_candidates([source_path], settings=settings)[0]
+    except import_requests.ImportRequestError as exc:
+        raise HTTPException(409, exc.detail) from exc
     return {
         "job": result.job.model_dump(mode="json"),
         "notifications": [notification.model_dump(mode="json") for notification in result.notifications],
@@ -119,7 +123,13 @@ def agent_import_callback(
     callback_data = payload.get("callback_data")
     if not callback_data and payload.get("import_job_id") and payload.get("action"):
         callback_data = f"import:{payload['import_job_id']}:{payload['action']}"
-    result = handle_import_callback(callback_data, repo=repo, actor=payload.get("actor", "operator"))
+    try:
+        result = import_requests.apply_import_callback(
+            repo.db, callback_data, settings=get_settings(), actor=payload.get("actor", "operator"),
+        )
+    except import_requests.ImportRequestError as exc:
+        status = {"not_found": 404, "conflict": 409, "invalid_inputs": 400}[exc.code]
+        raise HTTPException(status, exc.detail) from exc
     return {
         "job": result.job.model_dump(mode="json"),
         "notifications": [notification.model_dump(mode="json") for notification in result.notifications],
@@ -133,7 +143,7 @@ def agent_send_import_confirmation(
     import_job_id: str,
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
-    job = repo.get_import_job(import_job_id)
+    job = ImportJobsRepository(repo.db).get_import_job(import_job_id)
     if not job or job.owner_node_id != get_settings().compute_node_id:
         return {"error": "not_found"}
     notification = build_import_confirmation_message(
@@ -151,7 +161,7 @@ def agent_send_import_summary(
     import_job_id: str,
     repo: RuntimeRepository = Depends(get_runtime_repository),
 ) -> dict:
-    job = repo.get_import_job(import_job_id)
+    job = ImportJobsRepository(repo.db).get_import_job(import_job_id)
     if not job or job.owner_node_id != get_settings().compute_node_id:
         return {"error": "not_found"}
     notification = build_import_summary_message(

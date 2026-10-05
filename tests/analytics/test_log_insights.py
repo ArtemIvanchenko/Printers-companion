@@ -158,6 +158,28 @@ def test_geometry_residuals_distinguish_systematic_bias_and_single_outlier():
     assert report["items"][0]["layer"] == 7
 
 
+def test_geometry_residuals_keep_sparse_layers_and_explicit_origin():
+    from analytics.prediction.layer_engine import LayerGeometrySeries
+
+    snap = snapshot()
+    snap.update(build_origin_z_mm=3, layer_thickness_mm=0.5, laser_count=2)
+    snap["scan_geometry"]["hatch_mm"] = [2, 18]
+    snap["scan_timing_reference"]["beta"] = [0.5, 0, 0, 0, 0, 0.125]
+    timings = {40: {"burn_ms": 1000}, 0: {"burn_ms": 900}, 7: {"burn_ms": 7000},
+               1: {"burn_ms": 2500}, 3: {"burn_ms": None}, 2: {"burn_ms": float("nan")}}
+    report = geometry_residuals(timings, snap)
+    rows = {row["layer"]: row for row in report["items"]}
+    assert report["sample_count"] == 3
+    series = LayerGeometrySeries.from_snapshot(snap["scan_geometry"])
+    for layer in (0, 1, 7):
+        z = 3 + (layer - 0.5) * 0.5
+        assert rows[layer]["height_mm"] == z
+        expected = sum(b * value for b, value in zip(
+            snap["scan_timing_reference"]["beta"], series.at(z),
+        )) / 2 + 0.125
+        assert rows[layer]["expected_seconds"] == expected
+
+
 def test_unknown_origin_never_invents_model_height():
     snap = snapshot()
     snap["build_origin_source"] = "inferred"

@@ -6,6 +6,7 @@ total time, so getting it from the printer's own measurements instead of a
 guess is the single highest-leverage accuracy fix available.
 """
 from datetime import datetime, timezone
+import hashlib
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -87,7 +88,7 @@ def _write_time_log(tmp_path, session_id: str, pour_ms_by_layer: dict, burn_ms: 
 
 def _session_with_time_log(db, session_id: str, tmp_path, pour_ms_by_layer: dict, classification: str = "REAL_PRINT"):
     """A BuildSession whose stored payload points at a real on-disk time_log,
-    parse_result left unset so RuntimeRepository.get_session_files(rehydrate=True)
+    parse_result left unset so the owner-local source service
     has to actually re-parse it — exercising the real production code path."""
     log_path = _write_time_log(tmp_path, session_id, pour_ms_by_layer)
     ingested = IngestedFile(
@@ -97,7 +98,7 @@ def _session_with_time_log(db, session_id: str, tmp_path, pour_ms_by_layer: dict
             path=str(log_path), file_name=log_path.name,
             family=SourceFileFamily.time_log, role="secondary", confidence=1.0,
         ),
-        checksum="x", size_bytes=log_path.stat().st_size,
+        checksum=hashlib.sha256(log_path.read_bytes()).hexdigest(), size_bytes=log_path.stat().st_size,
         data_quality_status="ok", mtime=datetime.now(timezone.utc),
         parse_result=None,
     )
@@ -171,7 +172,7 @@ class TestRecoatAccuracy:
         assert row["excluded_reason"] is None
 
     def test_session_without_time_log_is_silently_skipped(self, db):
-        # No files at all -> get_session_files returns None -> no crash, no row.
+        # No files at all -> no raw timing evidence -> no crash, no row.
         db.add(BuildSession(session_id="s_notime", status="x", classification="REAL_PRINT",
                             context={"runtime_payload": {"files": [], "group": {}}},
                             start_ts=datetime(2027, 2, 1, tzinfo=timezone.utc)))

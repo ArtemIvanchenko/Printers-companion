@@ -12,7 +12,7 @@ import math
 
 # Bump when the geometry/default scan policy changes, even if the input field
 # names stay the same; an old fitted beta may absorb that policy's errors.
-VERSION = "configured-scan-v1"
+VERSION = "configured-scan-v2"
 _NUMERIC_FIELDS = (
     "hatch_speed_mm_s", "contour_speed_mm_s", "support_speed_mm_s",
     "jump_speed_mm_s", "jump_delay_ms", "hatch_distance_mm", "laser_count",
@@ -33,6 +33,13 @@ def scan_scope(params: dict, material: str, thickness: float) -> dict | None:
     if any(value is not None and not isinstance(value, str) for value in inputs.values()):
         return None
     inputs.update(printer_id=printer, material=material)
+    from analytics.prediction.layer_engine import scan_geometry_options
+    from analytics.prediction.stl_slicer import EstimationError
+
+    try:
+        inputs.update(scan_geometry_options(params))
+    except EstimationError:
+        return None
     speeds = params.get("hatch_speeds_by_mat") or {}
     if not isinstance(speeds, dict):
         return None

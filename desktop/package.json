@@ -1,0 +1,20 @@
+{
+  "name": "printers-companion-desktop",
+  "version": "1.8.0",
+  "private": true,
+  "description": "Настольный Printer’s Companion — локальные вычисления, общее хранилище NAS",
+  "author": "Printer’s Companion",
+  "main": "main.cjs",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "resources": "node scripts/prepare-resources.cjs",
+    "host": "node scripts/build-host.cjs",
+    "pack": "node scripts/package.cjs --dir",
+    "dist:mac": "node scripts/package.cjs --mac dmg zip",
+    "dist:win": "node scripts/package.cjs --win nsis --x64"
+  },
+  "dependencies": { "electron-updater": "6.8.9" },
+  "devDependencies": { "electron": "44.5.1", "electron-builder": "26.15.3" }
+}

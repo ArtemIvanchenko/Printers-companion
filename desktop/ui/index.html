@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; frame-src http://127.0.0.1:* http://localhost:* http://[::1]:*; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Printer’s Companion</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header><strong>Printer’s Companion</strong><span id="version"></span><span id="status" role="status" aria-live="polite">Подготовка…</span><button id="update">Проверить обновления</button></header>
+  <main id="onboarding">
+    <section class="welcome">
+      <p class="eyebrow">РАБОЧЕЕ МЕСТО ОПЕРАТОРА</p>
+      <h1>Ваши печати.<br>Всё в одном месте.</h1>
+      <p>Модели, машинные логи, расчёты и история качества — в привычном интерфейсе. Вычисления выполняются на этом компьютере, данные хранятся на NAS.</p>
+      <div class="note">Docker должен быть установлен и запущен. Отдельный обновлятор устанавливать не нужно.</div>
+      <button id="import" class="secondary">Подключить существующую установку</button>
+      <p class="muted">Существующие папки, пароли и данные останутся на месте.</p>
+    </section>
+    <section class="setup">
+      <h2>Первое подключение</h2>
+      <p class="muted">Укажите реквизиты уже настроенного NAS. Программа не переустанавливает базу данных.</p>
+      <p id="setup-error" class="error" role="alert" hidden></p>
+      <p id="test-notice" class="note" hidden>В этом тестовом пакете ещё нет новой вычислительной сборки. Он проверяет окно и подключение существующей установки; создавать новую пока нельзя. Реквизиты NAS вводить не нужно.</p>
+      <form id="setup-form">
+        <label>Адрес NAS<input name="host" placeholder="100.78.114.66" autocomplete="off" required></label>
+        <div class="pair"><label>Пользователь PostgreSQL<input name="db_user" value="printer_logs" required></label><label>База данных<input name="database" value="printer_logs" required></label></div>
+        <label>Пароль PostgreSQL<input name="db_password" type="password" autocomplete="new-password" required></label>
+        <label>Ключ доступа к файловому хранилищу<input name="access_key" autocomplete="off" required></label>
+        <label>Секретный ключ хранилища<input name="secret_key" type="password" autocomplete="new-password" required></label>
+        <button type="submit">Подключить и открыть</button>
+      </form>
+    </section>
+  </main>
+  <section id="operation" hidden><div class="operation-card"><p class="eyebrow">PRINTER’S COMPANION</p><h1 id="operation-title">Запускаю приложение</h1><p id="operation-message" role="status" aria-live="polite">Подготовка…</p><progress aria-label="Выполнение операции"></progress><div id="error-actions" hidden><button id="retry">Повторить запуск</button><button id="recover" class="secondary">Восстановить предыдущую версию</button></div></div></section>
+  <iframe id="dashboard" title="Карточки печатей и аналитика" sandbox="allow-scripts allow-same-origin allow-forms allow-downloads" hidden></iframe>
+</body>
+</html>

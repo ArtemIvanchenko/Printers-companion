@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from itertools import islice
 from typing import Any
 from uuid import uuid4
 from core.versioning.constants import (
@@ -26,10 +27,12 @@ def _timeline_preview(timeline: list[dict], cap: int = _MAX_TIMELINE_EVENTS) -> 
 
     PRIORITY_TYPES = {"error", "alarm", "finish", "abort", "restart_attempt", "pause", "resume"}
     head = timeline[:200]
-    rest = timeline[200:]
-
-    priority = [e for e in rest if e.get("event_type") in PRIORITY_TYPES]
-    others   = [e for e in rest if e.get("event_type") not in PRIORITY_TYPES]
+    priority, others = [], []
+    for event in islice(timeline, 200, None):
+        if event.get("event_type") in PRIORITY_TYPES:
+            priority.append(event)
+        else:
+            others.append(event)
 
     budget = cap - len(head) - len(priority)
     if budget > 0 and others:
@@ -38,19 +41,16 @@ def _timeline_preview(timeline: list[dict], cap: int = _MAX_TIMELINE_EVENTS) -> 
     else:
         sampled = []
 
-    combined = head + priority + sampled
-    combined.sort(key=lambda e: e.get("ts") or "")
-
-    result = list(combined)
+    result = head + priority + sampled
+    result.sort(key=lambda e: e.get("ts") or "")
     result.append({
         "event_type": "_truncated",
         "note": (
-            f"Timeline preview: {len(timeline)} total events → {len(result) - 1} shown. "
+            f"Timeline preview: {len(timeline)} total events → {len(result)} shown. "
             f"Full timeline in object storage (reports bucket)."
         ),
     })
     return result
-
 
 
 def generate_session_json_report(

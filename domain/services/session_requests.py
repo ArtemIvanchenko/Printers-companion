@@ -17,6 +17,7 @@ from domain.services.import_jobs import (
     detect_import_candidate, mark_import_job_confirmed, queue_import_job_retry,
 )
 from domain.services.session_reports import SessionReportError
+from storage.repositories.import_jobs import ImportJobsRepository
 from storage.repositories.runtime import RuntimeRepository
 
 
@@ -31,7 +32,7 @@ def _response(job, *, session_id: str | None = None) -> dict:
             "status_url": f"/imports/{job.import_job_id}"}
 
 
-def _enqueue(repo: RuntimeRepository, job, *, actor: str, session_id: str | None = None):
+def _enqueue(db, job, *, actor: str, session_id: str | None = None):
     now = datetime.now(timezone.utc)
     until = job.lease_until
     if until is not None and until.tzinfo is None:
@@ -52,8 +53,8 @@ def _enqueue(repo: RuntimeRepository, job, *, actor: str, session_id: str | None
                 "session_id": session_id, "session_ids": previous_sessions,
             },
         })
-    repo.save_import_job(result.job)
-    repo.save_notifications(result.notifications)
+    ImportJobsRepository(db).save_import_job(result.job)
+    RuntimeRepository(db).save_notifications(result.notifications)
     return result.job
 
 
@@ -70,7 +71,7 @@ def request_ingest(db, payload: dict, *, settings, actor: str = "operator") -> d
     # No recursive walk/hash/parse in the request. The worker verifies file
     # stability and the immutable raw archive before producing any results.
     try:
-        repo = RuntimeRepository(db)
+        repo = ImportJobsRepository(db)
         repo.lock_import_candidate(settings.compute_node_id, str(source))
         rows = repo.list_import_jobs_by_source_path(
             owner_node_id=settings.compute_node_id, source_path=str(source),
@@ -80,7 +81,7 @@ def request_ingest(db, payload: dict, *, settings, actor: str = "operator") -> d
         else:
             result = detect_import_candidate(source, settings=settings, file_snapshot={})
             job = result.job
-        job = _enqueue(repo, job, actor=actor)
+        job = _enqueue(db, job, actor=actor)
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
@@ -124,10 +125,10 @@ def request_analysis(db, session_id: str, *, compute_node_id: str,
         if session is None:
             raise SessionReportError("not_found", "Сессия не найдена")
         job_id = _source_job_id(db, session_id, session.context or {}, compute_node_id)
-        job = repo.get_import_job_for_update(job_id) if job_id else None
+        job = ImportJobsRepository(db).get_import_job_for_update(job_id) if job_id else None
         if job is None or job.owner_node_id != compute_node_id:
             raise SessionReportError("conflict", "У сессии нет исходного задания импорта этого ПК. Загрузите логи заново из карточки; путь к старым файлам не угадывается.")
-        job = _enqueue(repo, job, actor=actor, session_id=session_id)
+        job = _enqueue(db, job, actor=actor, session_id=session_id)
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()

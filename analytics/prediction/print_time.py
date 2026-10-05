@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass, field
 
 from analytics.prediction.contract import PredictionResult, PredictionSource
+from analytics.prediction.layer_engine import DEFAULT_JUMP_SPEED_MM_S
 from analytics.prediction.stl_slicer import EstimationError, SliceResult
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,6 @@ _DEFAULT_RECOAT_MS = 9500
 
 # Фоллбэки параметров сканера для векторного расчёта, когда они не заданы
 # в параметрах машины (их следует задать через UI для точности).
-_DEFAULT_JUMP_SPEED_MM_S = 5000.0
 _DEFAULT_JUMP_DELAY_MS = 0.0
 
 
@@ -230,13 +230,16 @@ def estimate_print_time(
         compute_layer_series,
         resolve_scan_model,
         scan_seconds_from_model,
+        scan_geometry_options,
     )
 
     try:
         import trimesh
 
         mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", process=False)
-        series = compute_layer_series([mesh], hatch_distance, slices.layer_thickness_mm)
+        geometry_options = scan_geometry_options(params)
+        series = compute_layer_series([mesh], hatch_distance, slices.layer_thickness_mm,
+                                      **geometry_options)
     except EstimationError:
         raise
     except Exception as exc:
@@ -254,7 +257,7 @@ def estimate_print_time(
         )
         scan_source = "fitted"
     else:
-        jump_speed = params.get("jump_speed_mm_s") or _DEFAULT_JUMP_SPEED_MM_S
+        jump_speed = params.get("jump_speed_mm_s") or DEFAULT_JUMP_SPEED_MM_S
         jump_delay_s = (params.get("jump_delay_ms") or _DEFAULT_JUMP_DELAY_MS) / 1000.0
         scan_seconds = totals["hatch_mm"] / hatch_speed
         if contour_speed > 0:
@@ -305,6 +308,7 @@ def estimate_print_time(
             "hatch_speed": hatch_speed,
             "contour_speed": contour_speed,
             "hatch_distance_mm": hatch_distance,
+            "scan_geometry_options": geometry_options,
             "laser_count": laser_count,
             "material": material,
             "correction_factor": factor,

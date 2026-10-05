@@ -14,7 +14,6 @@ def test_upload_creates_confirmable_job_without_overwriting_same_name(tmp_path, 
         "require_operator_import_confirmation": True,
     })
     monkeypatch.setattr("api.routes.uploads.get_settings", lambda: settings)
-    monkeypatch.setattr("api.routes.imports.get_settings", lambda: settings)
     client = TestClient(app)
 
     first = client.post(
@@ -46,7 +45,6 @@ def test_uploading_several_logs_creates_one_batch_job(tmp_path, monkeypatch):
         "require_operator_import_confirmation": True,
     })
     monkeypatch.setattr("api.routes.uploads.get_settings", lambda: settings)
-    monkeypatch.setattr("api.routes.imports.get_settings", lambda: settings)
     client = TestClient(app)
 
     response = client.post(

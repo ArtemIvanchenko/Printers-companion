@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
 from domain.services.estimation.inputs import require_local_print
+from domain.services.print_cards.comparison import attach_plan_vs_fact
 from domain.services.print_cards.contracts import CardError, DeletionResult
 from domain.services.print_cards.validation import (
     clean_material,
@@ -23,6 +24,38 @@ from storage.repositories.prints_repo import (
 
 logger = logging.getLogger(__name__)
 _STATUSES = {"draft", "active", "completed"}
+
+
+def list_cards(
+    repo: PrintsRepository,
+    *,
+    skip: int = 0,
+    limit: int = 50,
+    query: str | None = None,
+    material: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    has_logs: bool | None = None,
+) -> tuple[list[dict], int]:
+    """Read one catalogue page, then derive its comparisons after releasing SQL.
+
+    Pass a clean read session. Files and the filtered count are read before
+    comparison closes that transaction; local maths never reacquires it.
+    """
+    filters = {
+        "query": (query or "").strip() or None,
+        "material": (material or "").strip().lower() or None,
+        "date_from": parse_iso_datetime(date_from, "date_from"),
+        "date_to": parse_iso_datetime(date_to, "date_to"),
+        "has_logs": has_logs,
+    }
+    records = repo.list_print_records(skip=skip, limit=limit, **filters)
+    files_by_record = repo.list_files_for_records([record["record_id"] for record in records])
+    for record in records:
+        record["files"] = files_by_record.get(record["record_id"], [])
+    total = repo.count_print_records(**filters)
+    attach_plan_vs_fact(repo, records)
+    return records, total
 
 
 def create_card(
@@ -218,8 +251,8 @@ def get_card(repo: PrintsRepository, record_id: str) -> dict:
     record["files"] = repo.list_print_files(record_id)
     from domain.models.jobs import BackgroundJob
 
-    estimate_job = repo.db.scalar(
-        select(BackgroundJob)
+    estimate_job = repo.db.execute(
+        select(BackgroundJob.job_id, BackgroundJob.status)
         .where(
             BackgroundJob.entity_id == record_id,
             BackgroundJob.job_type == "print_estimate",
@@ -227,7 +260,7 @@ def get_card(repo: PrintsRepository, record_id: str) -> dict:
         )
         .order_by((BackgroundJob.status == "running").desc(), BackgroundJob.created_at.desc())
         .limit(1)
-    )
+    ).one_or_none()
     record["estimate_job"] = (
         {"job_id": estimate_job.job_id, "status": estimate_job.status} if estimate_job else None
     )

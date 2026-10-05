@@ -140,7 +140,7 @@ def audit_raw_timing_storage(records: list[dict], stored_events: dict[str, list[
             sources.append({"name": name, "sha256": item["sha256"], "parser_version": parsed.parser_version})
         all_sources.extend(sources)
         selected = calibration_timing_payloads(events)
-        components = timing_components_ms(events)
+        components = timing_components_ms(selected)
         expected = {}
         for layer, (burn, pour) in components.items():
             make = selected[layer].get("make_layer_ms")

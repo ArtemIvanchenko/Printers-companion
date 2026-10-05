@@ -25,7 +25,7 @@ from domain.services.print_cards.contracts import CardError
 from operator_journal.notifications import NotificationMessage, build_import_confirmation_message
 from storage.db.session import SessionLocal
 from storage.repositories.prints_repo import PrintsRepository
-from storage.repositories.runtime import RuntimeRepository
+from storage.repositories.import_jobs import ImportJobsRepository
 
 logger = logging.getLogger(__name__)
 _MAX_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -171,7 +171,7 @@ def recover_upload_receipt(path: Path, *, settings: Settings, now: float | None 
         # COMMIT may have succeeded remotely even though HTTP reported failure.
         # Looking up this ID is the first external operation, before hashing.
         with SessionLocal() as db:
-            existing = RuntimeRepository(db).get_import_job(receipt["import_job_id"])
+            existing = ImportJobsRepository(db).get_import_job(receipt["import_job_id"])
         if existing is not None:
             if not _matches_job(existing, receipt, manifest):
                 raise RecoveryConflict("Идентификатор уже существует, но связь с пакетом или карточкой отличается.")

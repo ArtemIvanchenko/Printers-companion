@@ -6,13 +6,14 @@ Why this is needed
 ------------------
 ``save_session_payload`` deliberately never overwrites a session's start_ts/end_ts
 once set ("first import wins" — protects good data from a bad re-import). So the
-duration fix in ``compute_print_span`` only affects *new* imports; sessions stored
+duration fix in ``compute_session_spans`` only affects *new* imports; sessions stored
 before the fix keep their inflated times (e.g. ~99 h instead of ~82 h).
 
-This script walks every stored session, recomputes its overview from the parse
-results already embedded in the saved payload (no need to re-read raw logs), and
-force-updates the times. Existing ``signal_stats`` are preserved if a recompute
-can't reproduce them (raw sensors.log not on disk at migration time).
+This script repairs owner-local legacy sessions from their raw sources, with SQL
+closed during parsing and computation. Published analyses/reports are instead
+requeued through the original import job, preserving coherent generations.
+Existing ``signal_stats`` are preserved when legacy source reconstruction cannot
+reproduce them.
 
 Idempotent and safe to re-run. Use --dry-run to preview without writing.
 
@@ -28,10 +29,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from domain.services.ingestion import IngestedFile
 from domain.services.session_classification import classify_session
-from domain.services.session_overview import build_group_overview, compute_print_span
-from domain.models.entities import BuildSession
+from domain.services.session_overview import build_group_overview
+from scripts.maintenance.backfill_session_overview import (
+    _lock_unchanged, _parsed_sources, _published, _queue_reanalysis,
+    _read_session, _require_owner, _session_ids,
+)
 from storage.db.session import SessionLocal
 
 
@@ -50,46 +53,40 @@ def _fmt(dt: datetime | None) -> str:
 
 
 def recompute(dry_run: bool) -> int:
-    changed = 0
-    with SessionLocal() as db:
-        rows = db.query(BuildSession).all()
-        for row in rows:
-            payload = (row.context or {}).get("runtime_payload")
-            if not payload:
-                continue
-            files_raw = payload.get("files") or []
-            if not files_raw:
-                continue
-            try:
-                files = [IngestedFile.model_validate(f) for f in files_raw]
-            except Exception as exc:
-                print(f"[skip] {row.session_id}: cannot rebuild files ({exc})")
-                continue
+    from domain.services.compute_affinity import ComputeAffinityError
 
-            # Stored files are slim (no events). Re-read events from the on-disk
-            # logs so the recompute has real layer/timestamp data; without this it
-            # would recompute 0 layers / anchor-only duration.
-            from storage.repositories.runtime import _rehydrate_parse_results
-            files = _rehydrate_parse_results(files)
-
+    changed = queued = skipped = failed = 0
+    for sid in _session_ids():
+        snapshot = _read_session(sid)
+        payload = (snapshot["context"] or {}).get("runtime_payload") if snapshot else None
+        if not payload:
+            skipped += 1
+            continue
+        try:
+            _require_owner(snapshot)
+            if _published(snapshot):
+                _queue_reanalysis(snapshot, dry_run)
+                queued += 1
+                continue
+            files = _parsed_sources(snapshot)
             old_group = payload.get("group", {}) or {}
             old_feats = old_group.get("features", {}) or {}
             old_dur_min = old_feats.get("duration_min")
-
-            new_start, new_end = compute_print_span(files)
             # Fall back to the previously-persisted anchors when no usable
             # in-content timestamps exist (table-only sessions).
             anchor_start = _parse_ts(old_group.get("start_ts"))
             anchor_end = _parse_ts(old_group.get("end_ts"))
 
             overview = build_group_overview(
-                row.session_id,
+                sid,
                 files,
                 start_ts=anchor_start,
                 end_ts=anchor_end,
                 grouping_confidence=float(old_group.get("confidence") or 0.0),
                 classification=classify_session(files),
             )
+            # Direct legacy repair must not claim a new published generation.
+            overview.pop("analysis_snapshot", None)
             # Preserve expensive signal_stats if the recompute couldn't reproduce
             # them (raw sensors.log absent on this machine).
             if not overview.get("signal_stats") and old_group.get("signal_stats"):
@@ -99,29 +96,31 @@ def recompute(dry_run: bool) -> int:
             disp_start = _parse_ts(overview.get("start_ts"))
             disp_end = _parse_ts(overview.get("end_ts"))
 
+            if not dry_run:
+                with SessionLocal() as db:
+                    row = _lock_unchanged(db, snapshot)
+                    row.context = {**(row.context or {}), "runtime_payload": {**payload, "group": overview}}
+                    # Force-update the columns the normal save path won't overwrite.
+                    if disp_start:
+                        row.start_ts = disp_start
+                    if disp_end:
+                        row.end_ts = disp_end
+                    row.updated_at = datetime.now(timezone.utc)
+                    db.commit()
             marker = "DRY" if dry_run else "FIX"
             print(
-                f"[{marker}] {row.session_id}: "
+                f"[{marker}] {sid}: "
                 f"duration {old_dur_min}min -> {new_dur_min}min | "
                 f"{_fmt(disp_start)} … {_fmt(disp_end)}"
             )
-
-            if not dry_run:
-                new_context = dict(row.context or {})
-                new_payload = dict(payload)
-                new_payload["group"] = overview
-                new_context["runtime_payload"] = new_payload
-                row.context = new_context
-                # Force-update the columns the normal save path won't overwrite.
-                if disp_start:
-                    row.start_ts = disp_start
-                if disp_end:
-                    row.end_ts = disp_end
-                row.updated_at = datetime.now(timezone.utc)
             changed += 1
-
-        if not dry_run:
-            db.commit()
+        except ComputeAffinityError as exc:
+            print(f"[skip] {sid}: {exc}")
+            skipped += 1
+        except Exception as exc:
+            print(f"[fail] {sid}: {exc}")
+            failed += 1
+    print(f"Повторный анализ: {queued} | пропущено: {skipped} | ошибки: {failed}")
     return changed
 
 

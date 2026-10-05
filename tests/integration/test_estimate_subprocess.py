@@ -1,98 +1,108 @@
-"""PLAN_ACCURACY.md 2.4 — the estimate's heavy part runs in a separate OS
-process outside test mode (api/routes/prints.py's _auto_estimate), not just a
-same-process call dressed up to look like one. Every other estimate test in
-the suite runs with APP_ENV=test, which takes the inline fallback on purpose
-(a subprocess would not see a monkeypatched ObjectStore — see that branch's
-docstring) — so none of them actually exercise the process boundary. This
-file is the one that does.
+"""The production queue consumer works across a fresh process boundary.
 
-Uses a print record with no STL attached: _compute_prediction_snapshot raises
-its "no STL" HTTPException before ever touching ObjectStore, so this needs no
-real MinIO to prove the subprocess mechanism itself works.
+HTTP never performs geometry work, even under APP_ENV=test. A bare card lets
+the real worker exercise claim/rejection/fenced failure without MinIO or STL.
 """
-import asyncio
+
+import ast
+import inspect
 import multiprocessing
-from datetime import datetime, timezone
+from concurrent.futures import ProcessPoolExecutor
 
 import pytest
+from fastapi.testclient import TestClient
 
+from api.main import app
+from core.config.settings import get_settings
+from domain.models.jobs import BackgroundJob
 from domain.models.prints import PrintRecord
-from storage.db.session import SessionLocal
+from storage.db.session import session_scope
+from storage.repositories.jobs_repo import JobsRepository
+from storage.repositories.prints_repo import PrintsRepository
+from worker.estimate_tasks import process_next_estimate
 
 
-def _make_bare_record(record_id: str) -> None:
-    now = datetime.now(timezone.utc)
-    with SessionLocal() as db:
-        db.merge(PrintRecord(record_id=record_id, name="без STL (subprocess test)",
-                              created_at=now, updated_at=now))
-        db.commit()
+def test_worker_claims_and_records_rejection_in_a_fresh_process():
+    owner = get_settings().compute_node_id
+    with session_scope() as db:
+        row = PrintRecord(record_id="pr_subprocess", name="без STL", origin_compute_node_id=owner)
+        db.add(row)
+        db.flush()
+        job = JobsRepository(db).enqueue(
+            job_type="print_estimate", owner_node_id=owner,
+            entity_type="print_record", entity_id=row.record_id,
+            idempotency_key="subprocess-estimate", payload={
+                "record_id": row.record_id, "record_revision": row.revision,
+                "owner_node_id": owner,
+            },
+        )
+
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        assert pool.submit(process_next_estimate, "subprocess-test-worker", owner).result(timeout=60)
+
+    with session_scope() as db:
+        saved = db.get(BackgroundJob, job["job_id"])
+        assert saved.status == "failed"
+        assert "не прикреплён STL" in saved.error
+        assert saved.lease_generation == 1
+        assert not (db.get(PrintRecord, "pr_subprocess").metadata_json or {}).get("prediction")
 
 
-class TestRunEstimateInProcess:
-    def test_exception_survives_the_process_boundary(self):
-        """A direct ProcessPoolExecutor call — no _auto_estimate involved yet —
-        proves _run_estimate_in_process is picklable, importable and runs to
-        completion in a genuinely different process."""
-        from concurrent.futures import ProcessPoolExecutor
+def test_http_rejects_missing_inputs_without_running_a_calculator(monkeypatch):
+    def unexpected_calculation(*args, **kwargs):
+        raise AssertionError("HTTP must not execute the estimate")
 
-        from api.routes.prints import _run_estimate_in_process
-
-        _make_bare_record("pr_subproc_direct")
-        with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn')) as pool:
-            future = pool.submit(_run_estimate_in_process, "pr_subproc_direct")
-            with pytest.raises(Exception) as exc_info:
-                future.result(timeout=60)
-        assert "не прикреплён STL" in str(exc_info.value)
+    monkeypatch.setattr(
+        "domain.services.estimation.calculation.calculate_prediction_snapshot", unexpected_calculation,
+    )
+    client = TestClient(app)
+    record = client.post("/prints", json={"name": "без STL"}).json()
+    response = client.post(f"/prints/{record['record_id']}/estimate")
+    assert response.status_code == 422
+    assert "не прикреплён STL" in response.json()["detail"]
 
 
-class TestAutoEstimateProcessPoolBranch:
-    def test_routes_through_the_real_pool_and_survives_the_child_exception(self, monkeypatch, caplog):
-        """Forces _auto_estimate's non-test branch (real env here is
-        APP_ENV=test, like the rest of the suite) and proves it actually goes
-        through _ESTIMATE_POOL rather than silently taking the inline path.
+@pytest.mark.parametrize("environment", ["test", "production"])
+def test_http_only_queues_valid_estimates_in_every_environment(monkeypatch, environment):
+    owner = get_settings().compute_node_id
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        repo.save_machine_params({
+            "hatch_speed_mm_s": 1000, "contour_speed_mm_s": 500, "hatch_distance_mm": 0.1,
+            "layer_thickness_mm": 0.06, "laser_count": 1,
+        })
+        record = repo.create_print_record({"name": "queued", "origin_compute_node_id": owner})
+        repo.add_print_file({
+            "record_id": record["record_id"], "file_name": "body.stl", "file_type": "stl",
+            "checksum": "a" * 64, "size_bytes": 1, "object_uri": "s3://stls/body.stl",
+        })
 
-        _run_estimate_in_process itself is left untouched — wrapping it in a
-        test-local closure would make it unpicklable (ProcessPoolExecutor can
-        only pickle module-level callables by reference, see its own
-        docstring), which defeats the point of testing the real pool. Instead
-        this relies on the same "no STL" HTTPException used by the first test:
-        seeing its exact message survive the child -> Future -> except
-        HTTPException path is itself proof the child ran the real function and
-        its result (here, an exception) crossed the process boundary intact.
-        """
-        import logging
+    calls = []
+    def unexpected_calculation(*args, **kwargs):
+        calls.append("calculated in HTTP")
+        raise AssertionError("HTTP must not execute the estimate")
 
-        import api.routes.prints as prints_module
+    monkeypatch.setattr(
+        "domain.services.estimation.calculation.calculate_prediction_snapshot", unexpected_calculation,
+    )
+    settings = get_settings().model_copy(update={"app_env": environment})
+    monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
+    response = TestClient(app).post(f"/prints/{record['record_id']}/estimate")
 
-        settings = prints_module.get_settings().model_copy(update={"app_env": "production"})
-        monkeypatch.setattr(prints_module, "get_settings", lambda: settings)
-
-        record_id = "pr_subproc_auto"
-        _make_bare_record(record_id)
-
-        try:
-            with caplog.at_level(logging.INFO, logger="api.routes.prints"):
-                asyncio.run(prints_module._auto_estimate(record_id))  # must not raise: caught internally
-            assert prints_module._ESTIMATE_POOL is not None, "the pool branch was never taken"
-            assert any("не прикреплён STL" in r.message for r in caplog.records)
-        finally:
-            if prints_module._ESTIMATE_POOL is not None:
-                prints_module._ESTIMATE_POOL.shutdown(wait=True)
-                prints_module._ESTIMATE_POOL = None
+    assert response.status_code == 200, response.text
+    assert not calls
+    with session_scope() as db:
+        saved = db.get(BackgroundJob, response.json()["job_id"])
+        assert saved.status == "pending" and saved.lease_generation == 0
+        assert saved.owner_node_id == owner
+        assert not (db.get(PrintRecord, record["record_id"]).metadata_json or {}).get("prediction")
 
 
-def test_pool_explicitly_uses_fresh_processes_on_every_platform(monkeypatch):
-    import api.routes.prints as prints_module
+def test_print_routes_have_no_test_only_execution_path_or_process_pool():
+    from api.routes import prints
 
-    created = []
-    sentinel = object()
-
-    def pool_factory(*, max_workers, mp_context):
-        created.append((max_workers, mp_context.get_start_method()))
-        return sentinel
-
-    monkeypatch.setattr(prints_module, '_ESTIMATE_POOL', None)
-    monkeypatch.setattr(prints_module, 'ProcessPoolExecutor', pool_factory)
-    assert prints_module._estimate_pool() is sentinel
-    assert prints_module._estimate_pool() is sentinel
-    assert created == [(1, 'spawn')]
+    tree = ast.parse(inspect.getsource(prints))
+    assert not any(isinstance(node, ast.Attribute) and node.attr == "app_env" for node in ast.walk(tree))
+    assert not hasattr(prints, "_auto_estimate")
+    assert not hasattr(prints, "_compute_prediction_snapshot")
+    assert not hasattr(prints, "_ESTIMATE_POOL")

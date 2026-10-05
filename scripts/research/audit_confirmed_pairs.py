@@ -76,6 +76,7 @@ def _geometry(model_dir: Path, last_layer: int | None) -> dict[str, Any]:
             "printable_bodies": len(plate.parts),
             "marker_bodies": len(plate.markers),
             "native_support_records": plate.support_entry_count,
+            "geometry_quality": plate.geometry_quality,
             "printable_volume_cm3": sum(abs(float(mesh.volume)) for mesh in plate.parts) / 1000,
             "z_min_mm": z_min,
             "z_max_mm": z_max,

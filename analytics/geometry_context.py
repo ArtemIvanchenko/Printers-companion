@@ -43,16 +43,15 @@ def _logged_layers(telemetry: dict[str, Any]) -> list[int]:
     })
 
 
-def _layer_from_sample(anomaly: dict[str, Any], telemetry: dict[str, Any]) -> int | None:
+def _layer_from_sample(
+    anomaly: dict[str, Any], telemetry: dict[str, Any], layers: list[int],
+) -> int | None:
     sample = anomaly.get("sample_index")
-    layers = _logged_layers(telemetry)
     if not isinstance(sample, int) or not layers:
         return None
-    time_axis = telemetry.get("time") or []
-    point_count = len(time_axis)
+    point_count = len(telemetry.get("time") or [])
     if point_count < 2:
-        # Some synthetic or legacy payloads omit the time labels while signal
-        # arrays remain aligned. Infer their common length as a safe fallback.
+        # Legacy payloads can omit time labels while signal arrays stay aligned.
         point_count = max(
             (len(values) for group in telemetry.values() if isinstance(group, dict)
              for values in group.values() if isinstance(values, list)),
@@ -78,7 +77,27 @@ def _layer_ordinal(layer: int, layer_count: int, logged_layers: list[int]) -> in
     return min(max(layer - 1, 0), max(layer_count - 1, 0))
 
 
-def _geometry_load(series: LayerGeometrySeries, z_mm: float) -> tuple[dict[str, float], str, float | None]:
+def _typical_geometry_load(series: LayerGeometrySeries) -> float:
+    """One uniform reference for every anomaly in the same geometry snapshot."""
+    # ``series.zs`` also includes extra body-boundary samples and is therefore
+    # non-uniform. A median over it overweights geometry transitions. Evaluate
+    # a small uniform Z grid so 100% really means a typical physical layer.
+    grid_size = min(max(int(series.height_mm / 0.5) + 1, 25), 101)
+    heights = [
+        series.z_min + index * series.height_mm / (grid_size - 1)
+        for index in range(grid_size)
+    ]
+    indices = [GEOMETRY_FEATURES.index(name) for name in _FEATURE_NAMES_RU]
+    # Preserve Python addition order; vector reduction would regroup floats.
+    return statistics.median(
+        sum(float(row[index]) for index in indices)
+        for row in series.at_heights(heights)
+    )
+
+
+def _geometry_load(
+    series: LayerGeometrySeries, z_mm: float, typical: float,
+) -> tuple[dict[str, float], str, float | None]:
     values = dict(zip(GEOMETRY_FEATURES, series.at(z_mm)))
     comparable = {name: values[name] for name in _FEATURE_NAMES_RU}
     local_load = sum(comparable.values())
@@ -86,22 +105,6 @@ def _geometry_load(series: LayerGeometrySeries, z_mm: float) -> tuple[dict[str, 
         dominant = "на этом слое нет сканируемой траектории"
     else:
         dominant = _FEATURE_NAMES_RU[max(comparable, key=comparable.get)]
-    # ``series.zs`` also includes extra body-boundary samples and is therefore
-    # non-uniform. A median over it overweights geometry transitions. Evaluate
-    # a small uniform Z grid so 100% really means a typical physical layer.
-    grid_size = min(max(int(series.height_mm / 0.5) + 1, 25), 101)
-    sample_loads = [
-        sum(dict(zip(GEOMETRY_FEATURES, series.at(z)))[name] for name in _FEATURE_NAMES_RU)
-        for z in (
-            [series.z_min]
-            if grid_size <= 1 else
-            [
-                series.z_min + index * series.height_mm / (grid_size - 1)
-                for index in range(grid_size)
-            ]
-        )
-    ]
-    typical = statistics.median(sample_loads) if sample_loads else 0.0
     relative = local_load / typical * 100.0 if typical > 0 else None
     rounded = {name: round(float(value), 1) for name, value in values.items()}
     return rounded, dominant, relative
@@ -195,6 +198,7 @@ def map_anomalies_to_geometry(
 
     layer_count = int(scan_geometry.get("layer_count") or series.layer_count(thickness))
     logged_layers = _logged_layers(telemetry)
+    typical_load = None
     items: list[dict[str, Any]] = []
     for anomaly, anomaly_type in candidates:
         explicit_layer = anomaly.get("layer")
@@ -224,7 +228,7 @@ def map_anomalies_to_geometry(
                 # explicit fallback only for telemetry without timestamps.
                 if endpoint.get("timestamp"):
                     return None
-                return _layer_from_sample(endpoint, telemetry)
+                return _layer_from_sample(endpoint, telemetry, logged_layers)
 
             start_layer = endpoint_layer(start, is_start=True)
             end_layer = endpoint_layer(end, is_start=False)
@@ -244,7 +248,8 @@ def map_anomalies_to_geometry(
             )
         else:
             layer_range = None
-            layer = explicit_layer if isinstance(explicit_layer, int) else _layer_from_sample(anomaly, telemetry)
+            layer = (explicit_layer if isinstance(explicit_layer, int) else
+                     _layer_from_sample(anomaly, telemetry, logged_layers))
             precision = (
                 "exact_layer" if exact
                 else "nearest_logged_layer" if source_precision == "nearest_burn_log_timestamp"
@@ -256,7 +261,9 @@ def map_anomalies_to_geometry(
         if exact and not (0 <= layer <= layer_count):
             exact = False
         z_mm = min(series.z_max, max(series.z_min, series.z_min + (ordinal + 0.5) * thickness))
-        components, dominant, relative_load = _geometry_load(series, z_mm)
+        if typical_load is None:
+            typical_load = _typical_geometry_load(series)
+        components, dominant, relative_load = _geometry_load(series, z_mm, typical_load)
         if layer_range:
             low_ordinal = _layer_ordinal(layer_range[0], layer_count, logged_layers)
             high_ordinal = _layer_ordinal(layer_range[1], layer_count, logged_layers)

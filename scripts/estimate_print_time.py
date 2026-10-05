@@ -64,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hatch-speed", type=float, help="скорость штриховки, мм/с (иначе пресет)")
     ap.add_argument("--contour-speed", type=float, help="скорость контуров, мм/с")
     ap.add_argument("--hatch-distance", type=float, help="шаг штриховки, мм")
+    ap.add_argument("--hatch-angle", type=float, default=67.0,
+                    help="угол штриховки выборки, градусы (не послойный поворот)")
+    ap.add_argument("--no-contours", action="store_true",
+                    help="контуры выключены в конкретном задании слайсера")
     ap.add_argument("--support-speed", type=float, help="скорость сканирования поддержек, мм/с")
     ap.add_argument("--lasers", type=int, help="число лазеров")
     ap.add_argument("--recoat-ms", type=float, help="время нанесения слоя, мс")
@@ -82,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         "hatch_speed_mm_s": args.hatch_speed or preset["hatch_speed_mm_s"],
         "contour_speed_mm_s": args.contour_speed or preset["contour_speed_mm_s"],
         "hatch_distance_mm": args.hatch_distance or preset["hatch_distance_mm"],
+        "hatch_angle_deg": args.hatch_angle,
+        "contours_enabled": not args.no_contours,
         "jump_speed_mm_s": preset["jump_speed_mm_s"],
         "support_speed_mm_s": args.support_speed,
         "laser_count": args.lasers or preset["laser_count"],

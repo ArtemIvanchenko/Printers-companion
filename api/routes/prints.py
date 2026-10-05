@@ -4,11 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime
-from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -27,9 +23,6 @@ from api.deps.repositories import get_prints_repository
 from api.pagination import LimitParam, PaginatedResponse, SkipParam
 from api.workstations import workstation_id
 from core.config.settings import get_settings
-from domain.services.estimation import calculation as _estimation_calculation
-from domain.services.estimation import inputs as _estimation_inputs
-from domain.services.estimation import publication as _estimation_publication
 from domain.services.estimation import requests as _estimation_requests
 from domain.services.estimation.contracts import EstimateError
 from domain.services.importing import uploads as _log_uploads
@@ -37,9 +30,7 @@ from domain.services.print_cards import cards as _card_services
 from domain.services.print_cards import attachments as _attachments
 from domain.services.print_cards.comparison import attach_plan_vs_fact
 from domain.services.print_cards import quality as _card_quality
-from domain.services.print_cards import validation as _card_validation
 from domain.services.print_cards.contracts import CardError
-from parsers.common.timestamps import date_hint_datetime
 from storage.object_store.minio_client import ObjectStore
 from storage.repositories.prints_repo import PrintsRepository
 
@@ -58,13 +49,9 @@ def _card_call(function, *args, **kwargs):
         status = {"invalid_inputs": 422, "not_found": 404, "conflict": 409,
                   "stale_inputs": 409, "forbidden": 403, "precondition_required": 428,
                   "too_large": 413, "insufficient_storage": 507,
-                  "storage_unavailable": 503, "log_directory_unavailable": 500}[exc.code]
+                  "storage_unavailable": 503, "log_directory_unavailable": 500,
+                  "lease_lost": 409}[exc.code]
         raise HTTPException(status, exc.detail) from None
-
-
-def _require_local_print(record: dict, *, compute_node_id: str | None = None) -> None:
-    _estimate_call(_estimation_inputs.require_local_print, record,
-                   compute_node_id=compute_node_id or get_settings().compute_node_id)
 
 
 def _content_disposition(file_name: str) -> str:
@@ -80,35 +67,6 @@ def _content_disposition(file_name: str) -> str:
     ascii_fallback = "".join(c for c in file_name if c.isprintable() and c not in '"\\;\r\n')
     ascii_fallback = ascii_fallback.encode("ascii", "ignore").decode() or "download"
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(file_name)}"
-
-
-def _bucket_for(file_type: str) -> str:
-    return _attachments.bucket_for(file_type, get_settings())
-
-
-def _clean_material(raw: str | None) -> str:
-    return _card_call(_card_validation.clean_material, raw)
-
-
-def _parse_iso_datetime(raw, field: str) -> datetime | None:
-    return _card_call(_card_validation.parse_iso_datetime, raw, field)
-
-
-def _parse_powder_cost(raw) -> float | None:
-    return _card_call(_card_validation.parse_powder_cost, raw)
-
-
-def _parse_layer_thickness(raw) -> float | None:
-    return _card_call(_card_validation.parse_layer_thickness, raw)
-
-
-def _parse_hatch_distance(raw) -> float | None:
-    return _card_call(_card_validation.parse_hatch_distance, raw)
-
-
-def _date_from_text(text: str) -> datetime | None:
-    """Print date hint from a record/file name like '23.03.2026_кронштейн'."""
-    return date_hint_datetime(text)
 
 
 @router.post("")
@@ -140,19 +98,10 @@ def list_prints(
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
     """Paginated list, newest print date first. Filters: q (name), material, date range."""
-    filters = {
-        "query": (q or "").strip() or None,
-        "material": (material or "").strip().lower() or None,
-        "date_from": _parse_iso_datetime(date_from, "date_from"),
-        "date_to": _parse_iso_datetime(date_to, "date_to"),
-        "has_logs": has_logs,
-    }
-    records = repo.list_print_records(skip=skip, limit=limit, **filters)
-    files_by_record = repo.list_files_for_records([r["record_id"] for r in records])
-    for record in records:
-        record["files"] = files_by_record.get(record["record_id"], [])
-    _attach_plan_vs_fact(repo, records)
-    total = repo.count_print_records(**filters)
+    records, total = _card_call(
+        _card_services.list_cards, repo, skip=skip, limit=limit, query=q,
+        material=material, date_from=date_from, date_to=date_to, has_logs=has_logs,
+    )
     return PaginatedResponse(items=records, total=total, skip=skip, limit=limit).to_dict()
 
 
@@ -176,19 +125,19 @@ def _print_sync_state() -> dict[str, Any]:
 
 _PRINT_SYNC_SUBSCRIBERS: set[asyncio.Queue[dict[str, Any] | None]] = set()
 _PRINT_SYNC_TASK: asyncio.Task | None = None
+_PRINT_SYNC_STATE: dict[str, Any] | None = None
 
 
 async def _print_sync_monitor() -> None:
     """One NAS poller per local API process, fanned out to every browser tab."""
-    global _PRINT_SYNC_TASK
-    previous: dict[str, Any] | None = None
+    global _PRINT_SYNC_TASK, _PRINT_SYNC_STATE
     idle_delay = 2.0
     try:
         while _PRINT_SYNC_SUBSCRIBERS:
             try:
                 current = await asyncio.to_thread(_print_sync_state)
-                if current != previous:
-                    previous = current
+                if current != _PRINT_SYNC_STATE:
+                    _PRINT_SYNC_STATE = current
                     idle_delay = 2.0
                     for queue in tuple(_PRINT_SYNC_SUBSCRIBERS):
                         if queue.full():
@@ -208,6 +157,7 @@ async def _print_sync_monitor() -> None:
             await asyncio.sleep(idle_delay)
     finally:
         _PRINT_SYNC_TASK = None
+        _PRINT_SYNC_STATE = None
 
 
 @router.get("/events")
@@ -221,11 +171,19 @@ async def print_events(request: Request) -> StreamingResponse:
     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1)
 
     async def stream():
-        global _PRINT_SYNC_TASK
+        global _PRINT_SYNC_TASK, _PRINT_SYNC_STATE
+        baseline = None
         _PRINT_SYNC_SUBSCRIBERS.add(queue)
         if _PRINT_SYNC_TASK is None or _PRINT_SYNC_TASK.done():
+            _PRINT_SYNC_STATE = None
             _PRINT_SYNC_TASK = asyncio.create_task(_print_sync_monitor())
+        else:
+            baseline = _PRINT_SYNC_STATE
         try:
+            if baseline is not None:
+                # Prime outside the bounded change queue: coalescing must not
+                # replace the baseline with the first actual card change.
+                yield "event: print-records\ndata: " + json.dumps(baseline) + "\n\n"
             while not await request.is_disconnected():
                 try:
                     current = await asyncio.wait_for(queue.get(), timeout=15)
@@ -244,11 +202,6 @@ async def print_events(request: Request) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-def _attach_plan_vs_fact(repo: PrintsRepository, records: list[dict]) -> None:
-    """Compatibility adapter for the shared read-only comparison service."""
-    attach_plan_vs_fact(repo, records)
 
 
 @router.get("/defaults")
@@ -314,178 +267,26 @@ def recalibrate(repo: PrintsRepository = Depends(get_prints_repository)) -> dict
             "applied": {}, "skipped": [], "recoat": {"applied": {}}, "scan": {"applied": {}}}
 
 
-# Compatibility adapters: HTTP mapping and request-local dependencies only.
-# The durable worker imports the application services, never these routes.
-def _estimate_call(function, *args, **kwargs):
-    try:
-        return function(*args, **kwargs)
-    except EstimateError as exc:
-        status = {"forbidden": 403, "not_found": 404, "stale_inputs": 409,
-                  "invalid_inputs": 422, "storage_unavailable": 503, "lease_lost": 409}[exc.code]
-        raise HTTPException(status, exc.detail) from None
-
-
-_combined_prediction = _estimation_calculation.combined_prediction
-_calibration_mismatch_warning = _estimation_calculation._calibration_mismatch_warning
-_enrich_prediction_interval = _estimation_calculation.enrich_prediction_interval
-params_for_record = _estimation_inputs.params_for_record
-_params_with_sources_for_record = _estimation_inputs._params_with_sources_for_record
-_geometry_quality = _estimation_inputs._geometry_quality
-_geometry_fingerprint = _estimation_inputs.geometry_fingerprint
-_prediction_input_hash = _estimation_inputs.prediction_input_hash
-
-
-def _assert_geometry_usable(record: dict) -> None:
-    _estimate_call(_estimation_inputs._assert_geometry_usable, record)
-
-
-def _prepare_prediction_inputs(repo, record_id, *, compute_node_id=None):
-    return _estimate_call(_estimation_inputs.prepare_prediction_inputs, repo, record_id,
-                         compute_node_id=compute_node_id or get_settings().compute_node_id)
-
-
-def _calculate_prediction_snapshot(prepared, **kwargs):
-    return _estimate_call(_estimation_calculation.calculate_prediction_snapshot, prepared,
-                         object_store_factory=ObjectStore, plate_calculator=_combined_prediction, **kwargs)
-
-
-def _store_prediction_snapshot(repo, record_id, snapshot, *, expected_revision=None, compute_node_id=None):
-    return _estimate_call(_estimation_publication.store_prediction_snapshot, repo, record_id, snapshot,
-                         expected_revision=expected_revision,
-                         compute_node_id=compute_node_id or get_settings().compute_node_id)
-
-
-def _compute_prediction_snapshot(repo: PrintsRepository, record_id: str) -> dict:
-    """Compatibility path: compute and store using the caller's transaction.
-
-    Production durable workers use the split prepare/calculate/store functions
-    so the long local geometry calculation holds no NAS transaction open.
-    """
-    prepared = _prepare_prediction_inputs(repo, record_id)
-    snapshot = _calculate_prediction_snapshot(
-        prepared,
-        geometry_cache=repo,
-        db=repo.db,
-        computed_by=get_settings().compute_node_id,
-    )
-    _store_prediction_snapshot(
-        repo,
-        record_id,
-        snapshot,
-        expected_revision=prepared["record"]["revision"],
-    )
-    return snapshot
-
-
-def _assert_estimatable(repo, record):
-    _estimate_call(_estimation_requests.assert_estimatable, repo, record,
-                   compute_node_id=get_settings().compute_node_id)
-
-
-def _enqueue_estimate(repo, record, *, force=False):
-    return _estimate_call(_estimation_requests.enqueue_estimate, repo, record,
-                         force=force, compute_node_id=get_settings().compute_node_id)
-
-
-# PLAN_ACCURACY.md 2.4. One worker: compute_layer_series already parallelises
-# internally across 4 threads (layer_engine._SECTION_THREADS) up to this
-# container's own CPU limit — a second concurrent estimate would only fight
-# the first one for the same cores, not add real throughput. A second request
-# just queues behind it in the pool rather than racing it.
-_ESTIMATE_POOL: ProcessPoolExecutor | None = None
-
-
-def _estimate_pool() -> ProcessPoolExecutor:
-    global _ESTIMATE_POOL
-    if _ESTIMATE_POOL is None:
-        # Never inherit the API's live SQLAlchemy sockets, native geometry
-        # threads or patched module state via Linux's Python 3.11 fork default.
-        # A fresh interpreter also matches Windows/macOS operator behaviour.
-        _ESTIMATE_POOL = ProcessPoolExecutor(
-            max_workers=1, mp_context=multiprocessing.get_context("spawn"),
-        )
-    return _ESTIMATE_POOL
-
-
-def _run_estimate_in_process(record_id: str) -> None:
-    """The actual estimate, run in a separate OS process (see _auto_estimate).
-
-    Needs its own DB session — nothing from the api process's session or
-    request state crosses this boundary. Module-level so ProcessPoolExecutor
-    can pickle a reference to it (a closure or bound method can't be).
-    """
-    from storage.db.session import session_scope
-
-    with session_scope() as db:
-        repo = PrintsRepository(db)
-        _compute_prediction_snapshot(repo, record_id)
-
-
-async def _auto_estimate(record_id: str) -> None:
-    """Background prediction after an STL upload or manual re-estimate.
-
-    The heavy part runs in a separate OS process, not a thread in this one:
-    compute_layer_series is CPU-bound Python/C, and a thread here would still
-    contend for THIS process's own GIL with every other request this instance
-    is serving. There is no other operator sharing this process to blame —
-    each PC runs its own full stack — so "every other request" means this same
-    operator's own next dashboard click while they wait for their own
-    estimate. A subprocess sidesteps that; the container's CPU limit still
-    applies (raised to 4.0 for exactly this — see docker-compose.yml).
-
-    Tests run this inline in the same process instead (APP_ENV=test): a real
-    subprocess would not see this process's monkeypatched ObjectStore — the
-    in-memory store tests substitute for MinIO exists only in this process's
-    memory, and a spawned/forked child does not share it.
-    """
-    try:
-        if get_settings().app_env == "test":
-            _run_estimate_in_process(record_id)
-        else:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(_estimate_pool(), _run_estimate_in_process, record_id)
-    except HTTPException as exc:
-        # Параметры машины не заполнены и т.п. — это не ошибка загрузки файла
-        logger.info("prints: auto-estimate for %s skipped: %s", record_id, exc.detail)
-    except Exception:
-        logger.exception("prints: auto-estimate for %s failed", record_id)
-
-
 @router.post("/{record_id}/estimate")
 def estimate_print_record(
     record_id: str,
-    background_tasks: BackgroundTasks,
     repo: PrintsRepository = Depends(get_prints_repository),
 ) -> dict:
-    """Manual (re)run of the prediction snapshot for a record's STL.
+    """Enqueue a durable owner-local calculation, identically in every environment.
 
-    Runs in the background and returns immediately. Co-hatching a real plate is
-    not fast — a three-part build with 32 MB of support meshes takes minutes of
-    solid CPU, and the upload path already treats the estimate as a background
-    job for exactly that reason. Holding the request open for it means a
-    browser or proxy timeout decides whether the result is kept.
-
-    The heavy part also runs in its own OS process (see _auto_estimate), so
-    the rest of this dashboard stays responsive while it grinds through a
-    heavy plate instead of contending for this process's own GIL.
-
-    The caller polls GET /prints/{id} and watches for metadata_json.prediction
-    to appear or its estimated_at to move.
+    Only the estimate worker downloads/slices geometry and publishes a fenced
+    snapshot. The caller polls the job or GET /prints/{id} for its result.
     """
     record = repo.get_print_record(record_id)
     if not record:
         raise HTTPException(404, "Карточка печати не найдена")
     # Fail fast on the cheap preconditions so the operator hears about a
     # missing STL or an unfilled parameter now, not after a silent no-op.
-    _assert_estimatable(repo, record)
+    _card_call(_estimation_requests.assert_estimatable, repo, record,
+               compute_node_id=get_settings().compute_node_id)
 
-    job = _enqueue_estimate(repo, record, force=True)
-    # TestClient historically observes the completed snapshot immediately and
-    # has no estimator service. Preserve that contract without weakening the
-    # production path, where only the durable worker performs the calculation.
-    if get_settings().app_env == "test":
-        repo.db.commit()
-        background_tasks.add_task(_auto_estimate, record_id)
+    job = _card_call(_estimation_requests.enqueue_estimate, repo, record,
+                     force=True, compute_node_id=get_settings().compute_node_id)
     return {
         "record_id": record_id,
         "job_id": job["job_id"],
@@ -499,7 +300,7 @@ def estimate_print_record(
 def get_print(record_id: str, repo: PrintsRepository = Depends(get_prints_repository)) -> dict:
     """Full print record with files and geometry-aware anomaly locations."""
     record = _card_call(_card_services.get_card, repo, record_id)
-    _attach_plan_vs_fact(repo, [record])
+    attach_plan_vs_fact(repo, [record])
     return record
 
 
@@ -567,28 +368,16 @@ def delete_print(
 ) -> dict:
     """Delete a record with all attached files (DB rows + stored objects)."""
     result = _card_call(_card_services.delete_card, repo, record_id)
-    background_tasks.add_task(_remove_objects, result.object_uris)
+    background_tasks.add_task(
+        _attachments.remove_unreferenced_objects, result.object_uris, store_factory=ObjectStore,
+    )
     return result.payload
-
-
-def _remove_objects(uris: list[str]) -> None:
-    """Compatibility adapter; the delete service has already committed."""
-    _attachments.remove_unreferenced_objects(uris, store_factory=ObjectStore)
-
-
-def _stage_upload_to_file(
-    source: BinaryIO,
-    destination: Path,
-    max_bytes: int,
-) -> tuple[int, str]:
-    return _card_call(_attachments.stage_upload_to_file, source, destination, max_bytes)
 
 
 @router.post("/{record_id}/files")
 async def upload_print_file(
     record_id: str,
     file: UploadFile,
-    background_tasks: BackgroundTasks,
     response: Response,
     file_type: str = Form(...),
     repo: PrintsRepository = Depends(get_prints_repository),
@@ -609,8 +398,6 @@ async def upload_print_file(
     )
     if result.queued:
         response.status_code = 202
-    if result.new_geometry and get_settings().app_env == "test":
-        background_tasks.add_task(_auto_estimate, record_id)
     return result.payload
 
 
@@ -659,7 +446,9 @@ def delete_print_file(
 ) -> dict:
     """Detach one file from a record (DB row + stored object)."""
     result = _card_call(_attachments.delete_attachment, repo, record_id, file_id)
-    background_tasks.add_task(_remove_objects, result.object_uris)
+    background_tasks.add_task(
+        _attachments.remove_unreferenced_objects, result.object_uris, store_factory=ObjectStore,
+    )
     return result.payload
 
 

@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from api.main import app
 from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession
-from domain.services.print_linking import auto_link_print_records
+from domain.services.print_linking import auto_link_print_records, session_candidates, unlinked_sessions
 from storage.db.session import SessionLocal
 
 client = TestClient(app)
@@ -108,6 +109,35 @@ class TestAutoLink:
         second = auto_link_print_records(db)
         assert len([link for link in first if link["record_id"] == "pr_idem"]) == 1
         assert not [link for link in second if link["record_id"] == "pr_idem"]
+
+    def test_claimed_session_is_filtered_before_loading_even_for_another_card_owner(self, db):
+        ts = datetime(2027, 6, 15, 9, 0, tzinfo=timezone.utc)
+        _make_session(db, "s_query_claimed", ts)
+        _make_session(db, "s_query_free", ts)
+        db.add(PrintRecord(
+            record_id="pr_query_owner", name="другой ПК", session_id="s_query_claimed",
+            printed_at=ts, origin_compute_node_id="another-workstation",
+        ))
+        _make_record(db, "pr_query_candidate", "только дата", ts, layers=None)
+        db.flush()
+        db.expunge_all()
+        loaded_sessions = []
+
+        def track_loaded(session, instance):
+            if isinstance(instance, BuildSession):
+                loaded_sessions.append(instance.session_id)
+
+        event.listen(db, "loaded_as_persistent", track_loaded)
+        try:
+            assert auto_link_print_records(db) == []  # date-only evidence remains weak
+            candidates = session_candidates(db, "pr_query_candidate")
+            assert "s_query_free" in {row["session_id"] for row in candidates}
+            free_sessions = unlinked_sessions(db)
+            assert "s_query_free" in {row["session_id"] for row in free_sessions}
+        finally:
+            event.remove(db, "loaded_as_persistent", track_loaded)
+        assert "s_query_claimed" not in loaded_sessions
+        assert "s_query_free" in loaded_sessions
 
     def test_date_only_pair_requires_manual_confirmation(self, db):
         ts = datetime(2027, 6, 20, 9, 0, tzinfo=timezone.utc)

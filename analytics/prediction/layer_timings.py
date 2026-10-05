@@ -28,16 +28,16 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from domain.models.events import LayerSnapshot
 from domain.models.sessions import BuildSession
 from analytics.prediction.timing_validation import (
-    calibration_cycles_ms, timing_components_ms,
+    calibration_cycles_ms, calibration_timing_payloads, timing_components_ms,
 )
 from analytics.prediction.timing_snapshot import (
     MANIFEST_KEY, MAX_LAYER_OVERHEAD_MS, PreparedLayerTimings,
-    prepare_layer_timings, published_timing_events,
+    prepare_layer_timings, read_timing_publication,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,22 +51,30 @@ def store_layer_timings(session_id: str, files: list, db: Session) -> int:
     """Legacy synchronous adapter. Durable imports prepare before opening SQL."""
     from core.config.settings import get_settings
 
-    return replace_layer_timings(session_id, prepare_layer_timings(
+    prepared = prepare_layer_timings(
         files, owner_node_id=get_settings().compute_node_id,
-    ), db)
+    )
+    session = db.scalar(select(BuildSession).where(BuildSession.session_id == session_id)
+                        .with_for_update().execution_options(populate_existing=True))
+    if session is None:
+        raise ValueError(f"Сессия {session_id} не найдена")
+    return replace_layer_timings(session, prepared, db)
 
 
-def replace_layer_timings(session_id: str, prepared: PreparedLayerTimings, db: Session) -> int:
-    """Replace rows and explicit empty state atomically; caller commits/fences."""
+def replace_layer_timings(session: BuildSession, prepared: PreparedLayerTimings, db: Session) -> int:
+    """Replace facts on the caller's locked parent; caller commits/fences.
+
+    The import publisher and legacy repair already hold this row. Do not fetch
+    its large context or acquire the same lock a second time.
+    """
     from core.versioning.provenance import stable_hash
 
     manifest = prepared.manifest
     if manifest.get("row_count") != len(prepared.rows) or manifest.get("rows_fingerprint") != stable_hash(prepared.rows):
         raise ValueError("Снимок слоёв повреждён до публикации")
-    session = db.scalar(select(BuildSession).where(BuildSession.session_id == session_id)
-                        .with_for_update().execution_options(populate_existing=True))
-    if session is None:
-        raise ValueError(f"Сессия {session_id} не найдена")
+    if object_session(session) is not db:
+        raise ValueError("Строка сессии должна принадлежать текущей транзакции")
+    session_id = session.session_id
     db.execute(delete(LayerSnapshot).where(LayerSnapshot.session_id == session_id))
     # Bulk insert bounded batches instead of an ORM object per measured layer.
     for offset in range(0, len(prepared.rows), 100):
@@ -94,12 +102,40 @@ def stored_timing_events(session_id: str, db: Session) -> list[dict] | None:
         LayerSnapshot.layer, LayerSnapshot.features,
         LayerSnapshot.context["publication_id"].as_string(),
     ).where(LayerSnapshot.session_id == session_id)).all()
-    return published_timing_events([tuple(row) for row in rows], manifest)
+    return read_timing_publication([tuple(row) for row in rows], manifest)[1]
 
 
 def stored_timings(session_id: str, db: Session) -> dict[int, tuple[float, float]]:
     """{layer: (burn_ms, pour_ms)} admitted identically to parser events."""
-    return timing_components_ms(stored_timing_events(session_id, db) or [])
+    timings = calibration_timing_payloads(stored_timing_events(session_id, db) or [])
+    return timing_components_ms(timings)
+
+
+def legacy_session_timing_events(session_id: str, db: Session) -> list:
+    """Legacy research adapter: shared facts first, owner-local raw only if absent.
+
+    Caller retains its UoW, including uncommitted inputs; no implicit rollback
+    or commit. Production fits use detached CalibrationInputs, not this adapter.
+    Standalone repair tools must close SQL before reconstructing raw sources.
+    """
+    stored = stored_timing_events(session_id, db)
+    if stored is not None:
+        return stored  # Empty/invalid published evidence is not missing evidence.
+    from domain.enums.common import SourceFileFamily
+    from domain.services.compute_affinity import ComputeAffinityError
+    from domain.services.session_sources import sources_from_snapshot, rehydrate_session_sources
+    from storage.repositories.session_reads import SessionReadsRepository
+
+    sources = sources_from_snapshot(session_id, SessionReadsRepository(db).sources_snapshot(session_id))
+    if sources is None:
+        return []
+    try:
+        files = rehydrate_session_sources(sources)
+    except ComputeAffinityError:
+        return []
+    return [event for file in files
+            if file.classification.family == SourceFileFamily.time_log and file.parse_result
+            for event in file.parse_result.events]
 
 
 def stored_layer_overheads(session_id: str, db: Session) -> dict[int, float]:
@@ -124,7 +160,8 @@ def stored_layer_cycles(
     cycle model must apply their own pause/restart filter; keeping the raw
     value is what lets diagnostics still explain an unusually long layer.
     """
-    return calibration_cycles_ms(stored_timing_events(session_id, db) or [])
+    timings = calibration_timing_payloads(stored_timing_events(session_id, db) or [])
+    return calibration_cycles_ms(timings)
 
 
 __all__ = [

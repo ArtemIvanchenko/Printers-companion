@@ -58,6 +58,12 @@ def _isolate_local_outbox(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_operator_admission(tmp_path, monkeypatch):
+    """API write barriers must not read/write the operator's state directory."""
+    monkeypatch.setenv('OPERATOR_INSTANCE_FILE', str(tmp_path / 'operator-state' / 'instance-id'))
+
+
+@pytest.fixture(autouse=True)
 def _stub_object_store(monkeypatch):
     """No MinIO in the test harness: make the real ObjectStore report unavailable
     so report offload short-circuits without a slow network round-trip. Tests that

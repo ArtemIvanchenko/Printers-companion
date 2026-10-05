@@ -195,16 +195,20 @@ def run_worker_loop(lease_owner: str, owner_node_id: str, stopped: Event) -> Non
     from worker.model_tasks import process_next_model_task
     from worker.calibration_tasks import process_next_calibration_task
     from worker.shadow_tasks import process_next_shadow_task
+    from core.maintenance import maintenance_active
 
     delay = 2.0
     while not stopped.is_set():
+        if maintenance_active():
+            stopped.wait(2)
+            continue
         try:
             estimated = process_next_estimate(lease_owner, owner_node_id)
             # Do not short-circuit on a busy estimate queue: all three job types
             # belong to this PC and must eventually get a turn.
-            trained = False if stopped.is_set() else process_next_model_task(lease_owner, owner_node_id)
-            calibrated = False if stopped.is_set() else process_next_calibration_task(lease_owner, owner_node_id)
-            shadow = False if stopped.is_set() else process_next_shadow_task(lease_owner, owner_node_id)
+            trained = False if stopped.is_set() or maintenance_active() else process_next_model_task(lease_owner, owner_node_id)
+            calibrated = False if stopped.is_set() or maintenance_active() else process_next_calibration_task(lease_owner, owner_node_id)
+            shadow = False if stopped.is_set() or maintenance_active() else process_next_shadow_task(lease_owner, owner_node_id)
         except (OperationalError, SQLAlchemyTimeoutError):
             logger.warning("Estimate/model/calibration queues unavailable; retrying in %.1fs", delay)
         except Exception:

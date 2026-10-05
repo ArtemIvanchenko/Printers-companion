@@ -15,8 +15,7 @@ from analytics.prediction.layer_timings import (
 from analytics.prediction.timing_snapshot import (
     MANIFEST_KEY,
     prepare_layer_timings,
-    published_timing_events,
-    timing_publication_status,
+    read_timing_publication,
 )
 from core.config.settings import get_settings
 from domain.enums.common import ImportJobStatus
@@ -38,7 +37,9 @@ from domain.services.importing.publication import (
 )
 from domain.services.ingestion import IngestedFile
 from storage.db.session import SessionLocal
+from storage.repositories.import_jobs import ImportJobsRepository
 from storage.repositories.runtime import RuntimeRepository
+from storage.repositories.reports import ReportsRepository
 
 
 def _file(burn=30_000):
@@ -101,7 +102,7 @@ def attempt(monkeypatch):
         )
         db.flush()
         store_layer_timings(sid, [_file(20_000)], db)
-        RuntimeRepository(db).save_import_job(job)
+        ImportJobsRepository(db).save_import_job(job)
         db.add(
             PrintRecord(
                 record_id="pub-card",
@@ -192,6 +193,45 @@ def test_preparation_has_no_visible_changes_then_publication_is_complete(attempt
         assert load_calibration_inputs(db).burns["pub-session"] == {1: 30.0}
 
 
+def test_publisher_reuses_locked_parent_without_another_read(attempt, monkeypatch):
+    from sqlalchemy import event
+    from analytics.prediction.layer_timings import replace_layer_timings
+
+    result, fence = attempt
+    reports = prepare_import_reports(result)
+    seen = []
+    def replace(session, prepared, db):
+        assert session is db.get(BuildSession, session.session_id)
+        statements = []
+        def track(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+        event.listen(db.get_bind(), "before_cursor_execute", track)
+        try:
+            count = replace_layer_timings(session, prepared, db)
+        finally:
+            event.remove(db.get_bind(), "before_cursor_execute", track)
+        assert not any(sql.lstrip().upper().startswith("SELECT") for sql in statements)
+        seen.append(session.session_id)
+        return count
+    monkeypatch.setattr("domain.services.importing.publication.replace_layer_timings", replace)
+    with SessionLocal() as db:
+        publish_import(db, result, fence=fence, prepared_reports=reports)
+        db.rollback()
+    assert seen == ["pub-session"]
+    _assert_old()
+
+
+def test_layer_writer_rejects_parent_from_another_transaction(attempt):
+    from analytics.prediction.layer_timings import replace_layer_timings
+
+    result, _ = attempt
+    with SessionLocal() as first, SessionLocal() as second:
+        row = first.get(BuildSession, "pub-session")
+        with pytest.raises(ValueError, match="текущей транзакции"):
+            replace_layer_timings(row, result.layer_timings["pub-session"], second)
+    _assert_old()
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -227,14 +267,14 @@ def test_postponed_claim_is_a_valid_fence(attempt):
 def test_late_expiry_rolls_back_layers_overview_report_and_job(attempt, monkeypatch):
     result, fence = attempt
     reports = prepare_import_reports(result)
-    original = RuntimeRepository.save_prepared_report
+    original = ReportsRepository.save_prepared
 
     def expire_after_report(repo, report_id, prepared):
         original(repo, report_id, prepared)
         repo.db.get(ImportJob, "import-pub").lease_until = datetime(2000, 1, 1, tzinfo=timezone.utc)
         repo.db.flush()
 
-    monkeypatch.setattr(RuntimeRepository, "save_prepared_report", expire_after_report)
+    monkeypatch.setattr(ReportsRepository, "save_prepared", expire_after_report)
     with pytest.raises(StaleImportLeaseError), SessionLocal() as db:
         publish_import(db, result, fence=fence, prepared_reports=reports)
         db.commit()
@@ -248,7 +288,7 @@ def test_report_write_failure_rolls_back_earlier_updates(attempt, monkeypatch):
     def fail(*args):
         raise RuntimeError("simulated disk/SQL failure")
 
-    monkeypatch.setattr(RuntimeRepository, "save_prepared_report", fail)
+    monkeypatch.setattr(ReportsRepository, "save_prepared", fail)
     with pytest.raises(RuntimeError, match="simulated"), SessionLocal() as db:
         publish_import(db, result, fence=fence, prepared_reports=reports)
         db.commit()
@@ -285,12 +325,12 @@ def test_explicit_empty_replaces_old_layers_without_raw_fallback(
     def no_fallback(*args, **kwargs):
         raise AssertionError("must not reopen raw logs")
 
-    monkeypatch.setattr(RuntimeRepository, "get_session_files", no_fallback)
+    monkeypatch.setattr("domain.services.session_sources.rehydrate_session_sources", no_fallback)
     with SessionLocal() as db:
         assert stored_timing_events(sid, db) == []
         assert db.get(BuildSession, sid).context[MANIFEST_KEY]["status"] == status
         assert not session_burn_by_layer(sid, db)
-        assert load_calibration_inputs(db).events[sid] == []
+        assert load_calibration_inputs(db).timings[sid] == {}
         RuntimeRepository(db).save_session_payload(sid, {"files": [], "group": {}})
         assert stored_timing_events(sid, db) == []
 
@@ -320,7 +360,7 @@ def test_damaged_snapshot_is_excluded_by_all_shared_consumers(attempt, corruptio
         db.commit()
     with SessionLocal() as db:
         assert stored_timing_events("pub-session", db) == []
-        assert load_calibration_inputs(db).events["pub-session"] == []
+        assert load_calibration_inputs(db).timings["pub-session"] == {}
     from domain.services.log_insights import print_log_insights
 
     report = print_log_insights("pub-card")
@@ -337,10 +377,11 @@ def test_unparsed_daily_file_cannot_replace_complete_timings(attempt):
 
 
 def test_legacy_malformed_rows_are_not_mistaken_for_missing_evidence():
-    events = published_timing_events([(None, {}, None), (1, {}, None)], None)
+    status, events = read_timing_publication([(None, {}, None), (1, {}, None)], None)
+    assert status == "legacy"
     assert events is not None and len(events) == 2
-    assert published_timing_events([], None) is None
-    assert timing_publication_status([(1, {}, "new-generation")], None) == "invalid"
+    assert read_timing_publication([], None) == ("absent", None)
+    assert read_timing_publication([(1, {}, "new-generation")], None) == ("invalid", [])
 
 
 def test_new_session_base_token_survives_sqlite_timezone_roundtrip(attempt):
@@ -379,11 +420,15 @@ def test_report_preparation_runs_outside_sql_transaction(attempt, monkeypatch):
     def checkin(connection, record):
         checked_out.discard(id(connection))
 
-    def upload(report_id, report):
-        assert not checked_out
-        return f"s3://reports/{report_id}/checksum.json"
+    from domain.services.session_reports import prepare_report
 
-    monkeypatch.setattr("storage.repositories.runtime._offload_report", upload)
+    def upload(report):
+        assert not checked_out
+        prepared = prepare_report(report)
+        prepared["storage_uri"] = f"s3://reports/{report['report_id']}/checksum.json"
+        return prepared
+
+    monkeypatch.setattr("domain.services.session_reports.prepare_report", upload)
     event.listen(engine, "checkout", checkout)
     event.listen(engine, "checkin", checkin)
     try:
@@ -399,7 +444,14 @@ def test_report_preparation_runs_outside_sql_transaction(attempt, monkeypatch):
 def test_production_cannot_finish_without_full_report_archived(attempt, monkeypatch):
     result, _ = attempt
     monkeypatch.setattr(get_settings(), "app_env", "production")
-    monkeypatch.setattr("storage.repositories.runtime._offload_report", lambda *args: None)
+    from domain.services.session_reports import prepare_report
+
+    def unavailable(report):
+        prepared = prepare_report(report)
+        prepared["storage_uri"] = None
+        return prepared
+
+    monkeypatch.setattr("domain.services.session_reports.prepare_report", unavailable)
     with pytest.raises(ImportPersistenceError, match="отчёт"):
         prepare_import_reports(result)
     _assert_old()
@@ -461,10 +513,10 @@ def test_partial_multi_session_failure_preserves_all_previous_results(attempt, m
     reports = prepare_import_reports(result)
     from analytics.prediction.layer_timings import replace_layer_timings
 
-    def fail_second(session_id, prepared, db):
-        if session_id == sid:
+    def fail_second(session, prepared, db):
+        if session.session_id == sid:
             raise RuntimeError("second session failed")
-        return replace_layer_timings(session_id, prepared, db)
+        return replace_layer_timings(session, prepared, db)
 
     monkeypatch.setattr("domain.services.importing.publication.replace_layer_timings", fail_second)
     with pytest.raises(RuntimeError, match="second session"), SessionLocal() as db:
@@ -493,7 +545,7 @@ def test_actual_worker_parses_and_publishes_one_complete_attempt(tmp_path, monke
     job.session_ids = ["old-attempt"]
     job.report_ids = ["old-report"]
     with SessionLocal() as db:
-        RuntimeRepository(db).save_import_job(job)
+        ImportJobsRepository(db).save_import_job(job)
         db.commit()
 
     assert process_due_import_jobs("actual-pub-worker") == 1

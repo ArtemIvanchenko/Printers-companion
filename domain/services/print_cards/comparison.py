@@ -4,16 +4,16 @@ Only shared compact timing evidence is read. Missing evidence never causes a
 raw-file parse, a wall-clock fallback, or an estimate to validate itself.
 """
 from collections import defaultdict
-from copy import deepcopy
 
 from sqlalchemy import select
 
 from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS, as_utc
 from analytics.prediction.timing_snapshot import (
-    MANIFEST_KEY, published_timing_events, timing_publication_status,
+    MANIFEST_KEY, read_timing_publication,
 )
 from analytics.prediction.timing_validation import (
-    calibration_cycles_ms, finite_number, has_complete_layer_coverage, timing_components_ms,
+    calibration_cycles_ms, calibration_timing_payloads, finite_number,
+    has_complete_layer_coverage, timing_components_ms,
 )
 from domain.models.events import LayerSnapshot
 from domain.models.sessions import BuildSession
@@ -55,9 +55,10 @@ def comparison_summary(record, session=None, rows=()):
     expected = snapshot.get("layer_count")
     expected = expected if type(expected) is int and expected > 0 else None
     manifest = (session or {}).get("manifest")
-    publication = timing_publication_status(list(rows), manifest)
-    events = published_timing_events(list(rows), manifest) or []
-    components, cycles = timing_components_ms(events), calibration_cycles_ms(events)
+    rows = list(rows)
+    publication, events = read_timing_publication(rows, manifest)
+    timings = calibration_timing_payloads(events or [])
+    components, cycles = timing_components_ms(timings), calibration_cycles_ms(timings)
     selected = cycles if scope == "machine_cycle" else components
     complete = has_complete_layer_coverage(selected, expected)
     subtotal_ms = sum(burn + pour for burn, pour in components.values()) if components else None
@@ -143,7 +144,9 @@ def attach_plan_vs_fact(repo, records):
                 BuildSession.context["runtime_payload"]["group"]["timing_publication_id"].as_string().label("timing_publication_id"),
                 BuildSession.context[MANIFEST_KEY].label("manifest"),
             ).where(BuildSession.session_id.in_(ids))):
-                values = deepcopy(dict(row._mapping))
+                # Column projections deserialize fresh JSON, without an ORM
+                # entity or caller-owned tree to detach a second time.
+                values = dict(row._mapping)
                 values["group"] = {"classification": values.pop("group_classification"),
                                    **{key: values.pop(key) for key in (
                                        "features", "analysis_snapshot", "timing_publication_id")}}
@@ -152,7 +155,7 @@ def attach_plan_vs_fact(repo, records):
                 LayerSnapshot.session_id, LayerSnapshot.layer, LayerSnapshot.features,
                 LayerSnapshot.context["publication_id"].as_string(),
             ).where(LayerSnapshot.session_id.in_(ids))):
-                timings[row[0]].append(deepcopy(tuple(row[1:])))
+                timings[row[0]].append(tuple(row[1:]))
     finally:
         repo.db.rollback()
     for record in records:

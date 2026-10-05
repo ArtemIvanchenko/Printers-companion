@@ -16,49 +16,48 @@ from analytics.process_health import build_process_health
 from domain.services.session_analysis import PreparedSessionAnalysis, prepare_session_analysis, measured_snapshot
 
 
-def compute_burn_span(
+def compute_session_spans(
     files: list[IngestedFile],
-) -> tuple[datetime | None, datetime | None]:
-    """First/last timestamped layer burn, excluding purge and shutdown phases."""
-    burn_ts: list[datetime] = []
-    for file in files:
-        parse_result = file.parse_result
-        if not parse_result or parse_result.file_family == SourceFileFamily.monitor100_log:
-            continue
-        for event in parse_result.events:
-            event_type = (event.event_type or "").lower()
-            phase = (event.phase or "").lower().strip()
-            if event.ts is not None and (
-                phase == "burn" or "burn" in event_type or event.layer is not None
-            ):
-                burn_ts.append(event.ts)
-    if len(burn_ts) < 2 or max(burn_ts) <= min(burn_ts):
-        return None, None
-    return min(burn_ts), max(burn_ts)
+) -> tuple[tuple[datetime | None, datetime | None], tuple[datetime | None, datetime | None]]:
+    """Print and layer-burn spans in one pass over the raw parser facts.
 
-
-def compute_print_span(
-    files: list[IngestedFile],
-) -> tuple[datetime | None, datetime | None]:
-    """Start/end of the actual print, derived from event timestamps.
-
-    Excludes the monitor100 daemon log: it runs continuously (not just during
-    the print), so its early-morning timestamps would inflate the span, and it
-    does not apply the midnight-rollover (day_shift) correction the main event
-    log does — making its absolute times unreliable for measuring duration.
-
-    Returns (None, None) when no usable timestamps are present.
+    Monitor100 runs continuously and its clock lacks the main log's midnight
+    correction, so it is excluded from both spans. Transition starts contribute
+    only to the print span. A burn span needs two distinct usable timestamps;
+    layer-bearing events retain their existing role as burn-window evidence.
+    These are elapsed diagnostic windows, not normal machine-cycle durations.
     """
-    print_ts: list[datetime] = []
-    for f in files:
-        pr = f.parse_result
+    start = end = burn_start = burn_end = None
+    for file in files:
+        pr = file.parse_result
         if not pr or pr.file_family == SourceFileFamily.monitor100_log:
             continue
-        print_ts.extend(e.ts for e in pr.events if e.ts is not None)
-        print_ts.extend(t.ts_start for t in pr.transitions if t.ts_start is not None)
-    if not print_ts:
-        return None, None
-    return min(print_ts), max(print_ts)
+        for event in pr.events:
+            ts = event.ts
+            if ts is None:
+                continue
+            if start is None or ts < start:
+                start = ts
+            if end is None or ts > end:
+                end = ts
+            if (
+                event.layer is not None or "burn" in (event.event_type or "").lower()
+                or (event.phase or "").lower().strip() == "burn"
+            ):
+                if burn_start is None or ts < burn_start:
+                    burn_start = ts
+                if burn_end is None or ts > burn_end:
+                    burn_end = ts
+        for transition in pr.transitions:
+            ts = transition.ts_start
+            if ts is not None:
+                if start is None or ts < start:
+                    start = ts
+                if end is None or ts > end:
+                    end = ts
+    if burn_start is None or burn_end <= burn_start:
+        burn_start = burn_end = None
+    return (start, end), (burn_start, burn_end)
 
 
 def _session_machine_seconds(files: list[IngestedFile]) -> float | None:
@@ -96,10 +95,10 @@ def build_group_overview(
     total_events = len(events)
     total_lines = sum(_count_lines(f.parse_result) for f in files if f.parse_result)
 
-    # Print timespan (monitor100 excluded — see compute_print_span). Displayed
+    # Print timespan (monitor100 excluded — see compute_session_spans). Displayed
     # first/last times follow the same span so the table's times and its
     # duration stay consistent. Fall back to group anchors when unavailable.
-    span_start, span_end = compute_print_span(files)
+    (span_start, span_end), (burn_start, burn_end) = compute_session_spans(files)
     disp_start = span_start or start_ts
     disp_end = span_end or end_ts
 
@@ -108,7 +107,6 @@ def build_group_overview(
         1 for e in events
         if "burn" in (e.event_type or "").lower()
         or (e.phase or "").lower().strip() == "burn"
-        and "burn" not in (e.event_type or "").lower()
     )
 
     # Layer count: number of unique printed layers in this session.
@@ -155,7 +153,6 @@ def build_group_overview(
         "material": raw_features.get("material") or "unknown",
     }
 
-    burn_start, burn_end = compute_burn_span(files)
     full_telemetry, signal_stats, telemetry_evidence = analysis_telemetry(
         files, burn_start or span_start, burn_end or span_end,
     )

@@ -58,8 +58,9 @@ ZIP с подменённой сигнатурой (MT вместо PK). Вер�
     коллинеарны (растут вместе с сечением), NNLS распределяет вес между
     ними произвольно. Показывать 1/beta как «скорость» — ложь; работает
     только линейная комбинация целиком.
-  * Модель не переносится между режимами. Ключ — строго
-    «материал@толщина»; чужой режим -> паспортная физика с предупреждением.
+  * Модель не переносится между режимами. Совпадать должны физическая машина,
+    материал, толщина, скорости, hatch, лазеры и сохранённые ID стратегии/пресета
+    (scan_scope); чужой или неполный scope -> физика с предупреждением.
 
 --- 6. НАНЕСЕНИЕ (RECOAT) ---
 Калибруется медианой ``pour_ms`` по материалу
@@ -93,13 +94,17 @@ from pathlib import Path
 from typing import Any
 
 from analytics.prediction.layer_engine import (
+    DEFAULT_HATCH_ANGLE_DEG,
     LayerGeometrySeries,
     compute_layer_series,
+    physics_scan_seconds_by_layer,
+    machine_cycle_from_layers,
     machine_mode_key,
     resolve_scan_model,
     scan_model_key,
     scan_seconds_by_layer_from_model,
     scan_seconds_from_model,
+    scan_geometry_options,
 )
 from analytics.prediction.contract import PredictionResult
 from analytics.prediction.print_time import (
@@ -112,7 +117,6 @@ from analytics.prediction.stl_slicer import EstimationError
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_JUMP_SPEED_MM_S = 5000.0
 MeshSource = bytes | Path
 
 
@@ -229,65 +233,11 @@ def _source_sha256(source: MeshSource) -> str:
     return digest.hexdigest()
 
 
-def _physics_scan_seconds(
-    totals: dict[str, float], params: dict, material: str, laser_count: int,
-    warnings: list[str],
-) -> float:
-    """Cold-start scan time from preset speeds over the engine's real geometry."""
-    by_mat = params.get("hatch_speeds_by_mat") or {}
-    hatch_speed = float(by_mat.get(material) or params["hatch_speed_mm_s"])
-    contour_speed = float(params.get("contour_speed_mm_s") or hatch_speed)
-    support_speed = float(params.get("support_speed_mm_s") or hatch_speed)
-    jump_speed = float(params.get("jump_speed_mm_s") or _DEFAULT_JUMP_SPEED_MM_S)
-    jump_delay_s = float(params.get("jump_delay_ms") or 0.0) / 1000.0
-
-    if not params.get("jump_speed_mm_s"):
-        warnings.append("Скорость перескока не задана — взято значение по умолчанию.")
-
-    seconds = (
-        totals["hatch_mm"] / hatch_speed
-        + totals["contour_mm"] / contour_speed
-        + totals["open_mm"] / support_speed
-        + totals["jump_mm"] / jump_speed
-        + totals["n_jumps"] * jump_delay_s
-    )
-    return seconds / max(laser_count, 1)
-
-
-def _physics_scan_seconds_by_layer(
-    series: LayerGeometrySeries,
-    layer_thickness_mm: float,
-    params: dict,
-    material: str,
-    laser_count: int,
-) -> list[float]:
-    """Cold-start physics burn prediction at each physical layer centre."""
-    by_mat = params.get("hatch_speeds_by_mat") or {}
-    hatch_speed = float(by_mat.get(material) or params["hatch_speed_mm_s"])
-    contour_speed = float(params.get("contour_speed_mm_s") or hatch_speed)
-    support_speed = float(params.get("support_speed_mm_s") or hatch_speed)
-    jump_speed = float(params.get("jump_speed_mm_s") or _DEFAULT_JUMP_SPEED_MM_S)
-    jump_delay_s = float(params.get("jump_delay_ms") or 0.0) / 1000.0
-    out: list[float] = []
-    for index in range(series.layer_count(layer_thickness_mm)):
-        z = series.z_min + (index + 0.5) * layer_thickness_mm
-        hatch_mm, contour_mm, jump_mm, n_jumps, open_mm = series.at(z)
-        out.append((
-            hatch_mm / hatch_speed
-            + contour_mm / contour_speed
-            + open_mm / support_speed
-            + jump_mm / jump_speed
-            + n_jumps * jump_delay_s
-        ) / max(laser_count, 1))
-    return out
-
-
-def _resolve_layer_cycle_model(scan_model: dict | None) -> tuple[dict | None, str]:
+def _validated_layer_cycle_model(candidate: dict | None) -> tuple[dict | None, str]:
     """Validate the identified v2 cycle contract; old artifacts are diagnostic."""
-    if not isinstance(scan_model, dict):
+    if not isinstance(candidate, dict):
         return None, "unavailable"
-    candidate = scan_model.get("layer_cycle_model")
-    if isinstance(candidate, dict) and candidate.get("version") == "max_base_floor_v2":
+    if candidate.get("version") == "max_base_floor_v2":
         base = candidate.get("base_overhead_ms")
         floor = candidate.get("minimum_cycle_ms")
         lower = candidate.get("minimum_applicable_component_ms")
@@ -334,72 +284,31 @@ def _resolve_layer_cycle_model_for_mode(
 ) -> tuple[dict | None, str]:
     """Independent cycle model for the same physical machine only."""
     models = params.get("layer_cycle_model_by_mode") or {}
-    keys: list[str] = []
     printer_id = params.get("printer_id")
-    laser_count = int(params.get("laser_count") or 1)
     if printer_id:
-        keys.append(machine_mode_key(
-            str(printer_id), material, layer_thickness_mm, laser_count,
-        ))
-    for key in keys:
-        candidate = models.get(key)
-        if not isinstance(candidate, dict):
-            continue
-        resolved, source = _resolve_layer_cycle_model({"layer_cycle_model": candidate})
+        key = machine_mode_key(
+            str(printer_id), material, layer_thickness_mm,
+            int(params.get("laser_count") or 1),
+        )
+        resolved, source = _validated_layer_cycle_model(models.get(key))
         if resolved is not None:
             return resolved, source
     # A scoped scan artifact may also carry a v2 cycle. Unscoped scan artifacts
     # cannot reach this point through resolve_scan_model.
-    return _resolve_layer_cycle_model(legacy_scan_model)
-
-
-def _machine_cycle_from_layers(
-    raw_scan_seconds_by_layer: list[float],
-    *,
-    scan_correction_factor: float,
-    recoat_ms: float,
-    cycle_model: dict | None,
-) -> tuple[float, float, int]:
-    """Return full normal cycle seconds, controller overhead and floor hits.
-
-    The scan correction is applied *before* the nonlinear floor.  Summing scan
-    first would be wrong: two builds can have the same total scan time but a
-    different number of short layers held at the controller's minimum cycle.
-    """
-    recoat_seconds = recoat_ms / 1000.0
-    base_seconds = (
-        float(cycle_model.get("base_overhead_ms") or 0.0) / 1000.0
-        if cycle_model else 0.0
+    return _validated_layer_cycle_model(
+        legacy_scan_model.get("layer_cycle_model") if isinstance(legacy_scan_model, dict) else None,
     )
-    floor_seconds = (
-        float(cycle_model["minimum_cycle_ms"]) / 1000.0
-        if cycle_model and cycle_model.get("minimum_cycle_ms") is not None else None
-    )
-    total_seconds = 0.0
-    overhead_seconds = 0.0
-    floor_active_layers = 0
-    for raw_scan_seconds in raw_scan_seconds_by_layer:
-        scan_seconds = raw_scan_seconds * scan_correction_factor
-        base_cycle = scan_seconds + recoat_seconds + base_seconds
-        if floor_seconds is not None and floor_seconds > base_cycle:
-            cycle_seconds = floor_seconds
-            floor_active_layers += 1
-        else:
-            cycle_seconds = base_cycle
-        total_seconds += cycle_seconds
-        overhead_seconds += cycle_seconds - scan_seconds - recoat_seconds
-    return total_seconds, max(overhead_seconds, 0.0), floor_active_layers
 
 
-# Cache format version: bump if compute_layer_series's output shape changes
-# (e.g. a new GEOMETRY_FEATURES entry) so stale rows stop being served instead
-# of silently returned as if complete.
-_GEOMETRY_CACHE_VERSION = 3
+# Bump when geometry semantics or key encoding changes; old rows remain history
+# but cannot authorise reuse under the new contract.
+_GEOMETRY_CACHE_VERSION = 5
 
 
 def _geometry_cache_key(
     named: list[tuple[str, MeshSource, str]], hatch_distance_mm: float,
     layer_thickness_mm: float, build_origin_z_mm: float,
+    *, contours_enabled: bool = True, hatch_angle_deg: float = DEFAULT_HATCH_ANGLE_DEG,
 ) -> str:
     """Content-addressed key for a plate's LayerGeometrySeries.
 
@@ -407,6 +316,9 @@ def _geometry_cache_key(
     hatch distance and layer thickness. ``compute_layer_series`` uses thickness
     when positioning boundary samples, so omitting it can return geometry
     computed for another print mode even when the difference is usually small.
+    Float inputs retain their round-trip representation: the compact snapshot's
+    display precision does not authorise rounding different slicing inputs to
+    the same cache key.
 
     Order matters: two records with the same files attached in a different
     order would (correctly) miss the cache, since LayerGeometrySeries.
@@ -416,11 +328,44 @@ def _geometry_cache_key(
     tokens = [f"{kind}:{_source_sha256(source)}" for _, source, kind in named]
     raw = (
         "|".join(tokens)
-        + f"|hatch={hatch_distance_mm:.6f}|layer={layer_thickness_mm:.6f}"
-        + f"|origin_z={build_origin_z_mm:.6f}"
+        + f"|hatch={hatch_distance_mm!r}|layer={layer_thickness_mm!r}"
+        + f"|origin_z={build_origin_z_mm!r}"
+        + f"|contours={contours_enabled!r}|angle={hatch_angle_deg!r}"
         + f"|v={_GEOMETRY_CACHE_VERSION}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _body_estimates(
+    metas: list[tuple[str, str, Any, float | None]],
+    series: LayerGeometrySeries,
+    thickness: float,
+) -> list[BodyEstimate]:
+    """Attribute the joint scan without re-reading bounds for every field."""
+    shares = series.body_shares()
+    bodies = []
+    for i, (name, kind, mesh, volume) in enumerate(metas):
+        lower, upper = mesh.bounds
+        z_min, z_max = float(lower[2]), float(upper[2])
+        height = z_max - z_min
+        intervals = []
+        for low, high in (series.body_active_z_intervals_mm[i]
+                          if i < len(series.body_active_z_intervals_mm) else []):
+            low, high = max(float(low), z_min), min(float(high), z_max)
+            if low <= high:
+                intervals.append([low, high])
+        bodies.append(BodyEstimate(
+            name=name, kind=kind,
+            scan_share=shares[i] if i < len(shares) else 0.0,
+            layer_count=max(int(height / thickness + 0.999999), 1),
+            height_mm=height,
+            volume_cm3=volume / 1000.0 if volume is not None else None,
+            z_min_mm=z_min, z_max_mm=z_max,
+            x_min_mm=float(lower[0]), x_max_mm=float(upper[0]),
+            y_min_mm=float(lower[1]), y_max_mm=float(upper[1]),
+            active_z_intervals_mm=intervals,
+        ))
+    return bodies
 
 
 def estimate_plate(
@@ -447,9 +392,9 @@ def estimate_plate(
     A cache hit is not bit-exact versus a fresh computation: the cached form is
     LayerGeometrySeries.to_snapshot(), which rounds to 1 decimal place for
     compact storage (that trade-off predates this cache — it was chosen for the
-    calibration snapshot). The resulting error is on the order of 1e-4-1e-3
-    relative, well under the ±0.7% noise floor this project already accepts
-    from the 90-level sampling grid.
+    calibration snapshot). This rounding and the sampled slicing grid are
+    approximations; a cache hit is not proof of a universal error bound or
+    held-out prediction accuracy for an unseen geometry.
     """
     if not parts and not supports:
         raise EstimationError("Не передано ни одной детали и ни одной поддержки")
@@ -464,6 +409,7 @@ def estimate_plate(
     laser_count = int(params.get("laser_count") or 0)
     if laser_count < 1:
         raise EstimationError("Не задано количество лазеров (параметры машины)")
+    geometry_options = scan_geometry_options(params)
 
     warnings: list[str] = []
     named = [(name, source, "part") for name, source in parts] + [
@@ -503,7 +449,7 @@ def estimate_plate(
 
     series = None
     cache_key = (
-        _geometry_cache_key(named, hatch_distance, thickness, build_origin_z)
+        _geometry_cache_key(named, hatch_distance, thickness, build_origin_z, **geometry_options)
         if geometry_cache is not None else None
     )
     if cache_key is not None:
@@ -514,6 +460,7 @@ def estimate_plate(
     if series is None:
         series = compute_layer_series(
             meshes, hatch_distance, thickness, build_origin_z_mm=build_origin_z,
+            **geometry_options,
         )
         if cache_key is not None:
             geometry_cache.save_geometry_cache(cache_key, series.to_snapshot(), len(meshes))
@@ -552,7 +499,7 @@ def estimate_plate(
                 "Сохранённая модель прожига не подтверждена для текущей машины и настроек; "
                 "использован физический расчёт. Нужна калибровка по совместимым снимкам."
             )
-        raw_scan_seconds_by_layer = _physics_scan_seconds_by_layer(
+        raw_scan_seconds_by_layer = physics_scan_seconds_by_layer(
             series, thickness, params, material, laser_count,
         )
         raw_scan_hours = sum(raw_scan_seconds_by_layer) / 3600.0
@@ -597,7 +544,7 @@ def estimate_plate(
         else None
     )
     machine_cycle_seconds, layer_overhead_seconds, minimum_cycle_active_layers = (
-        _machine_cycle_from_layers(
+        machine_cycle_from_layers(
             raw_scan_seconds_by_layer,
             scan_correction_factor=factor,
             recoat_ms=recoat_ms,
@@ -613,36 +560,7 @@ def estimate_plate(
 
     raw_total = raw_scan_hours + raw_recoat_hours
 
-    shares = series.body_shares()
-    bodies = [
-        BodyEstimate(
-            name=name,
-            kind=kind,
-            scan_share=shares[i] if i < len(shares) else 0.0,
-            layer_count=max(int((float(mesh.bounds[1][2]) - float(mesh.bounds[0][2])) / thickness + 0.999999), 1),
-            height_mm=float(mesh.bounds[1][2]) - float(mesh.bounds[0][2]),
-            volume_cm3=volume / 1000.0 if volume is not None else None,
-            z_min_mm=float(mesh.bounds[0][2]),
-            z_max_mm=float(mesh.bounds[1][2]),
-            x_min_mm=float(mesh.bounds[0][0]),
-            x_max_mm=float(mesh.bounds[1][0]),
-            y_min_mm=float(mesh.bounds[0][1]),
-            y_max_mm=float(mesh.bounds[1][1]),
-            active_z_intervals_mm=[
-                [
-                    max(float(low), float(mesh.bounds[0][2])),
-                    min(float(high), float(mesh.bounds[1][2])),
-                ]
-                for low, high in (
-                    series.body_active_z_intervals_mm[i]
-                    if i < len(series.body_active_z_intervals_mm) else []
-                )
-                if max(float(low), float(mesh.bounds[0][2]))
-                <= min(float(high), float(mesh.bounds[1][2]))
-            ],
-        )
-        for i, (name, kind, mesh, volume) in enumerate(metas)
-    ]
+    bodies = _body_estimates(metas, series, thickness)
 
     return PlateEstimate(
         scan_hours=raw_scan_hours * factor,

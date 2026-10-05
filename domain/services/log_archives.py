@@ -1,13 +1,14 @@
 """Bounded, local expansion of uploaded log archives without losing provenance."""
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import unicodedata
 import zipfile
 
-from core.utils.files import iter_source_files, sha256_file
+from core.utils.files import iter_source_files
 
 MAX_EXPANDED_BYTES = 20 * 1024**3
 MAX_MEMBER_BYTES = 6 * 1024**3
@@ -33,19 +34,22 @@ def validated_members(archive, *, max_bytes=MAX_EXPANDED_BYTES):
     return members
 
 
-def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease_check=lambda: None):
-    """Return object references and member paths for a parse-only local tree.
+def expand_log_inputs(
+    source: Path, target: Path, source_objects: dict, *, lease_check=lambda: None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Return object references, member paths and SHA-256 of the copied logs.
 
     Only .log inputs are exposed to parsers. Models/readme/ZIP containers cannot
     become pseudo-sessions. A different file with the same basename fails closed;
     byte-identical files occurring loose and in ZIP are parsed once.
+    Ingestion independently hashes the prepared files before parsing them.
     """
     if target.is_symlink():
         raise ValueError('Папка распаковки не должна быть символической ссылкой')
     target.mkdir(parents=True, exist_ok=True)
     if any(target.iterdir()):
         raise ValueError('Для распаковки нужна пустая отдельная папка')
-    objects, member_paths, seen = {}, {}, {}
+    objects, member_paths, checksums, seen = {}, {}, {}, {}
     expanded = 0
 
     def save(stream, name, size, uri, member_path):
@@ -55,6 +59,7 @@ def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease
             raise ValueError('Недостаточно места или превышен предел распаковки логов')
         temp = target / '.member.partial'
         written = 0
+        digest = hashlib.sha256()
         try:
             with temp.open('xb') as out:
                 while block := stream.read(1024 * 1024):
@@ -63,9 +68,10 @@ def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease
                     if written > size:
                         raise ValueError('Размер содержимого ZIP не совпадает с заголовком')
                     out.write(block)
+                    digest.update(block)
             if written != size:
                 raise ValueError('Неполный файл в архиве')
-            checksum = sha256_file(temp)
+            checksum = digest.hexdigest()
             # APFS/NTFS may identify these names as the same destination even
             # when Linux distinguishes them. Keep interpretation identical on
             # every operator PC and preserve the first source reference.
@@ -81,6 +87,7 @@ def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease
             except FileExistsError:
                 raise ValueError(f'Разные логи с одинаковым именем: {name}. Разделите печати.') from None
             seen[name_key] = checksum
+            checksums[name] = checksum
             if uri:
                 objects[name] = uri
             if member_path:
@@ -114,4 +121,4 @@ def expand_log_inputs(source: Path, target: Path, source_objects: dict, *, lease
                 save(stream, path.name, path.stat().st_size, uri, None)
     if not seen:
         raise ValueError('В выбранном наборе нет машинных .log файлов')
-    return objects, member_paths
+    return objects, member_paths, checksums

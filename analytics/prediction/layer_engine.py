@@ -1,29 +1,13 @@
-"""Per-plate-layer scan geometry: every body co-hatched on one shared Z axis.
+"""Local section geometry and scan/cycle math, without SQL or storage IO.
 
-This replaces two less accurate paths that previously coexisted:
+The existing plate path co-hatches closed polygons on a shared Z axis and
+carries open sections as track length. This is a geometric proxy, NOT proof of
+native slicer vectors, phase activation, support travel or laser scheduling.
+Its sampled grid includes body boundaries; totals integrate that series.
 
-* ``print_time._pyslm_layer_metrics`` hatched 10 sampled sections of ONE body
-  and multiplied the *mean* by the layer count — geometry variation with height
-  was averaged away (on a real plate the hatch length varies ~10x between the
-  support-dense bottom and the top).
-* ``plate_estimator._section_scan_hours`` timed supports as bare single tracks
-  with no jumps at all — on a real build the laser-off travel between support
-  walls exceeded the hatch length itself (measured: 16.9 m of jumps vs 10.3 m
-  of hatch on one layer, ~1000-1600 jumps/layer).
-
-Here every body's cross-section at a given z — part solids and support walls
-alike — is fed into ONE PySLM ``Hatcher.hatch()`` call as boundary paths
-(``Hatcher.hatch`` accepts ``List[np.ndarray]``, not only whole STL parts), so
-hatch, contour and inter-body jump geometry come from the same real vector
-pass the machine itself would make. Open (sheet) sections that cannot form
-closed polygons are carried as single-track length.
-
-The output is a sampled series over plate height. Sample levels include every
-body's z-boundaries — that is where the geometry jumps — plus a uniform grid;
-totals integrate the series (trapezoid) instead of scaling a mean.
-
-Measured cost: a real 72-body, 119 mm plate at ~108 levels ≈ 2.5 min. This runs
-in the background auto-estimate path, same budget as the code it replaces.
+The separate section-track helper retains all Line entities and their stated
+STL-derived order at exact heights. Callers must supply phase recipes and keep
+unverified trajectory/activation hypotheses out of production calibration.
 """
 from __future__ import annotations
 
@@ -47,6 +31,8 @@ _UNIFORM_LEVELS = 90
 _SECTION_THREADS = max(1, int(os.environ.get("PC_SECTION_THREADS", "4")))
 # PySLM polygon fix epsilon, mirrors pyslm.core.Part.POLYGON_FIX_EPSILON.
 _FIX_EPS = 0.001
+DEFAULT_JUMP_SPEED_MM_S = 5000.0
+DEFAULT_HATCH_ANGLE_DEG = 67.0
 
 # Geometry component order — shared contract with the fitted-scan-model storage
 # (machine_params.scan_model_by_mat) and the calibration fit. Do not reorder:
@@ -102,6 +88,27 @@ class LayerGeometrySeries:
         return tuple(
             float(np.interp(z, self.zs, getattr(self, name))) for name in GEOMETRY_FEATURES
         )
+
+    def at_heights(self, zs):
+        """Batch interpolation at caller-provided heights, preserving their order."""
+        import numpy as np
+
+        return np.column_stack([
+            np.interp(zs, self.zs, getattr(self, name)) for name in GEOMETRY_FEATURES
+        ])
+
+    def at_layers(self, layer_thickness_mm: float):
+        """Geometry at physical layer centres, in GEOMETRY_FEATURES order.
+
+        Interpolate each component once for all layers, rather than repeatedly
+        converting the sampled lists for every scalar interpolation.
+        """
+        import numpy as np
+
+        zs = self.z_min + (
+            np.arange(self.layer_count(layer_thickness_mm)) + 0.5
+        ) * layer_thickness_mm
+        return self.at_heights(zs)
 
     def totals(self, layer_thickness_mm: float) -> dict[str, float]:
         """Integrated per-plate totals: trapezoid over z, divided by thickness.
@@ -239,31 +246,165 @@ def scan_seconds_by_layer_from_model(
     calculation must retain the distribution over layers and apply ``max``
     before summing.
     """
+    import numpy as np
+
     beta = model["beta"]
-    out: list[float] = []
-    for index in range(series.layer_count(layer_thickness_mm)):
-        z = series.z_min + (index + 0.5) * layer_thickness_mm
-        geometry = series.at(z)
-        seconds = sum(
-            beta[position] * value
-            for position, value in enumerate(geometry)
-        ) / max(laser_count, 1)
-        seconds += beta[len(GEOMETRY_FEATURES)]
-        out.append(max(float(seconds), 0.0))
-    return out
+    geometry = series.at_layers(layer_thickness_mm)
+    seconds = (geometry * beta[:len(GEOMETRY_FEATURES)]).sum(axis=1) / max(laser_count, 1)
+    seconds += beta[len(GEOMETRY_FEATURES)]
+    return np.maximum(seconds, 0.0).tolist()
 
 
+def physics_scan_seconds_by_layer(
+    series: LayerGeometrySeries,
+    layer_thickness_mm: float,
+    params: dict,
+    material: str,
+    laser_count: int,
+    *, heights=None,
+) -> list[float]:
+    """Cold-start physics burn at layer centres or exact diagnostic heights.
 
-def _make_hatcher(hatch_distance_mm: float):
+    Explicit heights retain their order and gaps; they never change the datum
+    or supply geometry/measurements for missing layers.
+    """
+    by_mat = params.get("hatch_speeds_by_mat") or {}
+    hatch_speed = float(by_mat.get(material) or params["hatch_speed_mm_s"])
+    contour_speed = float(params.get("contour_speed_mm_s") or hatch_speed)
+    support_speed = float(params.get("support_speed_mm_s") or hatch_speed)
+    jump_speed = float(params.get("jump_speed_mm_s") or DEFAULT_JUMP_SPEED_MM_S)
+    jump_delay_s = float(params.get("jump_delay_ms") or 0.0) / 1000.0
+    geometry = (series.at_layers(layer_thickness_mm) if heights is None
+                else series.at_heights(heights))
+    hatch_mm, contour_mm, jump_mm, n_jumps, open_mm = geometry.T
+    return ((
+        hatch_mm / hatch_speed
+        + contour_mm / contour_speed
+        + open_mm / support_speed
+        + jump_mm / jump_speed
+        + n_jumps * jump_delay_s
+    ) / max(laser_count, 1)).tolist()
+
+
+def machine_cycle_from_layers(
+    raw_scan_seconds_by_layer: list[float],
+    *,
+    scan_correction_factor: float,
+    recoat_ms: float,
+    cycle_model: dict | None,
+) -> tuple[float, float, int]:
+    """Return full normal cycle seconds, controller overhead and floor hits.
+
+    The scan correction is applied *before* the nonlinear floor.  Summing scan
+    first would be wrong: two builds can have the same total scan time but a
+    different number of short layers held at the controller's minimum cycle.
+    """
+    recoat_seconds = recoat_ms / 1000.0
+    base_seconds = (
+        float(cycle_model.get("base_overhead_ms") or 0.0) / 1000.0
+        if cycle_model else 0.0
+    )
+    floor_seconds = (
+        float(cycle_model["minimum_cycle_ms"]) / 1000.0
+        if cycle_model and cycle_model.get("minimum_cycle_ms") is not None else None
+    )
+    total_seconds = 0.0
+    overhead_seconds = 0.0
+    floor_active_layers = 0
+    for raw_scan_seconds in raw_scan_seconds_by_layer:
+        scan_seconds = raw_scan_seconds * scan_correction_factor
+        base_cycle = scan_seconds + recoat_seconds + base_seconds
+        if floor_seconds is not None and floor_seconds > base_cycle:
+            cycle_seconds = floor_seconds
+            floor_active_layers += 1
+        else:
+            cycle_seconds = base_cycle
+        total_seconds += cycle_seconds
+        overhead_seconds += cycle_seconds - scan_seconds - recoat_seconds
+    return total_seconds, max(overhead_seconds, 0.0), floor_active_layers
+
+
+def _clip_hatch_lines(paths, lines):
+    """Cull impossible segment/box intersections before the unchanged clipper.
+
+    The three separating axes are X, Y and the segment normal. Boxes include
+    two clipping-grid units: rounding either endpoint or boundary must not
+    turn a possible intersection into a rejected line. Kept coordinates and
+    pseudo-Z ordering IDs are passed through in their original order.
+    """
+    import numpy as np
+    from pyslm.hatching import BaseHatcher
+
+    vectors = lines.reshape(-1, 2, 3)
+    if not np.isfinite(vectors).all():
+        raise EstimationError("Неконечные координаты штриховки")
+    # PySLM generates float32 endpoints. Promote only the rejection arithmetic
+    # so its rounding cannot consume the clipping-grid margin; retain the
+    # original coordinates for the actual intersection.
+    xy = vectors[:, :, :2].astype(np.float64, copy=False)
+    starts, ends = xy[:, 0], xy[:, 1]
+    vector_low, vector_high = np.minimum(starts, ends), np.maximum(starts, ends)
+    delta = ends - starts
+    keep = np.zeros(len(vectors), dtype=bool)
+    padding = 2 * BaseHatcher.error()
+    for path in paths:
+        coords = np.asarray(path)[:, :2]
+        if not np.isfinite(coords).all():
+            raise EstimationError("Неконечные координаты контура")
+        low, high = coords.min(axis=0) - padding, coords.max(axis=0) + padding
+        middle, half = (low + high) / 2, (high - low) / 2
+        offset = middle - starts
+        distance = np.abs(offset[:, 0] * delta[:, 1] - offset[:, 1] * delta[:, 0])
+        radius = half[0] * np.abs(delta[:, 1]) + half[1] * np.abs(delta[:, 0])
+        keep |= (
+            (vector_low[:, 0] <= high[0]) & (vector_high[:, 0] >= low[0])
+            & (vector_low[:, 1] <= high[1]) & (vector_high[:, 1] >= low[1])
+            & (distance <= radius)
+        )
+    clipped = BaseHatcher.clipLines(paths, vectors[keep].reshape(-1, 3))
+    # Upstream may represent no intersections as (1, 0, 2). Hatcher tests len,
+    # then indexes the absent endpoints; a real empty result avoids that crash.
+    return clipped if clipped.size else np.empty((0, 2, 3))
+
+
+def scan_geometry_options(params: dict) -> dict:
+    """The supported geometric scan inputs, with strict, reproducible defaults.
+
+    These two options do not describe a complete slicer recipe: stripes,
+    per-layer rotation, skin regions and per-model laser assignment remain
+    separate evidence. Never interpret a string such as "false" as a flag.
+    """
+    enabled = params.get("contours_enabled", True)
+    angle = params.get("hatch_angle_deg", DEFAULT_HATCH_ANGLE_DEG)
+    if not isinstance(enabled, bool):
+        raise EstimationError("contours_enabled должен быть true или false")
+    if isinstance(angle, bool) or not isinstance(angle, (int, float)):
+        raise EstimationError("hatch_angle_deg должен быть конечным числом")
+    try:
+        angle = float(angle)
+    except OverflowError as exc:
+        raise EstimationError("hatch_angle_deg должен быть конечным числом") from exc
+    if not math.isfinite(angle):
+        raise EstimationError("hatch_angle_deg должен быть конечным числом")
+    return {"contours_enabled": enabled, "hatch_angle_deg": angle}
+
+
+def _make_hatcher(
+    hatch_distance_mm: float, *, contours_enabled: bool = True,
+    hatch_angle_deg: float = DEFAULT_HATCH_ANGLE_DEG,
+):
     from pyslm import hatching as slm_hatching
 
-    hatcher = slm_hatching.Hatcher()
+    class BoundedHatcher(slm_hatching.Hatcher):
+        clipLines = staticmethod(_clip_hatch_lines)
+
+    hatcher = BoundedHatcher()
     hatcher.hatchDistance = hatch_distance_mm
-    hatcher.hatchAngle = 67.0
+    hatcher.hatchAngle = hatch_angle_deg
     hatcher.volumeOffsetHatch = 0.08
     hatcher.spotCompensation = 0.06
-    hatcher.numInnerContours = 1
-    hatcher.numOuterContours = 1
+    hatcher.numInnerContours = int(contours_enabled)
+    hatcher.numOuterContours = int(contours_enabled)
     return hatcher
 
 
@@ -278,16 +419,21 @@ def _to_plate_xy(polygon, to_3d) -> "shapely.geometry.Polygon":  # noqa: F821
     the one plate frame.
 
     Sectioning through a fixed plane origin/normal (see ``_section_polygons``)
-    already yields that shared frame, so in practice this is the identity — it
-    stays because the frame is trimesh's to define, not ours to assume.
+    usually yields that shared frame. Skip rebuilding the polygon only when
+    the recorded XY transform is exactly identity; never infer it from the
+    plane normal or apply a tolerance to real offsets/rotations.
     """
     import numpy as np
     import shapely.geometry
 
+    transform = np.asarray(to_3d)
+    if np.array_equal(transform[:2], [[1, 0, 0, 0], [0, 1, 0, 0]]):
+        return polygon
+
     def ring(coords):
         pts = np.asarray(coords, dtype=float)
         hom = np.column_stack([pts[:, 0], pts[:, 1], np.zeros(len(pts)), np.ones(len(pts))])
-        world = (np.asarray(to_3d) @ hom.T).T
+        world = (transform @ hom.T).T
         return world[:, :2]
 
     return shapely.geometry.Polygon(
@@ -296,36 +442,112 @@ def _to_plate_xy(polygon, to_3d) -> "shapely.geometry.Polygon":  # noqa: F821
     )
 
 
+def _section_path(mesh, z: float):
+    """Build the same trimesh path with one COO-to-CSR conversion per section.
+
+    Preserve vertex merging, leaf-first DFS and edge closure order from
+    trimesh's lines_to_path/edges_to_path pipeline (MIT; see third-party
+    notices). Only graph preparation moves outside the traversal loop.
+    """
+    import trimesh
+
+    sections, transforms, faces = trimesh.intersections.mesh_multiplane(
+        mesh=mesh, plane_origin=[0.0, 0.0, 0.0], plane_normal=[0.0, 0.0, 1.0], heights=[z],
+    )
+    return _path_from_section(sections[0], transforms[0], faces[0])
+
+
+def _path_from_section(lines, transform, face_index):
+    """Common path construction for scalar and bounded-batch intersections."""
+    import numpy as np
+    import trimesh
+    from scipy.sparse.csgraph import depth_first_order
+    from trimesh.constants import tol_path
+    from trimesh.path import Path2D
+    from trimesh.path.entities import Line
+
+    if not len(lines):
+        return None
+    vertices = np.asarray(lines, dtype=np.float64).reshape(-1, 2)
+    unique, inverse = trimesh.grouping.unique_rows(vertices, digits=tol_path.merge_digits)
+    edges = np.sort(inverse.reshape(-1, 2), axis=1)
+    graph = trimesh.graph.edges_to_coo(edges).tocsr().astype(np.float64, copy=False)
+    degree = np.bincount(edges.ravel())
+    visited = np.zeros(len(degree) + 1, dtype=bool)
+    traversals = []
+    for start in np.concatenate((np.flatnonzero(degree == 1), np.flatnonzero(degree > 1))):
+        if visited[start]:
+            continue
+        ordered = depth_first_order(
+            graph, i_start=start, return_predecessors=False, directed=False,
+        ).astype(np.int64)
+        traversals.append(ordered)
+        visited[ordered] = True
+    connected = trimesh.graph.fill_traversals(traversals, edges)
+    return Path2D(
+        entities=[Line(nodes) for nodes in connected], vertices=vertices[unique], process=False,
+        metadata={"to_3D": transform, "face_index": face_index},
+    )
+
+
+def section_track_metrics_by_height(mesh, heights, *, batch_size: int = 32) -> list[dict]:
+    """All section tracks, including open/branched entities, at exact heights.
+
+    Mark length counts every Line entity, not Path2D.discrete (which can omit
+    open branches). Jumps retain the section entity order; this is an explicit
+    STL-derived ordering, NOT a recovered machine trajectory or a timing bound.
+    Entry/exit, between-instance/phase travel and hardware delays are absent.
+    No support activation, recipe or physical layer index is inferred here.
+
+    A bounded multiplane batch reuses intersection preparation without changing
+    path construction, coordinates, order, duplicates or empty-height positions.
+    Closed support sections are tracks too, not implicitly filled body regions.
+    """
+    import numpy as np
+    import trimesh
+
+    zs = np.asarray(heights, dtype=float)
+    if zs.ndim != 1 or not np.isfinite(zs).all():
+        raise EstimationError("Высоты сечений должны быть конечным одномерным массивом")
+    if type(batch_size) is not int or not 1 <= batch_size <= 128:
+        raise EstimationError("Размер пакета сечений должен быть целым числом от 1 до 128")
+    result = []
+    for offset in range(0, len(zs), batch_size):
+        sections, transforms, faces = trimesh.intersections.mesh_multiplane(
+            mesh=mesh, plane_origin=[0.0, 0.0, 0.0], plane_normal=[0.0, 0.0, 1.0],
+            heights=zs[offset:offset + batch_size],
+        )
+        for lines, transform, face_index in zip(sections, transforms, faces, strict=True):
+            path = _path_from_section(lines, transform, face_index)
+            if path is None or not len(path.entities):
+                result.append({'mark_mm': 0.0, 'jump_mm': 0.0, 'n_jumps': 0, 'n_tracks': 0})
+                continue
+            vertices = path.vertices @ transform[:2, :2].T + transform[:2, 3]
+            if not np.isfinite(vertices).all():
+                raise EstimationError("Неконечные координаты траекторий поддержки")
+            entities = [entity.points for entity in path.entities]
+            starts = np.concatenate([points[:-1] for points in entities])
+            ends = np.concatenate([points[1:] for points in entities])
+            mark = float(np.linalg.norm(vertices[ends] - vertices[starts], axis=1).sum())
+            jumps = (vertices[[points[0] for points in entities[1:]]]
+                     - vertices[[points[-1] for points in entities[:-1]]])
+            result.append({'mark_mm': mark,
+                'jump_mm': float(np.linalg.norm(jumps, axis=1).sum()),
+                'n_jumps': int(np.count_nonzero(np.any(jumps != 0, axis=1))),
+                'n_tracks': len(entities)})
+    return result
+
+
 def _section_polygons(mesh, z: float):
-    """Closed shapely polygons (in plate XY) + open track length of one body at z.
+    """Closed plate-XY polygons and open track length, without changing topology.
 
-    Uses ``section_multiplane`` rather than ``section().to_2D()`` because the
-    latter builds a path twice — once from the 3D intersection segments, then
-    again after projecting to the plane — and path construction, not the
-    intersection itself, dominates the cost on support meshes. Measured 1.9x on
-    a 432k-triangle support (176 s → 93 s over 30 levels), 1.23x on a whole
-    plate, where Python-side hatching is the rest of the budget. Passing one
-    height per call is as fast as batching the whole plate (measured within
-    5%), so levels stay independent and parallel.
-
-    It is not bit-identical, and the reason is worth knowing. Building the path
-    once instead of twice merges coincident vertices once instead of twice, so
-    a handful of support-lattice contours that sit right on the closing
-    tolerance land on the other side of it: at five levels of one real plate the
-    closed/open split moved, changing the plate totals by at most 0.33% (open
-    track length, the bulk of a support, by 0.01%). That is below the ±0.7%
-    already contributed by sampling 90 levels instead of every layer, and no
-    geometry is discarded — unlike mesh simplification, which was rejected for
-    exactly that reason.
+    One multiplane intersection/path construction per body and level. Vertex
+    merge tolerance, frame, contour repair and open/closed accounting remain
+    those of the previous section_multiplane path.
     """
     import shapely.geometry
 
-    # A fixed plane origin and normal put every body — and every level — in the
-    # same 2D frame, which is what makes inter-body jump distances meaningful.
-    paths = mesh.section_multiplane(
-        plane_origin=[0.0, 0.0, 0.0], plane_normal=[0.0, 0.0, 1.0], heights=[z],
-    )
-    path = paths[0] if paths else None
+    path = _section_path(mesh, z)
     if path is None:
         return [], 0.0
     total_len = float(path.length)
@@ -373,7 +595,7 @@ def _polygons_to_paths(polygons: list) -> list:
 
 
 def _hatch_level(
-    meshes: list, z: float, hatcher,
+    meshes: list, z: float, hatcher, z_bounds: list[tuple[float, float]] | None = None,
 ) -> tuple[float, float, float, float, float, list[float]]:
     """Co-hatch every body's closed sections at z; returns geometry components."""
     import numpy as np
@@ -383,7 +605,16 @@ def _hatch_level(
     all_polygons: list = []
     open_len = 0.0
     body_boundary = []
-    for mesh in meshes:
+    for index, mesh in enumerate(meshes):
+        # Avoid slicing a body wholly outside this level. Bounds are captured
+        # once for the plate; reading trimesh's bounds cache in every section
+        # costs as much as some empty intersections. Keep near-boundary slices
+        # unchanged, including thin sheets and coincident vertices.
+        if z_bounds is not None:
+            low, high = z_bounds[index]
+            if z < low - _FIX_EPS or z > high + _FIX_EPS:
+                body_boundary.append(0.0)
+                continue
         polygons, body_open = _section_polygons(mesh, z)
         all_polygons.extend(polygons)
         open_len += body_open
@@ -420,6 +651,9 @@ def compute_layer_series(
     layer_thickness_mm: float,
     uniform_levels: int = _UNIFORM_LEVELS,
     build_origin_z_mm: float | None = None,
+    *,
+    contours_enabled: bool = True,
+    hatch_angle_deg: float = DEFAULT_HATCH_ANGLE_DEG,
 ) -> LayerGeometrySeries:
     """Co-hatched geometry series for a plate of trimesh bodies (shared coords).
 
@@ -433,9 +667,13 @@ def compute_layer_series(
         raise EstimationError(f"PySLM недоступен — точный расчёт невозможен ({exc})")
     if not meshes:
         raise EstimationError("Не передано ни одного тела")
+    geometry_options = scan_geometry_options({
+        "contours_enabled": contours_enabled, "hatch_angle_deg": hatch_angle_deg,
+    })
 
-    geometry_z_min = min(float(m.bounds[0][2]) for m in meshes)
-    z_max = max(float(m.bounds[1][2]) for m in meshes)
+    z_bounds = [(float(m.bounds[0][2]), float(m.bounds[1][2])) for m in meshes]
+    geometry_z_min = min(low for low, _ in z_bounds)
+    z_max = max(high for _, high in z_bounds)
     # A raised body does not by itself prove whether native supports extend to
     # Z=0 (real Magics archives contain both coordinate conventions). Use a
     # caller-confirmed origin when available; otherwise the conservative
@@ -460,8 +698,8 @@ def compute_layer_series(
         )
     # Body boundaries: the geometry changes discontinuously where a body starts
     # or ends, so sample just inside each boundary.
-    for mesh in meshes:
-        for zb in (float(mesh.bounds[0][2]) + pad, float(mesh.bounds[1][2]) - pad):
+    for low, high in z_bounds:
+        for zb in (low + pad, high - pad):
             if z_min < zb < z_max:
                 levels.add(zb)
 
@@ -480,14 +718,15 @@ def compute_layer_series(
     if len(zs) > 1 and _SECTION_THREADS > 1:
         with ThreadPoolExecutor(max_workers=_SECTION_THREADS) as pool:
             futures = {
-                pool.submit(_hatch_level, meshes, z, _make_hatcher(hatch_distance_mm)): i
+                pool.submit(_hatch_level, meshes, z,
+                            _make_hatcher(hatch_distance_mm, **geometry_options), z_bounds): i
                 for i, z in enumerate(zs)
             }
             for future in as_completed(futures):
                 results[futures[future]] = future.result()
     else:
-        hatcher = _make_hatcher(hatch_distance_mm)
-        results = [_hatch_level(meshes, z, hatcher) for z in zs]
+        hatcher = _make_hatcher(hatch_distance_mm, **geometry_options)
+        results = [_hatch_level(meshes, z, hatcher, z_bounds) for z in zs]
 
     columns = {name: [] for name in GEOMETRY_FEATURES}
     body_totals = [0.0] * len(meshes)
@@ -535,7 +774,7 @@ def compute_layer_series(
         **columns,
         warnings=geometry_warnings,
     )
-    if sum(series.hatch_mm) + sum(series.open_mm) <= 0:
+    if sum(series.hatch_mm) + sum(series.contour_mm) + sum(series.open_mm) <= 0:
         raise EstimationError(
             "Ни на одном уровне не получено сканируемой геометрии — проверьте файлы"
         )
@@ -552,4 +791,8 @@ def _linspace(start: float, stop: float, n: int) -> list[float]:
 __all__ = [
     "LayerGeometrySeries", "compute_layer_series", "GEOMETRY_FEATURES",
     "resolve_scan_model", "scan_model_key", "scan_seconds_from_model",
+    "scan_seconds_by_layer_from_model", "physics_scan_seconds_by_layer",
+    "machine_cycle_from_layers", "DEFAULT_JUMP_SPEED_MM_S",
+    "scan_geometry_options", "DEFAULT_HATCH_ANGLE_DEG",
+    "section_track_metrics_by_height",
 ]
