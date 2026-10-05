@@ -42,6 +42,49 @@ def test_disabled_contours_do_not_require_an_unused_speed():
     assert "скорость контуров" in missing_for_estimation({**params, "contours_enabled": True})
 
 
+@pytest.mark.parametrize('status', ['pending', 'running'])
+def test_manual_click_joins_same_active_automatic_estimate(queued_estimate, status):
+    from domain.services.estimation.requests import enqueue_estimate
+
+    record, _ = queued_estimate
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        automatic = enqueue_estimate(repo, record)
+        row = db.get(BackgroundJob, automatic['job_id'])
+        row.status = status
+        row.lease_generation = 7
+        row.lease_owner = 'original-worker'
+        db.flush()
+        manual = enqueue_estimate(repo, record, force=True)
+        assert manual['job_id'] == automatic['job_id']
+        assert row.lease_generation == 7 and row.lease_owner == 'original-worker'
+
+
+def test_manual_rerun_after_completion_is_a_new_job(queued_estimate):
+    from domain.services.estimation.requests import enqueue_estimate
+
+    record, _ = queued_estimate
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        first = enqueue_estimate(repo, record)
+        db.get(BackgroundJob, first['job_id']).status = 'done'
+        db.flush()
+        assert enqueue_estimate(repo, record, force=True)['job_id'] != first['job_id']
+
+
+def test_changed_parameters_do_not_join_old_active_estimate(queued_estimate):
+    from domain.services.estimation.requests import enqueue_estimate
+
+    record, _ = queued_estimate
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        first = enqueue_estimate(repo, record)
+        repo.save_machine_params({'hatch_speed_mm_s': 1800})
+        new = enqueue_estimate(repo, record, force=True)
+        assert new['job_id'] != first['job_id']
+        assert new['payload']['input_fingerprint'] != first['payload']['input_fingerprint']
+
+
 @pytest.mark.parametrize("strategy", [False, "preset", {"contours_enabled": "false"},
                                       {"hatch_speed_mm_s": 0}, {"laser_count": 1.5},
                                       {"hatch_speed_mm_s": 10 ** 400}])

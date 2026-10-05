@@ -113,7 +113,7 @@ jobs:
         run: |
           $env:PRINTER_COMPANION_SMOKE_DIR = Join-Path $env:RUNNER_TEMP 'companion-smoke'
           New-Item -ItemType Directory -Path $env:PRINTER_COMPANION_SMOKE_DIR -Force | Out-Null
-          $companion = Join-Path $pwd 'desktop/dist/win-unpacked/Printer’s Companion Test.exe'
+          $companion = Join-Path $pwd "desktop/dist/win-unpacked/Printer’s Companion Test.exe"
           $process = Start-Process -FilePath $companion -ArgumentList '--smoke' -PassThru
           if (-not $process.WaitForExit(60000)) { throw 'Desktop smoke timed out' }
           if ($process.ExitCode -ne 0) { throw 'Desktop smoke failed' }

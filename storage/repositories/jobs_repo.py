@@ -87,6 +87,19 @@ class JobsRepository:
         row = self.db.get(BackgroundJob, job_id)
         return _as_dict(row) if row else None
 
+    def active_for_inputs(self, *, job_type: str, owner_node_id: str,
+                          entity_type: str, entity_id: str, input_fingerprint: str) -> dict | None:
+        """Caller serializes submissions on the entity; never changes a lease."""
+        row = self.db.scalar(select(BackgroundJob).where(
+            BackgroundJob.job_type == job_type,
+            BackgroundJob.owner_node_id == owner_node_id,
+            BackgroundJob.entity_type == entity_type,
+            BackgroundJob.entity_id == entity_id,
+            BackgroundJob.status.in_(['pending', 'running']),
+            BackgroundJob.payload_json['input_fingerprint'].as_string() == input_fingerprint,
+        ).order_by(BackgroundJob.created_at.desc()).limit(1))
+        return _as_dict(row) if row is not None else None
+
     def claim_next(
         self,
         job_type: str,
