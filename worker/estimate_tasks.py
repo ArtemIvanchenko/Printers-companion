@@ -45,7 +45,7 @@ def _defer_infrastructure_failure(
     """Best-effort durable release; an unavailable DB leaves lease recovery."""
     try:
         with session_scope() as db:
-            JobsRepository(db).defer_infrastructure(
+            JobsRepository(db).defer_retry(
                 job_id,
                 str(error),
                 lease_owner=lease_owner,

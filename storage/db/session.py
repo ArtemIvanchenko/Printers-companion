@@ -2,13 +2,37 @@ from collections.abc import Generator
 from contextlib import contextmanager
 import logging
 
+from psycopg.errors import ConnectionTimeout
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import DBAPIError, DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
 
 from core.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def is_database_unavailable(error: BaseException) -> bool:
+    """Recognize connectivity failures, not every operational or SQL error."""
+    if not isinstance(error, DBAPIError) or isinstance(error, (IntegrityError, DataError)):
+        return False
+    original = error.orig
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if sqlstate:
+        # SQLSTATE 08 is connection failure; 57P01..03 are server shutdown/startup.
+        # 53300 rejects new connections when the shared server's slots are full.
+        # Syntax, constraints, authentication and other resource limits are not
+        # evidence of an outage, even when the connection was invalidated.
+        return sqlstate.startswith("08") or sqlstate in {"53300", "57P01", "57P02", "57P03"}
+    if error.connection_invalidated:
+        return True
+    # psycopg exposes pgconn only for a failed connection attempt. Ordinary
+    # OperationalError also includes non-connectivity SQL bugs, so its class
+    # alone is not sufficient evidence for an unlimited infrastructure retry.
+    return isinstance(error, OperationalError) and (
+        isinstance(original, ConnectionTimeout) or getattr(original, "pgconn", None) is not None
+    )
 
 
 def _json_default_dict() -> dict:
@@ -71,6 +95,7 @@ def receive_checkout(dbapi_conn, connection_record, connection_proxy):
     """Log connection checkout events."""
     if settings.app_env == "local":
         logger.debug("Database connection checked out from pool")
+
 
 def get_db() -> Generator[Session, None, None]:
     """Request-scoped session with a fallback unit-of-work boundary.

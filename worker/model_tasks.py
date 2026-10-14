@@ -3,24 +3,26 @@
 from __future__ import annotations
 
 import logging
-
-from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
+import sqlite3
 
 from analytics.prediction.retraining import (
     JOB_TYPE,
+    RetrainingInputsChanged,
+    StaleModelLease,
     calculate_retraining,
-    persist_retraining,
     prepare_retraining,
+    publish_retraining,
+    retraining_input_identity,
 )
 from core.config.settings import get_settings
-from storage.db.session import session_scope
+from storage.db.session import is_database_unavailable, session_scope
 from storage.repositories.jobs_repo import JobsRepository
 from worker.lease_heartbeat import LeaseHeartbeat
 
 logger = logging.getLogger(__name__)
 
 
-def _defer_infrastructure_failure(
+def _defer_model_task(
     job_id: str,
     error: Exception,
     *,
@@ -29,7 +31,7 @@ def _defer_infrastructure_failure(
 ) -> None:
     try:
         with session_scope() as db:
-            JobsRepository(db).defer_infrastructure(
+            JobsRepository(db).defer_retry(
                 job_id,
                 str(error),
                 lease_owner=lease_owner,
@@ -38,7 +40,7 @@ def _defer_infrastructure_failure(
     except Exception:
         # PostgreSQL still being down is expected here. The existing fenced
         # lease leaves the job reclaimable by this same workstation later.
-        logger.exception("could not defer model infrastructure failure for %s", job_id)
+        logger.exception("could not defer model task %s", job_id)
 
 
 def process_next_model_task(lease_owner: str, owner_node_id: str | None = None) -> bool:
@@ -67,6 +69,7 @@ def process_next_model_task(lease_owner: str, owner_node_id: str | None = None) 
         # Copy compact session features/model artifacts in a short transaction.
         with session_scope() as db:
             prepared = prepare_retraining(db)
+        expected_inputs = retraining_input_identity(prepared)
 
         def renew_lease() -> bool:
             with session_scope() as heartbeat_db:
@@ -90,42 +93,38 @@ def process_next_model_task(lease_owner: str, owner_node_id: str | None = None) 
             return True
 
         with session_scope() as db:
-            jobs = JobsRepository(db)
-            completed = jobs.complete(
-                job_id,
-                {"model_name": calculated["model_name"], "label_count": calculated["label_count"]},
+            publish_retraining(
+                db, calculated, expected_inputs=expected_inputs, job_id=job_id,
                 lease_owner=lease_owner,
                 lease_generation=lease_generation,
             )
-            if completed is None:
-                logger.warning("discarded stale model completion for %s", job_id)
-                return True
-            published = persist_retraining(db, calculated)
-            # Keep the useful decision in the durable job result as well.
-            from domain.models.jobs import BackgroundJob
-
-            row = db.get(BackgroundJob, job_id)
-            if row is not None:
-                row.result_json = published
         logger.info("model task %s completed on %s", job_id, owner_node_id)
-    except (OperationalError, SQLAlchemyTimeoutError) as exc:
-        _defer_infrastructure_failure(
-            job_id,
-            exc,
-            lease_owner=lease_owner,
-            lease_generation=lease_generation,
-        )
-        logger.warning("model task %s postponed after NAS database outage", job_id)
+    except StaleModelLease:
+        logger.warning("discarded model publication after losing lease for %s", job_id)
     except Exception as exc:
-        with session_scope() as db:
-            JobsRepository(db).fail(
+        original = getattr(exc, "orig", None)
+        lock_busy = (getattr(original, "sqlstate", None) == "55P03" or (
+            isinstance(original, sqlite3.OperationalError)
+            and getattr(original, "sqlite_errorcode", 0) & 255 in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+        ))
+        if isinstance(exc, RetrainingInputsChanged) or lock_busy or is_database_unavailable(exc):
+            _defer_model_task(
                 job_id,
-                str(exc),
-                retryable=True,
+                exc,
                 lease_owner=lease_owner,
                 lease_generation=lease_generation,
             )
-        logger.exception("model task %s failed", job_id)
+            logger.warning("model task %s postponed: %s", job_id, exc)
+        else:
+            with session_scope() as db:
+                JobsRepository(db).fail(
+                    job_id,
+                    str(exc),
+                    retryable=True,
+                    lease_owner=lease_owner,
+                    lease_generation=lease_generation,
+                )
+            logger.exception("model task %s failed", job_id)
     return True
 
 

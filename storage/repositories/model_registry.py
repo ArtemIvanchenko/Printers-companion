@@ -56,6 +56,39 @@ class ModelRegistryRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def lock_lifecycle(self, model_name: str) -> None:
+        """Serialize registry decisions before reading or locking a version.
+
+        Only short metadata publication belongs here, never training or IO.
+        SQLite reserves its single writer; PostgreSQL uses the existing
+        promotion key for every registry mutation, including first insertion.
+        """
+        connection = self.db.connection()
+        if connection.dialect.name == "postgresql":
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:name))"),
+                {"name": f"ml-promotion:{model_name}"},
+            )
+        elif connection.dialect.name == "sqlite":
+            if not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+    def _locked_version(self, model_version_id: str) -> MLModelVersion | None:
+        # Model name is immutable. Read the scalar, then take the lifecycle
+        # guard before any row lock; otherwise promotion can invert this order.
+        name = self.db.scalar(select(MLModelVersion.model_name).where(
+            MLModelVersion.model_version_id == model_version_id,
+        ))
+        if name is None:
+            return None
+        self.lock_lifecycle(name)
+        return self.db.scalar(
+            select(MLModelVersion)
+            .where(MLModelVersion.model_version_id == model_version_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
     def get(self, model_version_id: str, *, include_artifact: bool = False) -> dict[str, Any] | None:
         row = self.db.get(MLModelVersion, model_version_id)
         return model_to_dict(row, include_artifact=include_artifact) if row else None
@@ -91,6 +124,7 @@ class ModelRegistryRepository:
         A challenger needs future outcomes to prove itself. Replacing it after
         every new label would reset that validation window forever.
         """
+        self.lock_lifecycle(str(candidate["model_name"]))
         existing = self.get_shadow(str(candidate["model_name"]), include_artifact=True)
         if existing is not None:
             return existing
@@ -142,11 +176,7 @@ class ModelRegistryRepository:
         *,
         decision_reason: str,
     ) -> dict[str, Any] | None:
-        row = self.db.scalar(
-            select(MLModelVersion)
-            .where(MLModelVersion.model_version_id == model_version_id)
-            .with_for_update()
-        )
+        row = self._locked_version(model_version_id)
         if row is None or row.status != "shadow":
             return None
         row.shadow_metrics_json = dict(metrics)
@@ -156,11 +186,7 @@ class ModelRegistryRepository:
         return model_to_dict(row, include_artifact=True)
 
     def reject(self, model_version_id: str, reason: str) -> dict[str, Any] | None:
-        row = self.db.scalar(
-            select(MLModelVersion)
-            .where(MLModelVersion.model_version_id == model_version_id)
-            .with_for_update()
-        )
+        row = self._locked_version(model_version_id)
         if row is None or row.status != "shadow":
             return None
         row.status = "rejected"
@@ -171,21 +197,9 @@ class ModelRegistryRepository:
 
     def promote(self, model_version_id: str, reason: str) -> dict[str, Any] | None:
         """Atomically replace the champion after shadow validation passes."""
-        candidate = self.db.scalar(
-            select(MLModelVersion)
-            .where(MLModelVersion.model_version_id == model_version_id)
-            .with_for_update()
-        )
+        candidate = self._locked_version(model_version_id)
         if candidate is None or candidate.status != "shadow":
             return None
-
-        # Serialise global promotion across operator PCs. This is metadata
-        # coordination only; no numerical work is executed by PostgreSQL/NAS.
-        if self.db.get_bind().dialect.name == "postgresql":
-            self.db.execute(
-                text("SELECT pg_advisory_xact_lock(hashtext(:name))"),
-                {"name": f"ml-promotion:{candidate.model_name}"},
-            )
 
         current = self.db.scalar(
             select(MLModelVersion)

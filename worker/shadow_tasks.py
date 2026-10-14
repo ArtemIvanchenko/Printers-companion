@@ -86,7 +86,7 @@ def process_next_shadow_task(lease_owner, owner_node_id):
     except (OperationalError, SQLAlchemyTimeoutError) as exc:
         try:
             with session_scope() as db:
-                JobsRepository(db).defer_infrastructure(job_id, str(exc), **fence)
+                JobsRepository(db).defer_retry(job_id, str(exc), **fence)
         except Exception:
             logger.exception("could not defer shadow task after NAS outage")
     except Exception as exc:
