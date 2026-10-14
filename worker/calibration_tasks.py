@@ -56,7 +56,7 @@ def process_next_calibration_task(lease_owner: str, owner_node_id: str | None = 
     except (OperationalError, SQLAlchemyTimeoutError) as exc:
         try:
             with session_scope() as db:
-                JobsRepository(db).defer_infrastructure(job_id, str(exc), **fence)
+                JobsRepository(db).defer_retry(job_id, str(exc), **fence)
         except Exception:
             logger.exception("could not defer calibration outage for %s", job_id)
         logger.warning("calibration %s postponed after NAS outage", job_id)

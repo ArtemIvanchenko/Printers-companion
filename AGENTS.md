@@ -104,6 +104,15 @@
   заменяется текущей датой. Правило — `analytics/prediction/retraining.py`.
 - Обучение выполняется локальным worker; NAS хранит только компактный артефакт,
   метрики и статус champion/challenger.
+- Публикация retraining сверяет fingerprint QC/признаков и исходные active/shadow
+  IDs в новой короткой транзакции. Сначала общий lifecycle advisory guard,
+  затем PostgreSQL SHARE NOWAIT на sessions/quality_outcomes: они исключают
+  изменения и новые строки до commit; ordinary reads не блокируются. SQLite
+  резервирует writer через BEGIN IMMEDIATE. Все registry mutations берут общий
+  guard до row lock. CPU/файлы/MinIO не выполняются под этими блокировками.
+  Job complete с актуальными owner/generation/часами идёт после registry flush;
+  потеря lease откатывает модель и статус вместе. Изменившиеся входы/занятый
+  publication guard откладывают задачу с bounded backoff без расхода error budget.
 - Любой вывод оператору должен содержать источник (`calculated`, `calibrated`,
   `model`, `heuristic`), качество/ограничения, размер выборки и понятное объяснение.
 

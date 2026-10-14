@@ -66,7 +66,7 @@ jobs:
           POSTGRES_DB: printer_logs
           POSTGRES_USER: printer_logs
           POSTGRES_PASSWORD: ci-password
-        ports: ["5432:5432"]
+        ports: ["5432:5432", "55473:5432"]
         options: >-
           --health-cmd "pg_isready -U printer_logs"
           --health-interval 10s
@@ -85,6 +85,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.base.txt
+          pip install -r requirements.dev.txt
 
       - name: Run migrations against a real PostgreSQL
         env:
@@ -100,6 +101,25 @@ jobs:
           # repo root, so the project packages would not import.
           PYTHONPATH: .
         run: python scripts/check_migration_drift.py
+
+      - name: Check native model publication fences in an isolated database
+        env:
+          APP_ENV: test
+          PC_MODEL_PUBLICATION_PG_TEST: "1"
+          DATABASE_URL: postgresql+psycopg://printer_logs:ci-password@127.0.0.1:55473/pc_model_publication_test
+          COMPUTE_NODE_ID: ci-model-publication
+          NAS_OUTBOX_PATH: /tmp/pc-model-publication-outbox
+          OPERATOR_INSTANCE_FILE: /tmp/pc-model-publication-identity
+          STARTUP_IMPORT_ENABLED: "false"
+          LLM_PROVIDER: "null"
+          VOICE_TRANSCRIPTION_ENABLED: "false"
+        run: |
+          python - <<'PY'
+          import psycopg
+          with psycopg.connect("postgresql://printer_logs:ci-password@127.0.0.1:55473/printer_logs", autocommit=True) as db:
+              db.execute("CREATE DATABASE pc_model_publication_test")
+          PY
+          pytest checks/ml_publication/ -q -o addopts=
 
   container-smoke:
     # Actual packaged API startup, not imports from the runner's checkout.

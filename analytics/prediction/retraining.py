@@ -10,7 +10,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS, session_classification
@@ -37,6 +37,14 @@ MIN_SHADOW_LABELS = 8
 MIN_SHADOW_CLASS = 3
 MIN_BRIER_IMPROVEMENT = 0.01
 MIN_AUC_IMPROVEMENT = 0.01
+
+
+class RetrainingInputsChanged(RuntimeError):
+    """Expected concurrent input change: discard and retry, never publish."""
+
+
+class StaleModelLease(RuntimeError):
+    """Publication lost its fencing token; the entire transaction must roll back."""
 
 
 def _latest_label_evidence(db: Session) -> dict[str, dict[str, Any]]:
@@ -190,6 +198,47 @@ def prepare_retraining(db: Session) -> dict[str, Any]:
         "shadow": registry.get_shadow(MODEL_NAME, include_artifact=True),
         "active": registry.get_active(MODEL_NAME, include_artifact=True),
     }
+
+
+def retraining_input_identity(prepared: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    """Capture raw registry identities, even for an outdated active artifact."""
+    return (
+        training_fingerprint(prepared["rows"]),
+        (prepared.get("active") or {}).get("model_version_id"),
+        (prepared.get("shadow") or {}).get("model_version_id"),
+    )
+
+
+def publish_retraining(
+    db: Session, result: dict[str, Any], *,
+    expected_inputs: tuple[str, str | None, str | None],
+    job_id: str, lease_owner: str, lease_generation: int,
+) -> dict[str, Any]:
+    """Fresh dataset/registry check and final lease fence in one short UoW.
+
+    SHARE protects updates and first inserts, including QC cascades and raw
+    writers. NOWAIT avoids waiting in existing writers' different row order.
+    SQLite's lifecycle guard already reserved its single writer. No fitting,
+    raw-source access or NAS object transfer takes place under these locks.
+    """
+    registry = ModelRegistryRepository(db)
+    registry.lock_lifecycle(MODEL_NAME)
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("LOCK TABLE sessions, quality_outcomes IN SHARE MODE NOWAIT"))
+    current = prepare_retraining(db)
+    if retraining_input_identity(current) != expected_inputs:
+        raise RetrainingInputsChanged("Разметка, признаки или модели изменились; нужен новый расчёт")
+    if result["training_fingerprint"] != expected_inputs[0]:
+        raise ValueError("Результат обучения не соответствует принятому снимку входов")
+    published = persist_retraining(db, result)
+    db.flush()
+    # Registry locks/flush can outlast the original lease. Complete last and
+    # raise on refusal so neither a candidate nor a promotion survives rollback.
+    if JobsRepository(db).complete(
+        job_id, published, lease_owner=lease_owner, lease_generation=lease_generation,
+    ) is None:
+        raise StaleModelLease("Lease модели истекла или её generation больше не принадлежит worker")
+    return published
 
 
 def _binary_metrics(observed: list[int], predicted: list[float]) -> dict[str, Any]:
@@ -427,5 +476,6 @@ __all__ = [
     "MODEL_NAME", "JOB_TYPE", "enqueue_retraining", "enqueue_retraining_for_session",
     "active_model",
     "prepare_retraining", "calculate_retraining", "persist_retraining",
+    "retraining_input_identity", "publish_retraining",
     "training_fingerprint", "feature_schema_hash",
 ]
