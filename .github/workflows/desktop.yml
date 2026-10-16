@@ -167,7 +167,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install pytest
+      - run: python -m pip install pytest -r desktop/requirements-build.txt
       - name: Actual Docker freeze, switch and recovery in an isolated fixture
         env:
           COMPANION_DOCKER_CHECKS: '1'

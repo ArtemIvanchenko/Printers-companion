@@ -7,6 +7,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
 const { Updates } = require('../lib/updates.cjs');
+const importedRoot = path.resolve('/fake/imported-operator');
+const retryRoot = path.resolve('/fake/retry-operator');
 
 async function fixture(platform = 'darwin', configured = true, { updatesEnabled = true, release } = {}) {
   const handlers = new Map(); const calls = []; const dialogs = [];
@@ -426,7 +428,7 @@ test('accepted import owns the delayed native selector and excludes update check
     await importing;
   }
   assert.deepEqual(f.calls, ['adopt', 'save-binding', 'launch']);
-  assert.equal(f.binding, '/fake/imported-operator');
+  assert.equal(f.binding, importedRoot);
   assert.equal(f.runtime.root, f.binding);
   assert.equal((await f.invoke('state')).phase, 'ready');
   assert.equal((await f.invoke('state')).busy, false);
@@ -462,7 +464,7 @@ test('accepted import excludes configure and keeps the selected runtime aligned 
     await settled;
   }
   assert.equal((await settled).ok, true);
-  assert.equal(f.runtime.root, '/fake/imported-operator');
+  assert.equal(f.runtime.root, importedRoot);
   assert.equal(f.binding, f.runtime.root);
 });
 
@@ -506,7 +508,7 @@ for (const previousPhase of ['setup', 'error']) {
     assert.deepEqual(f.calls, previousCalls);
     f.actions.selectDirectory = () => ({ canceled: false, filePaths: ['/fake/retry-operator'] });
     await f.invoke('import');
-    assert.equal(f.binding, '/fake/retry-operator');
+    assert.equal(f.binding, retryRoot);
   });
 }
 
@@ -517,7 +519,7 @@ for (const failure of ['native-dialog', 'invalid-folder']) {
     else {
       f.actions.selectDirectory = () => ({ canceled: false, filePaths: ['/fake/wrong-folder'] });
       const exists = f.fakeFS.existsSync;
-      f.fakeFS.existsSync = file => file.startsWith('/fake/wrong-folder/') ? false : exists(file);
+      f.fakeFS.existsSync = file => file === path.join(path.resolve('/fake/wrong-folder'), 'docker-compose.yml') ? false : exists(file);
     }
     await assert.rejects(f.invoke('import'), failure === 'native-dialog' ? /native selector failure/ : /нет установки/);
     const state = await f.invoke('state');
@@ -526,7 +528,7 @@ for (const failure of ['native-dialog', 'invalid-folder']) {
     f.actions.selectDirectory = () => ({ canceled: false, filePaths: ['/fake/retry-operator'] });
     await f.invoke('import');
     assert.deepEqual(f.calls, ['adopt', 'save-binding', 'launch']);
-    assert.equal(f.runtime.root, '/fake/retry-operator'); assert.equal(f.binding, f.runtime.root);
+    assert.equal(f.runtime.root, retryRoot); assert.equal(f.binding, f.runtime.root);
   });
 }
 
