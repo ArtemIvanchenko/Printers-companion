@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from pathlib import Path
@@ -182,6 +183,35 @@ def mutating_commands(commands):
     return [call for call in commands.calls if ("pause" in call or "kill" in call or "up" in call)]
 
 
+def test_failed_native_stop_keeps_recovery_journal_until_launch(installation, monkeypatch):
+    updater, commands = installation
+    updater.launch(timeout=0)
+    original_run = commands.run
+
+    def fail_api_stop(arguments, **kwargs):
+        if 'compose' in arguments and 'stop' in arguments:
+            raise UpdateError('Остановка API не подтверждена')
+        return original_run(arguments, **kwargs)
+
+    monkeypatch.setattr(commands, 'run', fail_api_stop)
+    with pytest.raises(UpdateError, match='Остановка API'):
+        PackagedUpdater.stop(updater)
+    interrupted = updater.status()
+    assert interrupted['phase'] == 'switching'
+    assert commands.gate == interrupted['maintenance_token']
+    assert not commands.containers['worker']['State']['Running']
+    assert not commands.containers['watcher']['State']['Running']
+    assert commands.containers['api']['State']['Running']
+
+    monkeypatch.setattr(commands, 'run', original_run)
+    recovered = updater.launch(timeout=0)
+    assert recovered['phase'] == 'rolled_back'
+    assert recovered['current'] == interrupted['current']
+    assert recovered['maintenance_token'] is None
+    assert commands.gate is None
+    assert all(commands.containers[name]['State']['Running'] for name in ('api', 'worker', 'watcher'))
+
+
 def test_success_preserves_sources_and_storage_and_pins_digest(installation):
     updater, commands = installation
     state = updater.apply(timeout=0)
@@ -288,6 +318,156 @@ def test_native_restart_cancellation_releases_only_its_gate_and_resumes(installa
     assert all(commands.containers[name]['State']['Running'] for name in state['current']['services'])
 
 
+def test_native_restart_cancellation_resumes_and_verifies_exited_consumer_before_releasing_gate(installation):
+    updater, commands = installation
+    updater.apply(timeout=0)
+    prepared = PackagedUpdater.prepare_restart(updater)
+    selected_sha = prepared['current']['sha']
+    token = prepared['maintenance_token']
+    commands.containers['worker']['State'].update(Running=False, Paused=False)
+    commands.calls.clear()
+    verified = []
+
+    def readiness(url, sha):
+        assert commands.gate == token
+        assert updater.status()['phase'] == 'restart_ready'
+        assert all(commands.containers[name]['State']['Running'] for name in prepared['current']['services'])
+        verified.append(sha)
+        return True
+
+    updater.readiness = readiness
+    recovered = PackagedUpdater.cancel_restart(updater)
+
+    assert recovered['phase'] == 'interrupted'
+    assert recovered['current']['sha'] == selected_sha
+    assert commands.containers['worker']['State']['Running']
+    assert verified == [selected_sha]
+    assert commands.gate is None
+    start = next(index for index, call in enumerate(commands.calls) if call[-2:] == ['start', 'id-worker'])
+    release = next(index for index, call in enumerate(commands.calls) if _GATE_PROGRAM in call and call[-2] == 'release')
+    assert start < release
+    assert not mutating_commands(commands)
+
+
+@pytest.mark.parametrize('failure', ['start_failure', 'worker_stays_exited', 'wrong_image', 'readiness'])
+def test_native_restart_failed_restore_preserves_gate_and_retryable_journal(installation, monkeypatch, failure):
+    updater, commands = installation
+    updater.apply(timeout=0)
+    prepared = PackagedUpdater.prepare_restart(updater)
+    token = prepared['maintenance_token']
+    current = deepcopy(prepared['current'])
+    image = commands.containers['worker']['Image']
+    commands.containers['worker']['State'].update(Running=False, Paused=False)
+    commands.calls.clear()
+    run = commands.run
+
+    def failed_start(arguments, **kwargs):
+        if arguments[-2:] == ['start', 'id-worker']:
+            commands.calls.append(list(arguments))
+            if failure == 'start_failure':
+                raise UpdateError('exact consumer start failed')
+            return ''  # Docker success without a running consumer is not proof.
+        return run(arguments, **kwargs)
+
+    if failure in {'start_failure', 'worker_stays_exited'}:
+        monkeypatch.setattr(commands, 'run', failed_start)
+    elif failure == 'wrong_image':
+        commands.containers['worker']['Image'] = 'sha256:unexpected-version'
+    else:
+        updater.readiness = lambda url, sha: False
+    verify = updater._verify
+    monkeypatch.setattr(updater, '_verify', lambda snapshot, options, timeout: verify(snapshot, options, timeout=0))
+
+    with pytest.raises(UpdateError):
+        PackagedUpdater.cancel_restart(updater)
+
+    saved = updater.status()
+    assert saved['phase'] == 'restart_ready'
+    assert saved['current'] == current
+    assert saved['maintenance_token'] == token == commands.gate
+    assert not any(_GATE_PROGRAM in call and call[-2] == 'release' for call in commands.calls)
+    assert not mutating_commands(commands)
+    if failure == 'wrong_image':
+        assert not any('start' in call for call in commands.calls)
+    monkeypatch.setattr(commands, 'run', run)
+    commands.containers['worker']['Image'] = image
+    updater.readiness = lambda url, sha: sha == current['sha']
+
+    recovered = PackagedUpdater.cancel_restart(updater)
+    assert recovered['phase'] == 'interrupted'
+    assert recovered['current'] == current
+    assert commands.gate is None
+    assert commands.containers['worker']['State']['Running']
+
+
+@pytest.mark.parametrize('failure', ['api_status', 'schema', 'sha'])
+def test_native_restart_cancellation_checks_current_readiness_contract_before_gate_release(installation, monkeypatch, failure):
+    updater, commands = installation
+    updater.apply(timeout=0)
+    prepared = PackagedUpdater.prepare_restart(updater)
+    token = prepared['maintenance_token']
+    healthy = {'status': 'ready', 'build': {'git_sha': prepared['current']['sha']},
+               'checks': {name: True for name in ('database', 'schema', 'redis', 'minio', 'minio_buckets')}}
+    evidence = deepcopy(healthy)
+    if failure == 'api_status':
+        evidence['status'] = 'unavailable'
+    elif failure == 'schema':
+        evidence['checks']['schema'] = False
+    else:
+        evidence['build']['git_sha'] = OLD_SHA
+
+    def response(url, timeout):
+        assert url.endswith('/health/ready')
+        assert commands.gate == token
+        return io.BytesIO(json.dumps(evidence).encode())
+
+    monkeypatch.setattr('core.updating.runtime.urlopen', response)
+    updater.readiness = updater._readiness
+    verify = updater._verify
+    monkeypatch.setattr(updater, '_verify', lambda snapshot, options, timeout: verify(snapshot, options, timeout=0))
+    with pytest.raises(UpdateError, match='готовность'):
+        PackagedUpdater.cancel_restart(updater)
+    assert updater.status()['phase'] == 'restart_ready'
+    assert updater.status()['maintenance_token'] == token == commands.gate
+
+    evidence = healthy
+    recovered = PackagedUpdater.cancel_restart(updater)
+    assert recovered['phase'] == 'interrupted'
+    assert recovered['current']['sha'] == healthy['build']['git_sha']
+    assert commands.gate is None
+
+
+@pytest.mark.parametrize('phase', ['restart_ready', 'committed'])
+def test_recovery_preserves_journal_token_when_gate_release_has_a_foreign_owner(installation, phase):
+    updater, commands = installation
+    updater.apply(timeout=0)
+    prepared = PackagedUpdater.prepare_restart(updater)
+    token = prepared['maintenance_token']
+    current = deepcopy(prepared['current'])
+    if phase == 'committed':
+        updater._unfreeze(prepared)
+        updater._save(prepared, phase)
+    commands.gate = 'foreign-owner'
+
+    with pytest.raises(UpdateError, match='владелец|обслуживания'):
+        if phase == 'restart_ready':
+            PackagedUpdater.cancel_restart(updater)
+        else:
+            updater.launch(timeout=0)
+
+    saved = updater.status()
+    assert saved['phase'] == phase
+    assert saved['current'] == current
+    assert saved['maintenance_token'] == token
+    assert commands.gate == 'foreign-owner'
+    # The foreign owner releases its own marker; our journal stays retryable.
+    commands.gate = None
+    recovered = PackagedUpdater.cancel_restart(updater) if phase == 'restart_ready' else updater.launch(timeout=0)
+    assert recovered['phase'] == ('interrupted' if phase == 'restart_ready' else 'completed')
+    assert recovered['current'] == current
+    assert recovered['maintenance_token'] is None
+
+
 def test_crash_after_native_restart_preparation_is_recovered_on_launch(installation):
     updater, commands = installation
     updater.apply(timeout=0)
@@ -372,6 +552,169 @@ def test_failed_stop_cleanup_keeps_recoverable_journal(installation, monkeypatch
     assert recovered['phase'] == 'interrupted'
     assert not commands.gate
     assert not any(item['State']['Paused'] for item in commands.containers.values())
+
+
+@pytest.mark.parametrize('action', ['prepare_restart', 'stop', 'apply', 'rollback'])
+@pytest.mark.parametrize('error_type', [UpdateError, KeyboardInterrupt])
+def test_abort_quiesce_restores_selected_runtime_before_releasing_gate(installation, monkeypatch, action, error_type):
+    updater, commands = installation
+    if action != 'apply':
+        updater.apply(timeout=0)
+    selected_sha = OLD_SHA if action == 'apply' else NEW_SHA
+    original_images = {name: item['Image'] for name, item in commands.containers.items()}
+    commands.calls.clear()
+    run = commands.run
+    pause_error = error_type('Cannot pause exited worker')
+
+    def exited_worker(arguments, **kwargs):
+        if arguments[-2:] == ['pause', 'id-worker']:
+            commands.calls.append(list(arguments))
+            commands.containers['worker']['State'].update(Running=False, Paused=False)
+            raise pause_error
+        return run(arguments, **kwargs)
+
+    monkeypatch.setattr(commands, 'run', exited_worker)
+    verified = []
+
+    def readiness(url, sha):
+        state = updater.status()
+        assert state['phase'] == 'quiescing'
+        assert state['maintenance_token'] == commands.gate
+        assert commands.gate is not None
+        assert all(commands.containers[name]['State']['Running'] for name in state['current']['services'])
+        verified.append(sha)
+        return True
+
+    updater.readiness = readiness
+    verify = updater._verify
+    timeouts = []
+
+    def bounded_verify(snapshot, options, timeout):
+        timeouts.append(timeout)
+        return verify(snapshot, options, timeout=0)
+
+    monkeypatch.setattr(updater, '_verify', bounded_verify)
+    with pytest.raises(error_type) as caught:
+        if action in {'apply', 'rollback'}:
+            getattr(updater, action)(timeout=0)
+        else:
+            getattr(PackagedUpdater, action)(updater)
+
+    assert caught.value is pause_error  # successful cleanup preserves the rejection
+    state = updater.status()
+    assert state['phase'] == 'blocked'
+    assert state['current']['sha'] == selected_sha
+    assert state['candidate'] is None
+    assert state['frozen'] == []
+    assert state['maintenance_token'] is None
+    assert commands.gate is None
+    assert commands.containers['worker']['State']['Running']
+    assert not any(item['State']['Paused'] for item in commands.containers.values())
+    assert verified == [selected_sha]
+    assert timeouts == [0 if action in {'apply', 'rollback'} else 180]
+    assert {name: item['Image'] for name, item in commands.containers.items()} == original_images
+    start = next(index for index, call in enumerate(commands.calls) if call[-2:] == ['start', 'id-worker'])
+    release = next(index for index, call in enumerate(commands.calls) if _GATE_PROGRAM in call and call[-2] == 'release')
+    assert start < release
+    assert not any('kill' in call or 'stop' in call or 'up' in call for call in commands.calls)
+    assert PackagedUpdater.cancel_restart(updater)['phase'] == 'blocked'
+
+
+def test_abort_restart_ready_recovers_before_marking_blocked(installation):
+    updater, commands = installation
+    updater.apply(timeout=0)
+    state = PackagedUpdater.prepare_restart(updater)
+    token = state['maintenance_token']
+    commands.containers['worker']['State'].update(Running=False, Paused=False)
+    commands.calls.clear()
+    verified = []
+
+    def readiness(url, sha):
+        assert updater.status()['phase'] == 'restart_ready'
+        assert commands.gate == token
+        verified.append(sha)
+        return True
+
+    updater.readiness = readiness
+    updater._abort_quiesce(state, options=updater._options(), timeout=0, error='restart rejected')
+
+    assert verified == [NEW_SHA]
+    assert state['phase'] == 'blocked'
+    assert state['error'] == 'restart rejected'
+    assert state['maintenance_token'] is None
+    assert commands.gate is None
+    assert commands.containers['worker']['State']['Running']
+    assert not any(item['State']['Paused'] for item in commands.containers.values())
+    assert not mutating_commands(commands)
+
+
+@pytest.mark.parametrize('action', ['prepare_restart', 'stop'])
+@pytest.mark.parametrize('failure', ['start_failure', 'worker_stays_exited', 'wrong_image', 'readiness'])
+def test_abort_quiesce_failed_restore_keeps_gate_for_cancel_retry(installation, monkeypatch, action, failure):
+    updater, commands = installation
+    updater.apply(timeout=0)
+    current = deepcopy(updater.status()['current'])
+    worker_image = commands.containers['worker']['Image']
+    commands.calls.clear()
+    run = commands.run
+
+    def failed_recovery(arguments, **kwargs):
+        if arguments[-2:] == ['pause', 'id-worker']:
+            commands.calls.append(list(arguments))
+            commands.containers['worker']['State'].update(Running=False, Paused=False)
+            if failure == 'wrong_image':
+                commands.containers['worker']['Image'] = 'sha256:unexpected-version'
+            raise UpdateError('Cannot pause exited worker')
+        if arguments[-2:] == ['start', 'id-worker'] and failure in {'start_failure', 'worker_stays_exited'}:
+            commands.calls.append(list(arguments))
+            if failure == 'start_failure':
+                raise UpdateError('exact consumer start failed')
+            return ''
+        return run(arguments, **kwargs)
+
+    monkeypatch.setattr(commands, 'run', failed_recovery)
+    updater.readiness = lambda url, sha: failure != 'readiness'
+    verify = updater._verify
+    monkeypatch.setattr(updater, '_verify', lambda snapshot, options, timeout: verify(snapshot, options, timeout=0))
+    with pytest.raises(UpdateError):
+        getattr(PackagedUpdater, action)(updater)
+
+    state = updater.status()
+    token = state['maintenance_token']
+    assert state['phase'] == 'quiescing'
+    assert state['current'] == current
+    assert token is not None and token == commands.gate
+    assert not any(_GATE_PROGRAM in call and call[-2] == 'release' for call in commands.calls)
+    with pytest.raises(UpdateError):
+        PackagedUpdater.cancel_restart(updater)
+    assert updater.status()['phase'] == 'quiescing'
+    assert updater.status()['maintenance_token'] == token == commands.gate
+
+    monkeypatch.setattr(commands, 'run', run)
+    commands.containers['worker']['Image'] = worker_image
+    updater.readiness = lambda url, sha: sha == current['sha']
+    recovered = PackagedUpdater.cancel_restart(updater)
+    assert recovered['phase'] == 'interrupted'
+    assert recovered['current'] == current
+    assert commands.containers['worker']['State']['Running']
+    assert commands.gate is None
+    assert not any('kill' in call or 'stop' in call or 'up' in call for call in commands.calls)
+
+
+def test_abort_preparation_cleanup_does_not_resume_or_load_options(installation, monkeypatch):
+    updater, commands = installation
+    updater.apply(timeout=0)
+    state = updater.status()
+    updater._save(state, 'preparing', candidate=None)
+    commands.calls.clear()
+    monkeypatch.setattr(updater, '_recover', Mock(side_effect=AssertionError('preparation is not quiescing')))
+    monkeypatch.setattr(updater, '_options', Mock(side_effect=AssertionError('preparation needs no recovery options')))
+
+    updater._abort_quiesce(state, error='offline')
+
+    assert state['phase'] == 'blocked'
+    assert state['error'] == 'offline'
+    assert not commands.calls
 
 
 def test_live_storage_env_drift_never_uses_file_defaults(installation):
@@ -480,6 +823,65 @@ def test_normal_launch_starts_exact_stopped_ids_without_recreating_them(installa
     commands.calls.clear()
     updater.launch(timeout=0)
     assert any(call[-2:] == ['start', 'id-worker'] for call in commands.calls)
+    assert not mutating_commands(commands)
+
+
+@pytest.mark.parametrize('failure', ['missing', 'exited_after_start'])
+def test_first_launch_cannot_register_ready_without_declared_estimator(installation, monkeypatch, failure):
+    updater, commands = installation
+    estimator = commands.containers['estimator']
+    if failure == 'missing':
+        del commands.containers['estimator']
+    else:
+        estimator['State']['Running'] = False
+        original_run = commands.run
+
+        def exits_after_start(arguments, **kwargs):
+            result = original_run(arguments, **kwargs)
+            if 'start' in arguments:
+                estimator['State']['Running'] = False
+            return result
+
+        monkeypatch.setattr(commands, 'run', exits_after_start)
+    with pytest.raises(UpdateError, match='сервис'):
+        updater.launch(timeout=0)
+    assert not updater.status().get('current')
+    assert not mutating_commands(commands)
+    assert commands.containers['api']['State']['Running']
+    if failure == 'missing':
+        commands.containers['estimator'] = estimator
+    else:
+        monkeypatch.setattr(commands, 'run', original_run)
+    restored = updater.launch(timeout=0)
+    assert restored['phase'] == 'current'
+    assert 'estimator' in restored['current']['services']
+    assert commands.containers['estimator']['State']['Running']
+
+
+def test_saved_incomplete_service_list_does_not_bypass_readiness(installation):
+    updater, commands = installation
+    state = updater.launch(timeout=0)
+    state['current']['services'].remove('estimator')
+    updater._save(state, 'current')
+    del commands.containers['estimator']
+    commands.calls.clear()
+    with pytest.raises(UpdateError, match='сервис'):
+        updater.launch(timeout=0)
+    assert updater.status()['current'] == state['current']
+    assert not mutating_commands(commands)
+
+
+@pytest.mark.parametrize('configuration', ['legacy_absent', 'explicitly_disabled'])
+def test_readiness_does_not_require_services_outside_enabled_configuration(installation, configuration):
+    updater, commands = installation
+    del commands.containers['estimator']
+    if configuration == 'legacy_absent':
+        del commands.before['services']['estimator']
+    else:
+        commands.before['services']['estimator']['deploy'] = {'replicas': 0}
+    state = updater.launch(timeout=0)
+    assert state['phase'] == 'current'
+    assert 'estimator' not in state['current']['services']
     assert not mutating_commands(commands)
 
 

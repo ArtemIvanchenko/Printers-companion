@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta, timezone
+import time
+
+from sqlalchemy import event
 
 from core.config.settings import Settings
 from domain.services.importing.requests import prepare_import_candidate, publish_import_candidate
 from domain.enums.common import ImportJobStatus
 from domain.models.sessions import ImportJob
 from domain.services.import_jobs import detect_import_candidate
-from storage.db.session import SessionLocal
+from storage.db.session import SessionLocal, engine
 from storage.repositories.import_jobs import ImportJobsRepository
 
 
@@ -132,6 +135,51 @@ def test_import_heartbeat_is_owner_and_generation_fenced(tmp_path):
         if lease_until.tzinfo is None:
             lease_until = lease_until.replace(tzinfo=timezone.utc)
         assert lease_until == now + timedelta(seconds=130)
+
+
+def test_import_heartbeat_rejects_lease_expiring_during_sql_read(tmp_path):
+    source = tmp_path / "late-heartbeat-batch"
+    source.mkdir()
+    (source / "time.log").write_text("x", encoding="utf-8")
+    job = _queued(source, "operator-01")
+    with SessionLocal() as db:
+        repo = ImportJobsRepository(db)
+        repo.save_import_job(job)
+        db.flush()
+        claimed = repo.claim_next_import_job(
+            owner_node_id="operator-01", lease_owner="current-worker",
+        )
+        assert claimed is not None
+        # Compress only the waiting interval, not the actual renewal logic.
+        until = datetime.now(timezone.utc) + timedelta(seconds=0.4)
+        db.get(ImportJob, job.import_job_id).lease_until = until
+        db.commit()
+
+    def delay_lease_read(connection, cursor, statement, parameters, context, many):
+        if statement.lstrip().lower().startswith("select") and "from import_jobs" in statement.lower():
+            time.sleep(max(0, (until + timedelta(seconds=0.05) - datetime.now(timezone.utc)).total_seconds()))
+
+    event.listen(engine, "before_cursor_execute", delay_lease_read)
+    try:
+        # Production heartbeats also use a fresh Session and no explicit now.
+        with SessionLocal() as db:
+            renewed = ImportJobsRepository(db).renew_import_job_lease(
+                job.import_job_id, lease_owner="current-worker",
+                lease_generation=claimed.lease_generation,
+            )
+            db.commit()
+    finally:
+        event.remove(engine, "before_cursor_execute", delay_lease_read)
+
+    with SessionLocal() as db:
+        row = db.get(ImportJob, job.import_job_id)
+        stored_until = row.lease_until
+        if stored_until.tzinfo is None:
+            stored_until = stored_until.replace(tzinfo=timezone.utc)
+        assert stored_until == until
+        assert row.lease_owner == "current-worker"
+        assert row.lease_generation == claimed.lease_generation
+    assert renewed is False
 
 
 def test_late_card_link_preserves_an_already_claimed_worker_lease(tmp_path):

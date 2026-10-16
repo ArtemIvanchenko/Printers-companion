@@ -9,9 +9,13 @@ import logging
 import math
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 
 from api.deps.repositories import get_prints_repository
-from storage.repositories.prints_repo import _PARAM_FIELDS, PrintsRepository
+from domain.models.prints import MachineParams
+from storage.repositories.prints_repo import (
+    _PARAM_FIELDS, PrintsRepository, lock_estimation_configuration,
+)
 from domain.services.estimation.inputs import (
     effective_params as effective_params,
     missing_for_estimation as missing_for_estimation,
@@ -92,7 +96,9 @@ def update_machine_params(
                 if isinstance(raw, bool):
                     raise TypeError
                 value = int(raw)
-            except (TypeError, ValueError):
+                if isinstance(raw, float) and value != raw:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
                 raise HTTPException(422, f"Поле '{key}' должно быть целым числом")
             if value < 1:
                 raise HTTPException(422, f"Поле '{key}' должно быть ≥ 1")
@@ -126,9 +132,23 @@ def update_machine_params(
     # Manually editing a correction factor or recoat time pins it: auto-calibration
     # (both scan-time and recoat — one shared lock) must not overwrite the
     # operator's value unless they explicitly unlock.
-    if ({"time_correction_by_mat", "time_correction_factor", "recoat_time_by_mat", "recoat_time_ms"} & values.keys()) \
-            and "correction_locked" not in values:
-        values["correction_locked"] = True
+    calibration_fields = {
+        "time_correction_by_mat", "time_correction_factor", "recoat_time_by_mat", "recoat_time_ms",
+    } & values.keys()
+    if calibration_fields and "correction_locked" not in values:
+        # The settings form also sends unchanged and empty calibration fields.
+        # Compare under the same writer guard used by save/calibration, and refresh
+        # any ORM-cached row after waiting for another writer.
+        lock_estimation_configuration(repo.db)
+        current = repo.db.scalar(select(MachineParams).where(MachineParams.id == 1)
+                                 .with_for_update().execution_options(populate_existing=True))
+        for key in calibration_fields:
+            previous = getattr(current, key, None)
+            if key in _DICT_FIELDS:
+                previous = previous or {}
+            if values[key] != previous:
+                values["correction_locked"] = True
+                break
 
     if not values:
         raise HTTPException(422, "Нет известных полей для обновления")

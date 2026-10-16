@@ -1,6 +1,6 @@
 """Regression coverage for the estimate application boundary and publication."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -148,6 +148,50 @@ def queued_estimate():
     return record, job
 
 
+@pytest.mark.parametrize("failure,outage", [
+    ("actual_query_bug", False), ("authentication", False), ("query_limit", False),
+    ("unknown_operational", False), ("pool_timeout", False),
+    ("connection", True), ("capacity", True),
+])
+def test_worker_sql_failure_budget_uses_availability_evidence(queued_estimate, monkeypatch, failure, outage):
+    from psycopg.errors import ConnectionFailure, InvalidPassword, StatementTooComplex, TooManyConnections
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError, TimeoutError
+    from worker.estimate_tasks import process_next_estimate
+
+    faults = {
+        "authentication": OperationalError(None, None, InvalidPassword("configuration error")),
+        "query_limit": OperationalError("SQL", None, StatementTooComplex("query limit")),
+        "unknown_operational": OperationalError("SQL", None, RuntimeError("unknown database error")),
+        "pool_timeout": TimeoutError("SQL pool timeout"),
+        "connection": OperationalError("SQL", None, ConnectionFailure("disconnect")),
+        "capacity": OperationalError(None, None, TooManyConnections("connection slots exhausted")),
+    }
+    def broken_sql(*args, **kwargs):
+        if failure == "actual_query_bug":
+            with session_scope() as db:
+                db.execute(text("SELECT missing_estimate_column FROM print_records"))
+        raise faults[failure]
+    monkeypatch.setattr("domain.services.estimation.calculation.calculate_prediction_snapshot", broken_sql)
+    record, job = queued_estimate
+    retries = 4 if outage else 3
+    for attempt in range(1, retries + 1):
+        assert process_next_estimate("availability-test-worker")
+        with session_scope() as db:
+            row = db.get(BackgroundJob, job["job_id"])
+            assert row.attempts == (0 if outage else attempt)
+            assert row.lease_generation == attempt
+            assert row.status == ("pending" if outage or attempt < 3 else "failed")
+            assert row.lease_owner is None
+            assert row.result_json == {}
+            row.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            current = PrintsRepository(db).get_print_record(record["record_id"])
+            assert current["metadata_json"] == {"keep": "operator context"}
+            assert current["revision"] == record["revision"]
+    if not outage:
+        assert not process_next_estimate("availability-test-worker")
+
+
 def _snapshot(prepared):
     from domain.services.estimation.inputs import prediction_input_hash as _prediction_input_hash
 
@@ -232,6 +276,36 @@ def test_successful_worker_preserves_context_and_saves_the_same_result(
         assert current["metadata_json"]["keep"] == "operator context"
         assert current["metadata_json"]["prediction"] == saved.result_json["prediction"]
         assert current["metadata_json"]["prediction"]["input_revision"] == record["revision"]
+
+
+def test_publication_locks_configuration_before_lease_row(queued_estimate, monkeypatch):
+    from domain.services.estimation import publication
+    from worker.estimate_tasks import process_next_estimate
+
+    observed = []
+    lock_configuration = publication.lock_estimation_configuration
+    require_lease = publication._require_lease
+
+    def lock(db):
+        observed.append("configuration")
+        return lock_configuration(db)
+
+    def fence(db, **kwargs):
+        observed.append("lease")
+        return require_lease(db, **kwargs)
+
+    monkeypatch.setattr(publication, "lock_estimation_configuration", lock)
+    monkeypatch.setattr(publication, "_require_lease", fence)
+    monkeypatch.setattr(
+        "domain.services.estimation.calculation.calculate_prediction_snapshot",
+        lambda prepared, **kwargs: _snapshot(prepared),
+    )
+    record, job = queued_estimate
+    assert process_next_estimate("publication-order-worker")
+    assert observed == ["configuration", "lease", "lease"]
+    with session_scope() as db:
+        assert db.get(BackgroundJob, job["job_id"]).status == "done"
+        assert PrintsRepository(db).get_print_record(record["record_id"])["metadata_json"]["prediction"]
 
 
 @pytest.mark.parametrize("action", ["insert", "edit", "delete", "switch"])

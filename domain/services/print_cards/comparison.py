@@ -4,22 +4,29 @@ Only shared compact timing evidence is read. Missing evidence never causes a
 raw-file parse, a wall-clock fallback, or an estimate to validate itself.
 """
 from collections import defaultdict
+from copy import deepcopy
 
 from sqlalchemy import select
 
 from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS, as_utc
+from analytics.prediction.input_quality import (
+    INPUT_REASON_RU, calibration_input_exclusion, prediction_is_current,
+)
 from analytics.prediction.timing_snapshot import (
     MANIFEST_KEY, read_timing_publication,
 )
 from analytics.prediction.timing_validation import (
     calibration_cycles_ms, calibration_timing_payloads, finite_number,
-    has_complete_layer_coverage, timing_components_ms,
+    has_complete_layer_coverage, machine_cycle_prediction_hours, timing_components_ms,
 )
 from domain.models.events import LayerSnapshot
 from domain.models.sessions import BuildSession
+from core.versioning.constants import ANALYSIS_VERSION
+from core.versioning.provenance import stable_hash
 
 
 _REASONS = {
+    **INPUT_REASON_RU,
     "no_prediction": "Нет сохранённого прогноза для сравнения.",
     "invalid_prediction": "Сохранённое время прогноза некорректно; нужен новый расчёт.",
     "no_session": "К карточке не привязаны доступные логи.",
@@ -41,12 +48,58 @@ def _hours(seconds):
     return round(value / 3600, 3) if value is not None else None
 
 
+def _captured_configuration_hash(record):
+    snapshot = (record.get("metadata_json") or {}).get("prediction") or {}
+    inputs = snapshot.get("calculation_inputs") or {}
+    provenance = snapshot.get("provenance") or {}
+    if (not isinstance(inputs, dict) or not isinstance(provenance, dict)
+            or type(inputs.get("configuration_schema_version")) is not int
+            or inputs["configuration_schema_version"] != 1
+            or provenance.get("component") != "print-estimate"):
+        return None
+    value = provenance.get("config_hash")
+    return value if isinstance(value, str) and len(value) == 64 else None
+
+
+def _configuration_matches(record, machine_params, preset, printer_id, powder_cost):
+    """Prospective configuration only; never an admission gate for history."""
+    from analytics.prediction.layer_engine import scan_geometry_options
+    from analytics.prediction.stl_slicer import EstimationError
+    from domain.services.estimation.contracts import EstimateError
+    from domain.services.estimation.inputs import (
+        effective_params, prediction_configuration, resolve_params_with_sources,
+    )
+
+    try:
+        params, _ = resolve_params_with_sources(record, machine_params, preset)
+        params = effective_params(params)
+        params.update(scan_geometry_options(params))
+    except (EstimateError, EstimationError):
+        return None  # An invalid current configuration is not a verified match.
+    if not printer_id:
+        candidate = (record.get("metadata_json") or {}).get("printer_id")
+        printer_id = str(candidate) if candidate else None
+    if printer_id:
+        params["printer_id"] = printer_id
+    configuration = prediction_configuration({
+        "params": params, "material": record.get("material"), "printer_id": printer_id,
+        "powder_cost": record.get("powder_cost_rub_per_kg") or powder_cost,
+    })
+    return _captured_configuration_hash(record) == stable_hash(configuration)
+
+
 def comparison_summary(record, session=None, rows=()):
     """Pure projection over detached SQL values, with explicit unknown states."""
     snapshot = (record.get("metadata_json") or {}).get("prediction") or {}
-    scope = ("machine_cycle" if "machine_cycle_hours" in snapshot
+    current_prediction = prediction_is_current(snapshot, record.get("revision", 0))
+    cycle_prediction = machine_cycle_prediction_hours(snapshot)
+    scope = ("machine_cycle" if cycle_prediction is not None
              else "burn_plus_pour" if "print_hours" in snapshot else None)
-    predicted = _number(snapshot.get("machine_cycle_hours" if scope == "machine_cycle" else "print_hours"), positive=True)
+    predicted = _number(cycle_prediction if scope == "machine_cycle" else snapshot.get("print_hours"), positive=True)
+    input_exclusion = calibration_input_exclusion(
+        record.get("metadata_json") or {}, snapshot, record.get("revision", 0),
+        session_id=record.get("session_id"),
+    ) if scope is not None else None
     group = (session or {}).get("group") or {}
     analysis = group.get("analysis_snapshot") or {}
     features = analysis.get("features") or group.get("features") or {}
@@ -68,10 +121,14 @@ def comparison_summary(record, session=None, rows=()):
         status = "no_prediction"
     elif predicted is None:
         status = "invalid_prediction"
+    elif not current_prediction:
+        status = "stale_prediction"
     elif session is None:
         status = "no_session"
     elif (group.get("classification") or session.get("classification")) not in PRINT_CLASSIFICATIONS:
         status = "not_a_print"
+    elif input_exclusion:
+        status = input_exclusion
     elif publication in {"invalid", "absent", "empty", "no_time_log"} or not selected:
         status = "timing_unavailable"
     elif expected is None:
@@ -89,6 +146,7 @@ def comparison_summary(record, session=None, rows=()):
             publication == "complete"
             and group.get("timing_publication_id") == manifest.get("publication_id")
             and analysis.get("schema_version") == 1 and bool(analysis.get("analysis_id"))
+            and (analysis.get("provenance") or {}).get("analysis_version") == ANALYSIS_VERSION
         )
         usable = (
             same_generation and normal is not None
@@ -110,8 +168,8 @@ def comparison_summary(record, session=None, rows=()):
         "comparison_scope": scope,
         "comparison_status": status,
         "comparison_reason_ru": _REASONS[status],
-        "predicted_hours": round(predicted, 3) if predicted is not None else None,
-        "predicted_cost_rub": snapshot.get("cost_total_rub"),
+        "predicted_hours": round(predicted, 3) if current_prediction and predicted is not None else None,
+        "predicted_cost_rub": snapshot.get("cost_total_rub") if current_prediction else None,
         "actual_hours": round(actual, 3) if actual is not None else None,
         "actual_source": source,
         "idle_hours": _hours(explicit_pause),
@@ -133,10 +191,19 @@ def attach_plan_vs_fact(repo, records):
     """
     ids = sorted({record["session_id"] for record in records if record.get("session_id")})
     sessions, timings = {}, defaultdict(list)
+    configured = [record for record in records if _captured_configuration_hash(record)]
+    machine_params, powder_cost, presets = None, None, defaultdict(list)
     try:
+        if configured:
+            machine_params = deepcopy(repo.get_machine_params())
+            powder_cost = repo.last_powder_cost()
+            materials = sorted({str(record.get("material") or "").lower() for record in configured})
+            for preset in repo.list_active_presets_for_materials(materials):
+                presets[preset["material"]].append(preset)
         if ids:
             for row in repo.db.execute(select(
                 BuildSession.session_id, BuildSession.start_ts, BuildSession.end_ts,
+                BuildSession.printer_id,
                 BuildSession.classification,
                 BuildSession.context["runtime_payload"]["group"]["classification"].as_string().label("group_classification"),
                 BuildSession.context["runtime_payload"]["group"]["features"].label("features"),
@@ -160,4 +227,14 @@ def attach_plan_vs_fact(repo, records):
         repo.db.rollback()
     for record in records:
         sid = record.get("session_id")
+        snapshot = (record.get("metadata_json") or {}).get("prediction") or {}
+        record["prediction_is_current"] = prediction_is_current(
+            snapshot, record.get("revision", 0),
+        )
+        selected = presets.get(str(record.get("material") or "").lower(), [])
+        record["prediction_configuration_is_current"] = (
+            _configuration_matches(record, machine_params, selected[0] if selected else None,
+                                   (sessions.get(sid) or {}).get("printer_id"), powder_cost)
+            if _captured_configuration_hash(record) and len(selected) <= 1 else None
+        )
         record["summary"] = comparison_summary(record, sessions.get(sid), timings.get(sid, []))

@@ -13,22 +13,32 @@ MIN_SESSIONS = 6
 MAX_HISTORY = 30
 
 
-def _series(sessions: list[dict[str, Any]], signal: str) -> list[float]:
+def _series(sessions: list[dict[str, Any]], signal: str) -> list[float | None]:
     values = []
     for session in sessions:
         value = ((session.get("signal_stats") or {}).get(signal) or {}).get("mean")
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-            values.append(float(value))
-    return values[-MAX_HISTORY:]
+        values.append(
+            float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) else None
+        )
+    observed_positions = [index for index, value in enumerate(values) if value is not None]
+    return values[observed_positions[-MAX_HISTORY]:] if len(observed_positions) > MAX_HISTORY else values
 
 
-def _conformal_error(values: list[float]) -> tuple[float | None, int]:
+def _conformal_error(values: list[float | None]) -> tuple[float | None, int]:
     """90% rolling-origin absolute-error quantile without future leakage."""
     errors = []
     for end in range(4, len(values)):
         history = values[:end]
+        if (values[end] is None or history[-1] is None
+                or sum(value is not None for value in history) < 4):
+            continue
         slope = theil_sen_slope(history)
-        errors.append(abs(values[end] - (history[-1] + slope)))
+        if slope is None:
+            continue
+        error = abs(values[end] - (history[-1] + slope))
+        if math.isfinite(error):
+            errors.append(error)
     if len(errors) < 3:
         return None, len(errors)
     ordered = sorted(errors)
@@ -64,20 +74,29 @@ def forecast_signal_deviations(
     forecasts = []
     for signal in signals:
         values = _series(sessions, signal)
-        if len(values) < MIN_SESSIONS:
+        observed = [value for value in values if value is not None]
+        if len(observed) < MIN_SESSIONS or values[-1] is None:
             continue
         slope = theil_sen_slope(values)
+        if slope is None:
+            continue
         predicted = values[-1] + slope
+        if not math.isfinite(predicted):
+            continue
         error, error_count = _conformal_error(values)
         interval = (predicted - error, predicted + error) if error is not None else None
-        robust_z = _robust_z(predicted, values)
+        if interval is not None and not all(math.isfinite(bound) for bound in interval):
+            interval = None
+        robust_z = _robust_z(predicted, observed)
+        if robust_z is not None and not math.isfinite(robust_z):
+            robust_z = None
         threshold = alarm_thresholds.get(signal) or {}
         high, low = threshold.get("alarm_high"), threshold.get("alarm_low")
         threshold_risk = (
             (high is not None and ((interval or (predicted, predicted))[1] >= high))
             or (low is not None and ((interval or (predicted, predicted))[0] <= low))
         )
-        centre = abs(sum(values) / len(values)) or 1.0
+        centre = abs(sum(observed) / len(observed)) or 1.0
         material_drift = abs(slope) >= 0.005 * centre
         if threshold_risk:
             status = "threshold_risk"
@@ -108,7 +127,7 @@ def forecast_signal_deviations(
                 unit="среднее значение сигнала в следующей печати",
                 source=PredictionSource.MODEL,
                 interval=(round(interval[0], 6), round(interval[1], 6)) if interval else None,
-                sample_size=len(values),
+                sample_size=len(observed),
                 warnings=warning,
                 explanation=(
                     "Прогноз Тейла–Сена на один шаг; диапазон получен из "

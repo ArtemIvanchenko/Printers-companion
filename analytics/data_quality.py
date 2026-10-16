@@ -1,8 +1,9 @@
 """Data-reliability assessment for an imported print session.
 
 A companion system must *trust* its inputs before it analyses them: if the
-printer skipped layers, the recording was interrupted, or a sensor froze, the
-downstream charts and predictions are built on sand. This module runs a set of
+recording contains missing layers or invalid measurements, downstream charts
+and predictions need those limitations. A constant signal alone does not
+identify a sensor failure. This module runs a set of
 cheap, pure checks over the *already-parsed* session data (no re-reading of raw
 logs) and produces a 0..100 ``data_quality_score`` plus an explicit list of
 issues an operator can act on.
@@ -31,8 +32,8 @@ _EXPECTED_FAMILIES = {
 
 # Thresholds (deliberately conservative so we flag real problems, not noise).
 _LAYER_GAP_FRACTION = 0.02      # >2% of layers missing inside the printed range
-_TIME_GAP_MINUTES = 30.0        # a recording gap larger than this is suspicious
-_SENSOR_STUCK_MIN_N = 50        # need enough points before "std==0" means frozen
+_TIME_GAP_MINUTES = 30.0        # descriptive event intervals, not telemetry gaps
+_SENSOR_CONSTANT_MIN_N = 50     # describe observed constancy, not a sensor failure
 _SENSOR_DROPOUT_FRACTION = 0.5  # signal with <50% of the median sample count
 
 # Severity → score penalty (points subtracted from 100). Counts scale some of
@@ -40,8 +41,6 @@ _SENSOR_DROPOUT_FRACTION = 0.5  # signal with <50% of the median sample count
 _PENALTY = {
     "missing_log_family": 15.0,
     "layer_gaps":         20.0,
-    "time_gaps":          12.0,
-    "sensor_stuck":       10.0,
     "sensor_dropout":     10.0,
     "parse_warnings":      8.0,
 }
@@ -55,11 +54,7 @@ def _issue(kind: str, severity: str, detail: str, count: int = 1, **extra: Any) 
     return {"kind": kind, "severity": severity, "detail": detail, "count": count, **extra}
 
 
-def _check_layer_continuity(events: list[Any]) -> dict[str, Any] | None:
-    layers = sorted({
-        e.layer for e in events
-        if isinstance(getattr(e, "layer", None), int) and e.layer >= 0
-    })
+def _check_layer_continuity(layers: list[int]) -> dict[str, Any] | None:
     if len(layers) < 2:
         return None
     span = layers[-1] - layers[0] + 1
@@ -93,8 +88,7 @@ def _print_event_times(files: list[Any]) -> list[datetime]:
     return sorted(times)
 
 
-def _check_time_continuity(files: list[Any]) -> dict[str, Any] | None:
-    times = _print_event_times(files)
+def _check_time_continuity(times: list[datetime]) -> dict[str, Any] | None:
     if len(times) < 3:
         return None
     threshold = _TIME_GAP_MINUTES * 60.0
@@ -108,16 +102,16 @@ def _check_time_continuity(files: list[Any]) -> dict[str, Any] | None:
     worst = max(gaps, key=lambda g: g[2])
     worst_min = worst[2] / 60.0
     return _issue(
-        "time_gaps", "high" if worst_min > 120 else "medium",
-        f"{len(gaps)} разрыв(ов) в записи > {_TIME_GAP_MINUTES:.0f} мин "
-        f"(макс. {worst_min:.0f} мин) — возможен обрыв логирования",
+        "event_gaps", "info",
+        f"{len(gaps)} интервал(ов) между событиями > {_TIME_GAP_MINUTES:.0f} мин "
+        f"(макс. {worst_min:.0f} мин); это не подтверждает потерю измерений датчиков",
         count=len(gaps), max_gap_min=round(worst_min, 1),
         gap_start=worst[0].isoformat(), gap_end=worst[1].isoformat(),
     )
 
 
 def _check_sensors(signal_stats: dict[str, Any]) -> list[dict[str, Any]]:
-    """Frozen (std==0) and dropped-out (too few samples) sensors."""
+    """Observed constancy and missing samples are different kinds of evidence."""
     issues: list[dict[str, Any]] = []
     if not signal_stats:
         return issues
@@ -125,26 +119,27 @@ def _check_sensors(signal_stats: dict[str, Any]) -> list[dict[str, Any]]:
     counts = [s.get("n", 0) for s in signal_stats.values() if isinstance(s.get("n"), int)]
     median_n = median(counts) if counts else 0
 
-    stuck: list[str] = []
+    constant: list[str] = []
     dropped: list[str] = []
     for sig, s in signal_stats.items():
         n = s.get("n", 0)
         std = s.get("std")
-        if isinstance(n, int) and n >= _SENSOR_STUCK_MIN_N and isinstance(std, (int, float)) and std == 0:
-            stuck.append(sig)
-        elif median_n and isinstance(n, int) and n < median_n * _SENSOR_DROPOUT_FRACTION:
+        if isinstance(n, int) and n >= _SENSOR_CONSTANT_MIN_N and isinstance(std, (int, float)) and std == 0:
+            constant.append(sig)
+        if median_n and isinstance(n, int) and n < median_n * _SENSOR_DROPOUT_FRACTION:
             dropped.append(sig)
 
-    if stuck:
+    if constant:
         issues.append(_issue(
-            "sensor_stuck", "medium",
-            f"Датчик(и) с постоянным значением (возможно завис): {', '.join(sorted(stuck))}",
-            count=len(stuck), signals=sorted(stuck),
+            "constant_signals", "info",
+            f"Постоянное значение каналов: {', '.join(sorted(constant))}; "
+            "само по себе не подтверждает зависание датчика",
+            count=len(constant), signals=sorted(constant),
         ))
     if dropped:
         issues.append(_issue(
             "sensor_dropout", "medium",
-            f"Датчик(и) с резко меньшим числом отсчётов (возможен обрыв): "
+            f"Канал(ы) с резко меньшим числом пригодных отсчётов: "
             f"{', '.join(sorted(dropped))}",
             count=len(dropped), signals=sorted(dropped),
         ))
@@ -159,17 +154,22 @@ def _check_parse_diagnostics(files: list[Any]) -> dict[str, Any] | None:
         pr = getattr(f, "parse_result", None)
         if not pr:
             continue
+        malformed += pr.malformed_row_count
         for table in pr.tables:
-            malformed += getattr(table, "malformed_rows", 0) or 0
             unknown_cols.update(getattr(table, "unknown_columns", []) or [])
         for diag in pr.diagnostics:
             if getattr(diag, "severity", "") in ("warning", "error"):
-                warn_codes.add(getattr(diag, "code", "") or "unknown")
+                code = getattr(diag, "code", "") or "unknown"
+                # The aggregate is a storage marker for the same row finding,
+                # not another category of unreliable data.
+                if code == "malformed_stateflow_rows_aggregated":
+                    code = "malformed_stateflow_row"
+                warn_codes.add(code)
     if not malformed and not unknown_cols and not warn_codes:
         return None
     parts = []
     if malformed:
-        parts.append(f"{malformed} битых строк")
+        parts.append(f"{malformed} строк с нарушенным форматом или значениями")
     if unknown_cols:
         parts.append(f"{len(unknown_cols)} неизвестных колонок")
     if warn_codes:
@@ -213,22 +213,28 @@ def assess_session_quality(
 ) -> dict[str, Any]:
     """Assess input-data reliability for one grouped session.
 
-    Returns ``{score, grade, issues, checks}`` where ``score`` is 0..100
-    (100 = clean), ``issues`` is a list of actionable problems, and ``checks``
+    Returns ``{score, grade, issues, diagnostics, checks}`` where ``score`` is
+    0..100 when observations exist (100 = no penalized findings), or None when
+    there is nothing to assess. ``issues`` lists actionable problems; ``checks``
     records which checks ran (for transparency / debugging).
     """
     signal_stats = signal_stats or {}
     issues: list[dict[str, Any]] = []
+    layers = sorted({event.layer for event in events
+                     if isinstance(getattr(event, "layer", None), int) and event.layer >= 0})
+    event_times = _print_event_times(files)
 
     for check in (
         _check_missing_families(files),
-        _check_layer_continuity(events),
-        _check_time_continuity(files),
+        _check_layer_continuity(layers),
+        _check_time_continuity(event_times),
         _check_parse_diagnostics(files),
     ):
         if check:
             issues.append(check)
     issues.extend(_check_sensors(signal_stats))
+    diagnostics = [item for item in issues if item["severity"] == "info"]
+    issues = [item for item in issues if item["severity"] != "info"]
 
     # Score: subtract capped penalties. A count amplifies the base penalty up to
     # 2x so several occurrences hurt more than one, but a single kind can't sink
@@ -238,17 +244,21 @@ def assess_session_quality(
         base = _PENALTY.get(issue["kind"], 5.0)
         amp = min(2.0, 1.0 + math.log10(max(1, issue.get("count", 1))))
         total_penalty += base * amp
-    score = round(max(0.0, 100.0 - total_penalty), 1)
-    grade = "good" if score >= 85 else "fair" if score >= 60 else "poor"
+    has_sensor_samples = any(isinstance(stats.get("n"), int) and stats["n"] > 0
+                             for stats in signal_stats.values())
+    has_observations = bool(layers or event_times or has_sensor_samples)
+    score = round(max(0.0, 100.0 - total_penalty), 1) if has_observations else None
+    grade = "unknown" if score is None else "good" if score >= 85 else "fair" if score >= 60 else "poor"
 
     return {
         "score": score,
         "grade": grade,
         "issues": issues,
+        "diagnostics": diagnostics,
         "checks": {
-            "layers": True,
-            "time": True,
-            "sensors": bool(signal_stats),
+            "layers": len(layers) >= 2,
+            "time": len(event_times) >= 3,
+            "sensors": has_sensor_samples,
             "parse_diagnostics": True,
             "missing_families": True,
         },

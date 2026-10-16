@@ -6,8 +6,8 @@ carry a full provenance chain.
 """
 from core.versioning.version import APP_VERSION  # re-exported for convenience
 
-ANALYSIS_VERSION = "0.5.2"
-LOG_INSIGHTS_VERSION = "log-insights-1.0.4"
+ANALYSIS_VERSION = "0.5.11"
+LOG_INSIGHTS_VERSION = "log-insights-1.0.11"
 CAUSAL_MODEL_VERSION = "0.1.0"
 RULE_PACK_VERSION = "m350-rules-0.1.0"
 SIGNAL_DICTIONARY_VERSION = "m350-signals-0.3.0"

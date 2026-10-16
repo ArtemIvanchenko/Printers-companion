@@ -15,13 +15,35 @@ MAX_MEMBER_BYTES = 6 * 1024**3
 MAX_MEMBERS = 10000
 
 
+def _logical_member_name(member) -> str:
+    # Some ZIP writers store UTF-8 bytes without setting the UTF-8 flag. Recover
+    # only a strict UTF-8 roundtrip; otherwise retain the original CP437 name.
+    # Keep ZipInfo's native/original names intact for archive reading. Source
+    # provenance retains its native filename, not this inferred logical name.
+    if member.flag_bits & 0x800 or member.filename != member.orig_filename:
+        return member.filename
+    # Explicit Unicode Path metadata belongs to zipfile's interpretation, not
+    # this recovery rule (including when its Unicode name equals the raw name).
+    extra = member.extra
+    while len(extra) >= 4:
+        if int.from_bytes(extra[:2], 'little') == 0x7075:
+            return member.filename
+        size = int.from_bytes(extra[2:4], 'little')
+        extra = extra[4 + size:]
+    try:
+        return member.filename.encode('cp437').decode('utf-8')
+    except UnicodeError:
+        pass
+    return member.filename
+
+
 def validated_members(archive, *, max_bytes=MAX_EXPANDED_BYTES):
     members = archive.infolist()
     if len(members) > MAX_MEMBERS or sum(m.file_size for m in members) > max_bytes:
         raise ValueError('Архив превышает допустимый объём распаковки')
     names = set()
     for member in members:
-        path = PurePosixPath(member.filename.replace('\\', '/'))
+        path = PurePosixPath(_logical_member_name(member).replace('\\', '/'))
         mode = member.external_attr >> 16
         if (path.is_absolute() or '..' in path.parts or not path.parts
                 or ':' in path.parts[0] or stat.S_ISLNK(mode)):
@@ -36,6 +58,7 @@ def validated_members(archive, *, max_bytes=MAX_EXPANDED_BYTES):
 
 def expand_log_inputs(
     source: Path, target: Path, source_objects: dict, *, lease_check=lambda: None,
+    source_files: list[Path] | None = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """Return object references, member paths and SHA-256 of the copied logs.
 
@@ -95,19 +118,21 @@ def expand_log_inputs(
         finally:
             temp.unlink(missing_ok=True)
 
-    inputs = sorted(iter_source_files(source))
+    inputs = sorted(iter_source_files(source)) if source_files is None else source_files
     for path in inputs:
         lease_check()
         if path.is_symlink():
             raise ValueError('Символические ссылки в наборе импорта не разрешены')
         if not path.is_file():
+            if source_files is not None:
+                raise FileNotFoundError(f"Зафиксированный исходный файл недоступен: {path}")
             continue
         relative = path.name if source.is_file() else path.relative_to(source).as_posix()
         uri = source_objects.get(relative) or source_objects.get('__source_archive__')
         if path.suffix.lower() == '.zip':
             with zipfile.ZipFile(path) as archive:
                 for member in validated_members(archive):
-                    name = PurePosixPath(member.filename.replace('\\', '/')).name
+                    name = PurePosixPath(_logical_member_name(member).replace('\\', '/')).name
                     if member.is_dir() or name.startswith('._'):
                         continue
                     if name.lower().endswith('.zip'):

@@ -28,8 +28,9 @@ from domain.services.estimation.inputs import require_local_print
 from domain.services.import_jobs import detect_import_candidate, snapshot_source
 from domain.services.print_cards.contracts import CardError
 from parsers.common.timestamps import date_hint_datetime
+from storage.db.session import is_database_unavailable
 from storage.repositories.import_jobs import ImportJobsRepository
-from storage.repositories.prints_repo import PrintsRepository
+from storage.repositories.prints_repo import PrintsRepository, card_link_fingerprint
 from storage.repositories.runtime import RuntimeRepository
 
 logger = logging.getLogger(__name__)
@@ -178,11 +179,23 @@ def upload_log_batch(
     """
     batch: Path | None = None
     receipt: Path | None = None
+    receipt_payload: dict | None = None
+    link_intent = None
     retain = False
     try:
         try:
             if record_id is not None:
-                _require_card(repo, record_id, settings)
+                record = _require_card(repo, record_id, settings)
+                link_intent = {
+                    "action": "card_link_intent_captured", "actor": "browser_upload",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "details": {
+                        "record_id": record_id, "expected_session_id": record.get("session_id"),
+                        "expected_link_fingerprint": card_link_fingerprint(
+                            record.get("session_id"), record.get("metadata_json") or {},
+                        ),
+                    },
+                }
         finally:
             repo.db.rollback()
         destination = Path(settings.raw_logs_container_path)
@@ -259,24 +272,24 @@ def upload_log_batch(
             file_snapshot=snapshot_source(batch),
         )
         result.job.checksum_manifest = {row["stored_name"]: row["checksum"] for row in saved}
+        if link_intent is not None:
+            result.job.audit_trail.append(link_intent)
         receipt = batch.with_name(batch.name + ".json")
-        _write_receipt(
-            receipt,
-            {
-                "schema_version": 2,
-                "state": "prepared",
-                "import_job_id": result.job.import_job_id,
-                "owner_node_id": settings.compute_node_id,
-                "print_record_id": record_id,
-                "source_path": str(batch),
-                "files": saved,
-                # Preserve the original confirmation/audit policy on recovery;
-                # changing workstation settings must not silently approve work.
-                "job": result.job.model_dump(mode="json"),
-                "notifications": [row.model_dump(mode="json") for row in result.notifications],
-                "printed_at_hint": printed_at_hint.isoformat() if printed_at_hint else None,
-            },
-        )
+        receipt_payload = {
+            "schema_version": 2,
+            "state": "prepared",
+            "import_job_id": result.job.import_job_id,
+            "owner_node_id": settings.compute_node_id,
+            "print_record_id": record_id,
+            "source_path": str(batch),
+            "files": saved,
+            # Preserve the original confirmation/audit policy on recovery;
+            # changing workstation settings must not silently approve work.
+            "job": result.job.model_dump(mode="json"),
+            "notifications": [row.model_dump(mode="json") for row in result.notifications],
+            "printed_at_hint": printed_at_hint.isoformat() if printed_at_hint else None,
+        }
+        _write_receipt(receipt, receipt_payload)
 
         # No filesystem walking/copying while SQL is held. This is a new private
         # batch, so it cannot race a watcher's existing job for the same source.
@@ -290,6 +303,19 @@ def upload_log_batch(
         # batch for recovery; no watcher can import it without its card identity.
         if receipt is None:
             _discard_batch(batch, None)
+        if not is_database_unavailable(exc):
+            # These bytes may already be admitted (or even committed remotely),
+            # so preserve them. A SQL/constraint bug is not an offline retry.
+            if receipt is not None and receipt_payload is not None:
+                try:
+                    _write_receipt(receipt, {**receipt_payload, "recovery": {
+                        "state": "needs_attention",
+                        "error": "Ошибка регистрации в базе данных; требуется проверка оператора.",
+                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                    }})
+                except OSError:
+                    logger.warning("Could not mark failed SQL upload receipt at %s", receipt)
+            raise
         raise CardError(
             "storage_unavailable",
             "База данных недоступна. "

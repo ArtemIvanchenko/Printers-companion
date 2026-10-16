@@ -33,7 +33,8 @@
 Compose-ресурсы входят в пакет программы; секреты и журналы находятся только в
 операторской папке. Привязка существующего проекта хранит его исходный абсолютный
 путь: перенос БД, очередь NAS и старые файлы не копируются и не удаляются.
-Версия Python-host включена в сборку через PyInstaller, а не скачивается при
+Версия Python-host и публичные корневые TLS-сертификаты включены в сборку через
+PyInstaller; Python/OpenSSL/Homebrew на операторском ПК не требуются. Host не скачивается при
 каждом запуске. Терминальные скрипты остаются совместимым developer-путём.
 
 ## Ограничения безопасности
@@ -101,7 +102,31 @@ npm run dist:mac -- --arm64
 Тестовый installer сохраняет отдельный appId/userData. Подписи Developer ID /
 Authenticode пока нет; macOS/Windows могут предупредить о неизвестном разработчике.
 Нельзя просить отключить защиту системы глобально. Unsigned channel не скачивает
-и не устанавливает публичное обновление, даже если remote feed доступен.
+и не устанавливает публичное обновление автоматически, даже если remote feed
+доступен. Но по явной кнопке он действительно проверяет GitHub и предлагает
+подходящий опубликованный DMG/EXE; запуск установщика остаётся ручным.
+
+## Проверка опубликованного обновления без нового сервиса
+
+`check-release` — read-only action существующего короткоживущего host. Он
+проверяет bundled manifest, опубликованный stable tag и его точный full SHA,
+затем выбирает uploaded native asset нужной ОС/архитектуры. ZIP с исходниками,
+другая архитектура, неоднозначный installer и `target_commitish=main` не
+подменяют установщик. Test asset должен соответствовать SHA тега и существующему
+формату test-версии; это ещё не криптографическое подтверждение издателя.
+
+Команда не создаёт operator root, не читает `.env`/installation binding, не
+запускает Docker и не обращается к NAS. TLS проверяет имя хоста и сертификат;
+системное доверие дополняется bundled certifi, а не отключается. Размер ответа
+ограничен 2 MiB, HTTP timeout — 15 s; всё read-only child ограничено 120 s.
+При зависании завершается только этот собственный проверочный процесс.
+
+Main frame выбирает и открывает фиксированный GitHub URL сам; dashboard iframe
+не получает IPC, а renderer не может передать произвольный URL установщика.
+Приватный unsigned gate остаётся выключенным. `updateReady` относится только
+к штатной проверенной native-загрузке; `manualUpdateAvailable` — только к ссылке
+на installer. Оба не означают, что вычислительная часть уже переключилась.
+Новых постоянных процессов, службы обновлений и polling-демона нет.
 
 ## Как допустить полноценное развёртывание
 
@@ -134,7 +159,8 @@ Root pytest, Node boundary tests и offline Compose checks не заменяют
 
 `.github/workflows/desktop.yml` готовит отдельные unsigned установщики и smoke
 на Mac ARM, Mac Intel и Windows x64. Workflow не изменяет main и не создаёт
-Release/feed. Его наличие не означает, что удалённый CI уже выполнялся.
+Release; default test-пакеты не создают публичный feed. Signed opt-in путь
+описан ниже. Его наличие не означает, что удалённый CI уже выполнялся.
 05.10.2026 native CI выполнен на всех трёх платформах: frozen host, установщики
 и packaged IPC/window smoke прошли. Исправлены реальная Windows lock contention,
 кавычки PowerShell и GPU headless Intel smoke. Это проверочные PR-пакеты без
@@ -154,3 +180,40 @@ NAS, исходные файлы и операторская БД ради те�
 проверки — [отчёт](reviews/2026-10-01_desktop_and_refactor.md#реальное-выполнение-после-включения-docker).
 Это не установка нового native-пакета и не NAS e2e. На ARM Mac текущие готовые compute-образы остаются linux/amd64
 под эмуляцией; ARM-сборка окна не делает аналитику ARM-native.
+
+## Подготовленный подписанный канал GitHub
+
+Это release-time путь, а не новая служба на ПК оператора. Reusable desktop
+workflow принимает `signed_release`, по умолчанию `false`. Release workflow
+передаёт `true` только при repository variable `COMPANION_SIGNED_RELEASE=true`.
+Signed resources требуют совпавшего `vVERSION` тега, clean commit и verified
+operator-images того же full SHA. PR/обычный test workflow остаётся unsigned.
+
+Сертификаты настраивает разработчик в GitHub Secrets: `MAC_CSC_LINK` /
+`MAC_CSC_KEY_PASSWORD`, `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD`,
+`COMPANION_PUBLISHER_NAME`. Для Mac notarization простой поддержанный режим —
+`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`; существующий builder
+также поддерживает уже настроенные API/keychain credentials. Они доступны
+только signing step соответствующей платформы. Без нужных реквизитов builder
+отказывает; unsigned fallback вместо подписанного пакета запрещён.
+
+Builder всегда запускается с `--publish never`: он создаёт installer/feed, но
+не загружает их до завершения CI. `collect-release.cjs` в последнем release job
+проверяет три native manifest, общий full SHA/images, пять installers и реальные
+size/SHA-512 в feeds. Разные платформенные code_fingerprint разрешены, но имена
+test-installers обязаны соответствовать своему manifest. Хеши файлов считаются
+streaming, без загрузки больших пакетов целиком в RAM.
+
+Mac ARM/Intel jobs создают одинаковое имя `latest-mac.yml`; collector объединяет
+оба `files[]` в четыре DMG/ZIP записи. Перезапись одним архитектурным файлом
+недопустима. Windows остаётся в `latest.yml`; optional blockmaps, pinned images
+и SHA256SUMS публикует только финальный release job после всей native matrix,
+smoke и Docker lifecycle. Unsigned набор никогда не публикует updater feed.
+Используется уже locked js-yaml из electron-updater, без новой зависимости.
+
+Канал пока не включён/не опубликован. Фикстуры manifest/feed не имеют подписи и
+проверяют только сборочный контракт. Обязательны настоящие signed A→B на Mac
+ARM/Intel и Windows, сохранность operator root, отказ/rollback и готовность
+точного backend. Test appId/userData и public appId различны: первый переход
+выполняется отдельно через существующую привязку папки, не переносом/удалением
+данных. Сертификат и одноразовая публикация нужны разработчику, не оператору.

@@ -1,4 +1,7 @@
 """Tests for analytics.prediction.defect_risk."""
+import json
+
+import pytest
 from analytics.prediction.defect_risk import (
     MIN_CV_AUC,
     MIN_LABELS,
@@ -119,5 +122,47 @@ def test_labels_below_new_minimum_are_not_enough():
 
 def test_build_feature_row_handles_missing_fields():
     row = build_feature_row({})
-    assert row["anomaly_count"] == 0.0
+    assert all(value is None for value in row.values())
     assert row["readiness"] is None  # absent → None, not crash
+
+
+@pytest.mark.parametrize("group", [
+    {},
+    {"features": {"data_quality_score": 100}},
+    {"features": {"data_quality_score": 0}},
+    {"features": {"process_anomaly_count": 0, "atmosphere_readiness": 100},
+     "telemetry_evidence": {"sample_count": 0}},
+])
+def test_missing_process_observations_are_not_low_defect_risk(group):
+    result = predict_defect_risk(group)
+    assert result["risk"] is None
+    assert result["grade"] == "unknown"
+    assert result["prediction"]["value"] is None
+    assert result["prediction"]["warnings"]
+    json.dumps(result, allow_nan=False)
+
+
+def test_unknown_drift_does_not_dilute_known_atmosphere_risk():
+    group = {"features": {"atmosphere_readiness": 20}}
+    result = predict_defect_risk(group)
+    assert result["risk"] == pytest.approx(0.8)
+    assert result["grade"] == "high"
+    assert result["prediction"]["warnings"]
+
+
+def test_measured_zero_features_remain_zero_not_missing():
+    row = build_feature_row(_group(readiness=0, anomalies=0, burn_slope=0, dq=0,
+                                  o2_mean=0, o2_std=0, duration=0, layers=0))
+    assert all(value == 0 for value in row.values())
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), True, 10 ** 1000],
+                         ids=["nan", "inf", "negative-inf", "boolean", "overflow"])
+def test_invalid_numbers_are_unknown_in_every_feature(value):
+    group = _group(readiness=value, anomalies=value, burn_slope=value, dq=value,
+                   o2_mean=value, o2_std=value, duration=value, layers=value)
+    row = build_feature_row(group)
+    assert all(item is None for item in row.values())
+    result = predict_defect_risk(group)
+    assert result["risk"] is None
+    json.dumps(result, allow_nan=False)

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from psycopg.errors import ConnectionFailure
 from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -40,7 +41,7 @@ def recoverable(tmp_path, monkeypatch):
         def uncertain(self):
             if acknowledgement_lost:
                 original_commit(self)
-            raise OperationalError("COMMIT", {}, RuntimeError("NAS disconnect"))
+            raise OperationalError("COMMIT", {}, ConnectionFailure("NAS disconnect"))
         with monkeypatch.context() as patch:
             patch.setattr(Session, "commit", uncertain)
             with SessionLocal() as db, pytest.raises(CardError):
@@ -84,6 +85,8 @@ def test_unknown_commit_is_looked_up_before_hash_and_preserves_live_lease(recove
         job.lease_owner = "alive-worker"
         job.lease_generation = 9
         job.lease_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+        job.execution_attempts = 4
+        job.stability_check_attempts = 2
     monkeypatch.setattr(recovery, "_verify_batch", lambda *a: pytest.fail("already registered batch was hashed"))
     assert recovery.recover_upload_receipt(path, settings=get_settings())["state"] == "registered"
     with SessionLocal() as db:
@@ -91,6 +94,20 @@ def test_unknown_commit_is_looked_up_before_hash_and_preserves_live_lease(recove
         assert job.lease_owner == "alive-worker"
         assert job.lease_generation == 9
         assert job.status == ImportJobStatus.importing
+        assert job.execution_attempts == 4
+        assert job.stability_check_attempts == 2
+
+
+@pytest.mark.parametrize("field", ["execution_attempts", "stability_check_attempts", "last_stability_check_at"])
+def test_recovery_rejects_nonpristine_job_receipt_without_resetting_its_history(recoverable, field):
+    path, receipt, _ = recoverable()
+    receipt["job"][field] = datetime.now(timezone.utc).isoformat() if field == "last_stability_check_at" else 1
+    replace_receipt(path, receipt)
+
+    assert recovery.recover_upload_receipt(path, settings=get_settings())["state"] == "needs_attention"
+    with SessionLocal() as db:
+        assert db.scalars(select(ImportJob)).all() == []
+    assert (Path(receipt["source_path"]) / "17.07.2026_time.log").read_bytes() == b"verified log"
 
 
 @pytest.mark.parametrize("mutation", ["checksum", "extra_file", "missing_file", "symlink", "traversal"])
@@ -180,7 +197,7 @@ def test_recovery_outage_has_durable_backoff_and_retries_same_id(recoverable, mo
     path, receipt, _ = recoverable()
     original_commit = Session.commit
     def fail(self):
-        raise OperationalError("COMMIT", {}, RuntimeError("NAS unavailable"))
+        raise OperationalError("COMMIT", {}, ConnectionFailure("NAS unavailable"))
     with monkeypatch.context() as patch:
         patch.setattr(Session, "commit", fail)
         assert recovery.recover_upload_receipt(path, settings=get_settings(), now=100)["state"] == "deferred"
@@ -197,7 +214,7 @@ def test_recovery_unknown_commit_does_not_duplicate_after_restart(recoverable, m
     original_commit = Session.commit
     def uncertain(self):
         original_commit(self)
-        raise OperationalError("COMMIT", {}, RuntimeError("ACK lost"))
+        raise OperationalError("COMMIT", {}, ConnectionFailure("ACK lost"))
     with monkeypatch.context() as patch:
         patch.setattr(Session, "commit", uncertain)
         assert recovery.recover_upload_receipt(path, settings=get_settings(), now=100)["state"] == "deferred"

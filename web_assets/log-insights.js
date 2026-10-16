@@ -18,8 +18,61 @@ window.PrinterLogInsights = (() => {
         }
         host.append(box);
     }
-    async function load(host, recordId) {
-        if (!host) return;
+    function inspectionPanel(host, data, geometry) {
+        const mapped = data.inspection_map?.items || [];
+        const fallback = geometry.items || [];
+        const rows = mapped.length ? mapped : fallback;
+        const section = make('section', null, 'pc-box');
+        section.append(make('h3', 'Где проверить деталь'));
+        if (!rows.length) {
+            section.append(make('p', 'Высоты для проверки пока не определены. Это не подтверждает отсутствие дефектов.', 'pc-empty-state'));
+            if (data.reason_ru) section.append(make('p', data.reason_ru, 'pc-source-note'));
+        } else {
+            section.append(make('p', 'Проверьте отмеченные участки и сохраните результат контроля.', 'pc-source-note'));
+            const list = make('div', null, 'pc-inspection-list');
+            let more;
+            rows.forEach((item, index) => {
+                if (index === 6) {
+                    more = make('details', null, 'pc-disclosure');
+                    more.append(make('summary', `Остальные участки · ${rows.length - 6}`));
+                    list.append(more);
+                }
+                const row = make('div', null, 'pc-inspection-item');
+                const precise = mapped.length || item.mapping_precision === 'exact_layer';
+                const location = item.layer_range
+                    ? `Слои ${item.layer_range.join('–')}` : `${precise ? 'Слой' : 'Около слоя'} ${item.layer}`;
+                row.append(make('strong', location, 'pc-inspection-location'));
+                let height = 'Высота не подтверждена';
+                if (mapped.length && item.z_range_mm?.every(Number.isFinite)) {
+                    height = `Z ${number(item.z_range_mm[0], 3)}–${number(item.z_range_mm[1], 3)} мм`;
+                } else if (!mapped.length && Number.isFinite(item.height_mm)) {
+                    height = `${number(item.height_mm, 3)} мм от начала модели`;
+                    if (!geometry.geometry_confidence?.build_origin_confirmed) height += ' · начало печати не подтверждено';
+                }
+                row.append(make('span', height, 'pc-source-note'));
+                const observations = item.observations || [];
+                for (const observation of observations) {
+                    const text = observation.kind === 'scan_residual'
+                        ? `Время прожига отличается от расчёта на ${number(observation.residual_seconds)} с`
+                        : `${typeof sigLabel === 'function' ? sigLabel(observation.signal) : observation.signal}: превышение ${number(observation.exceedance_seconds)} с`;
+                    row.append(make('span', text, 'pc-inspection-signal'));
+                }
+                if (!observations.length && item.detail) row.append(make('span', item.detail, 'pc-inspection-signal'));
+                const bodies = (item.active_bodies || []).map(body => body.name).filter(Boolean);
+                if (bodies.length) row.append(make('span', 'Возможные детали: ' + bodies.join(', '), 'pc-source-note'));
+                (more || list).append(row);
+            });
+            section.append(list);
+            section.append(make('p', 'Это участки для проверки, не обнаруженные дефекты. Общие датчики не определяют место по X/Y.', 'pc-source-note'));
+            if (data.inspection_map?.sample_count > mapped.length) section.append(make('p',
+                `Источник содержит ${data.inspection_map.sample_count} участков; в этом ответе доступны ${mapped.length}.`, 'pc-source-note'));
+        }
+        host.append(section);
+    }
+    async function load(host, recordId, geometry = {}) {
+        if (!host || !host.isConnected || host.dataset.loaded) return;
+        // Reuse both pending and successful loads for this card's DOM host.
+        host.dataset.loaded = 'true';
         host.replaceChildren(make('p', 'Сопоставляем данные логов и модели…'));
         try {
             const response = await fetch(`/analysis/prints/${encodeURIComponent(recordId)}/log-insights`);
@@ -27,6 +80,7 @@ window.PrinterLogInsights = (() => {
             const data = await response.json();
             if (!host.isConnected) return;
             host.replaceChildren();
+            inspectionPanel(host, data, geometry);
             const grid = make('div', null, 'pc-grid');
             grid.style.gap = '16px';
             const env = data.environment || {};
@@ -54,10 +108,19 @@ window.PrinterLogInsights = (() => {
             ] : []));
             section(grid, 'Участки для контроля', (data.inspection_map?.items || []).slice(0, 10).map(r =>
                 `Слой ${r.layer}; ${r.z_range_mm ? `Z ${number(r.z_range_mm[0], 3)}–${number(r.z_range_mm[1], 3)} мм` : 'начало Z не подтверждено'}; возможные тела: ${(r.active_bodies || []).map(b => b.name).join(', ') || 'не определены'}.`), 'Нет участков с наблюдениями для привязки.');
-            host.append(grid);
-            host.append(make('p', 'Это диагностические наблюдения, а не заключение о браке. Общие датчики не определяют место дефекта по X/Y. Привязка среды по общей метке прожига приблизительна.', 'pc-empty'));
+            const details = make('details', null, 'pc-disclosure');
+            details.append(make('summary', 'Источники и подробные расчёты'));
+            details.append(grid);
+            details.append(make('p', 'Привязка среды по общей метке прожига приблизительна; расчётное отклонение не устанавливает причину дефекта.', 'pc-source-note'));
+            host.append(details);
         } catch (error) {
-            if (host.isConnected) host.replaceChildren(make('p', `${error.message}. Можно повторно открыть вкладку.`));
+            delete host.dataset.loaded;
+            if (host.isConnected) {
+                const retry = make('button', 'Повторить', 'quick-btn');
+                retry.type = 'button';
+                retry.addEventListener('click', () => load(host, recordId, geometry));
+                host.replaceChildren(make('p', error.message), retry);
+            }
         }
     }
     return {load};

@@ -1,5 +1,6 @@
 """Data-selection guards for analytics API endpoints."""
 from datetime import datetime, timedelta, timezone
+from fastapi.testclient import TestClient
 
 from api.routes.analysis import (
     _load_quality_labels,
@@ -35,6 +36,29 @@ def test_defect_risk_loads_only_real_prints():
     assert [session["session_id"] for session in sessions] == ["s_0"]
 
 
+def test_risk_api_keeps_missing_measurements_unknown():
+    from api.main import app
+
+    with SessionLocal() as db:
+        db.add(BuildSession(
+            session_id="empty-measurements", classification="REAL_PRINT",
+            context={"runtime_payload": {"group": {
+                "classification": "REAL_PRINT",
+                "features": {"process_anomaly_count": 0, "data_quality_score": 100},
+                "telemetry_evidence": {"sample_count": 0},
+            }}},
+        ))
+        db.commit()
+    client = TestClient(app)
+    single = client.get("/analysis/defect-risk/empty-measurements")
+    all_sessions = client.get("/analysis/defect-risk")
+    assert single.status_code == all_sessions.status_code == 200
+    for result in (single.json(), all_sessions.json()["sessions"][0]):
+        assert result["risk"] is None
+        assert result["grade"] == "unknown"
+        assert result["prediction"]["value"] is None
+
+
 def test_latest_quality_outcome_wins_deterministically():
     start = datetime(2027, 2, 1, tzinfo=timezone.utc)
     with SessionLocal() as db:
@@ -43,6 +67,7 @@ def test_latest_quality_outcome_wins_deterministically():
         db.add(QualityOutcome(
             outcome_id="q_new", session_id="s_quality", timestamp=start + timedelta(days=1),
             inspection_type="visual", result="rejected", is_final=True,
+            supersedes_outcome_id="q_old",
         ))
         db.add(QualityOutcome(
             outcome_id="q_old", session_id="s_quality", timestamp=start,

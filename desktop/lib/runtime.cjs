@@ -9,7 +9,7 @@ function dockerPath(environment, platform = process.platform) {
   const valid = candidates.filter(directory => fs.existsSync(path.join(directory, platform === 'win32' ? 'docker.exe' : 'docker')));
   return [environment.PATH || environment.Path || '', ...valid].filter(Boolean).join(path.delimiter);
 }
-const ACTIONS = new Set(['configure', 'finish-setup', 'adopt', 'launch', 'resume', 'stop', 'status', 'rollback', 'prepare-restart', 'cancel-restart']);
+const ACTIONS = new Set(['configure', 'finish-setup', 'adopt', 'launch', 'resume', 'stop', 'status', 'rollback', 'prepare-restart', 'cancel-restart', 'check-release']);
 class Runtime {
   constructor({ root, bundle, binary, python, source, notify = () => {}, spawnProcess = spawn }) {
     Object.assign(this, { root, bundle, binary, python, source, notify, spawnProcess });
@@ -23,6 +23,7 @@ class Runtime {
       let args = [];
       if (this.python) { command = this.python; args.push(path.join(this.source, 'scripts/maintenance/desktop_entry.py')); }
       args.push(action, '--root', this.root, '--bundle', this.bundle);
+      if (action === 'check-release') args.push('--platform', process.platform, '--arch', process.arch);
       return await new Promise((resolve, reject) => {
         const environment = { ...process.env };
         // Never inherit a remote daemon or unrelated compose project.
@@ -32,8 +33,18 @@ class Runtime {
           env: environment, stdio: ['pipe', 'pipe', 'pipe'] });
         let result; let message = 'Операция не подтверждена. Данные и настройки сохранены.';
         let protocolError = false; let errorCode = 'unconfirmed';
+        let settled = false; let deadline;
         const reader = readline.createInterface({ input: child.stdout });
+        const finish = error => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(deadline);
+          reader.close();
+          if (error) reject(error);
+          else resolve(result);
+        };
         reader.on('line', line => {
+          if (settled) return;
           if (line.length > 32768) { protocolError = true; return; }
           try {
             const event = JSON.parse(line);
@@ -46,11 +57,17 @@ class Runtime {
           } catch { protocolError = true; }
         });
         child.stderr.resume(); // Raw stderr can contain credentials: never show it in UI.
-        child.on('error', () => reject(new Error('Встроенный модуль запуска недоступен. Проверьте целостность установки.')));
+        child.on('error', () => finish(new Error('Встроенный модуль запуска недоступен. Проверьте целостность установки.')));
         child.on('close', code => {
-          if (code === 0 && result && !protocolError) resolve(result);
-          else { const error = new Error(message); error.code = errorCode; reject(error); }
+          if (code === 0 && result && !protocolError) finish();
+          else { const error = new Error(message); error.code = errorCode; finish(error); }
         });
+        if (action === 'check-release') deadline = setTimeout(() => {
+          // This child is read-only: no journal/SQL/Docker operation to interrupt.
+          // A network check cannot keep the window busy or leave a daemon behind.
+          try { child.kill('SIGKILL'); } catch { /* still return a bounded error */ }
+          finish(new Error('Проверка GitHub не завершилась вовремя. Повторите позже.'));
+        }, 120000);
         child.stdin.end(input === null ? '' : JSON.stringify(input));
         child.stdin.on('error', () => {});
       });

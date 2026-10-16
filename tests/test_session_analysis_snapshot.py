@@ -134,6 +134,9 @@ def test_dedup_reuses_first_fact_time_without_changing_order_or_raw_facts(tzinfo
     assert [row["source_line"] for row in merged[-1].payload["deduplicated_provenance"]] == [10, 11]
     merged[-1].payload["nested"]["value"] = 99
     merged[-1].source.source_line = 99
+    # Singleton facts need the same isolation as merged duplicate facts.
+    merged[0].payload["nested"]["value"] = 99
+    merged[0].source.source_line = 99
     assert events == original
 
 

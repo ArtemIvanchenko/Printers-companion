@@ -1,10 +1,14 @@
-name: Desktop test packages
+name: Desktop packages
 
-# Explicit, unsigned test packages. This workflow never changes main, publishes
-# a GitHub Release, uploads a public updater feed or uses signing secrets.
+# Default builds are unsigned. Only the calling tag release can explicitly opt
+# into signing. Builders never publish; the final release job owns publication.
 on:
   workflow_call:
     inputs:
+      signed_release:
+        description: Explicit signed channel, only after signing identities are configured
+        type: boolean
+        default: false
       images_artifact:
         description: Verified image manifest from the calling release build
         type: string
@@ -75,15 +79,22 @@ jobs:
           path: ${{ runner.temp }}/operator-images
       - name: Bundle verified non-secret resources
         working-directory: desktop
-        # A clean test commit has verifiable identity, but no signed channel.
         shell: bash
+        env:
+          COMPANION_SIGNED_RELEASE: ${{ inputs.signed_release && 'true' || 'false' }}
         run: |
+          mode="--development"
+          if [ "$COMPANION_SIGNED_RELEASE" = true ]; then
+            test "$GITHUB_REF" = "refs/tags/v$(tr -d '[:space:]' < ../VERSION)"
+            test -n "${{ inputs.images_artifact }}"
+            mode=""
+          fi
           if [ -n "${{ inputs.images_artifact }}" ]; then
-            npm run resources -- --development --images "$RUNNER_TEMP/operator-images/operator-images.json"
+            npm run resources -- $mode --images "$RUNNER_TEMP/operator-images/operator-images.json"
           else
             npm run resources -- --development
           fi
-      - name: Freeze the standard-library-only host executable
+      - name: Freeze the host executable with bundled public CA certificates
         working-directory: desktop
         run: npm run host
       - name: Exercise the frozen host without Docker/NAS
@@ -92,10 +103,24 @@ jobs:
       - name: Package Mac
         if: runner.os == 'macOS'
         working-directory: desktop
+        env:
+          CSC_LINK: ${{ inputs.signed_release && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ inputs.signed_release && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ inputs.signed_release && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.signed_release && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ inputs.signed_release && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_API_KEY: ${{ inputs.signed_release && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_ID: ${{ inputs.signed_release && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ inputs.signed_release && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_KEYCHAIN_PROFILE: ${{ inputs.signed_release && secrets.APPLE_KEYCHAIN_PROFILE || '' }}
         run: npm run dist:mac -- --${{ matrix.arch }}
       - name: Package Windows
         if: runner.os == 'Windows'
         working-directory: desktop
+        env:
+          CSC_LINK: ${{ inputs.signed_release && secrets.WIN_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ inputs.signed_release && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          COMPANION_PUBLISHER_NAME: ${{ inputs.signed_release && secrets.COMPANION_PUBLISHER_NAME || '' }}
         run: npm run dist:win
       - name: Smoke packaged Mac, no Docker or operator data
         if: runner.os == 'macOS'
@@ -105,7 +130,8 @@ jobs:
           mkdir -p "$PRINTER_COMPANION_SMOKE_DIR"
           native="desktop/dist/mac"
           if [ "${{ matrix.arch }}" = arm64 ]; then native="$native-arm64"; fi
-          "$native/Printer’s Companion Test.app/Contents/MacOS/Printer’s Companion Test" --smoke
+          companion="${{ inputs.signed_release && 'Printer’s Companion' || 'Printer’s Companion Test' }}"
+          "$native/$companion.app/Contents/MacOS/$companion" --smoke
           test -s "$PRINTER_COMPANION_SMOKE_DIR/desktop.png"
       - name: Smoke packaged Windows, no Docker or operator data
         if: runner.os == 'Windows'
@@ -113,20 +139,23 @@ jobs:
         run: |
           $env:PRINTER_COMPANION_SMOKE_DIR = Join-Path $env:RUNNER_TEMP 'companion-smoke'
           New-Item -ItemType Directory -Path $env:PRINTER_COMPANION_SMOKE_DIR -Force | Out-Null
-          $companion = Join-Path $pwd "desktop/dist/win-unpacked/Printer’s Companion Test.exe"
+          $name = "${{ inputs.signed_release && 'Printer’s Companion' || 'Printer’s Companion Test' }}"
+          $companion = Join-Path $pwd "desktop/dist/win-unpacked/$name.exe"
           $process = Start-Process -FilePath $companion -ArgumentList '--smoke' -PassThru
           if (-not $process.WaitForExit(60000)) { throw 'Desktop smoke timed out' }
           if ($process.ExitCode -ne 0) { throw 'Desktop smoke failed' }
           if (-not (Test-Path (Join-Path $env:PRINTER_COMPANION_SMOKE_DIR 'desktop.png'))) { throw 'No window screenshot' }
-      - name: Upload test installers and evidence
+      - name: Upload native installers and evidence, never publish here
         uses: actions/upload-artifact@v4
         with:
-          name: companion-test-${{ matrix.os }}-${{ matrix.arch }}-${{ github.sha }}
+          name: companion-${{ inputs.signed_release && 'signed' || 'test' }}-${{ matrix.os }}-${{ matrix.arch }}-${{ github.sha }}
           if-no-files-found: error
           path: |
             desktop/dist/*.dmg
             desktop/dist/*.zip
             desktop/dist/*.exe
+            ${{ inputs.signed_release && 'desktop/dist/*.blockmap' || '' }}
+            ${{ inputs.signed_release && 'desktop/dist/latest*.yml' || '' }}
             desktop/runtime-resources/runtime-manifest.json
             ${{ runner.temp }}/companion-smoke/desktop.png
   docker-lifecycle:
@@ -138,7 +167,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install pytest
+      - run: python -m pip install pytest -r desktop/requirements-build.txt
       - name: Actual Docker freeze, switch and recovery in an isolated fixture
         env:
           COMPANION_DOCKER_CHECKS: '1'

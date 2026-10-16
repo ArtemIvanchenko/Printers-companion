@@ -15,11 +15,11 @@ from domain.services.compute_affinity import ComputeAffinityError, require_compu
 from domain.services.import_jobs import (
     ImportJobRecord,
     LeaseCheckUnavailableError,
-    RetryableImportError,
     StaleImportLeaseError,
     confirm_import_job,
 )
 from domain.services.importing.fence import ImportFence
+from domain.services.importing.persistence import is_retryable_import_failure
 from domain.services.importing.publication import prepare_import_reports, publish_import
 from domain.services.ingestion import IngestionService
 from profiles.m350.profile import build_registry, get_profile
@@ -84,10 +84,10 @@ def _apply_import_failure_policy(
         # another automatic raw parse.
         job.status = ImportJobStatus.failed
         job.postponed_until = None
-    elif isinstance(error, RetryableImportError):
+    elif is_retryable_import_failure(error):
         # NAS/database availability is not bad input and must not consume the
-        # bounded parser/stability budget. lease_generation is monotonic,
-        # providing backoff without a new schema column.
+        # bounded processing or stability budgets. lease_generation is monotonic,
+        # providing backoff without a separate outage counter.
         retry = min(
             settings.nas_sync_retry_max_seconds,
             settings.nas_sync_retry_min_seconds
@@ -98,8 +98,10 @@ def _apply_import_failure_policy(
     else:
         # Unexpected worker bugs retain a bounded retry budget so malformed
         # input cannot spin forever.
-        job.stability_check_attempts += 1
-        if job.stability_check_attempts < settings.file_stability_max_retries:
+        # Reuse the configured limit/delay, but keep consumed attempts separate
+        # from local file stability checks.
+        job.execution_attempts += 1
+        if job.execution_attempts < settings.file_stability_max_retries:
             job.status = ImportJobStatus.postponed
             job.postponed_until = now + timedelta(
                 seconds=settings.file_stability_retry_seconds
@@ -256,6 +258,11 @@ def process_due_import_jobs(lease_owner: str | None = None) -> int:
                 logger.warning("Discarding import result after lost lease: %s", job_id)
                 continue
             with SessionLocal() as db:
+                if result.job.status == ImportJobStatus.done:
+                    # This reset is durable only with successful publication.
+                    # A failed transaction leaves the stored budget untouched
+                    # for the failure policy's fresh read below.
+                    result.job.execution_attempts = 0
                 publish_import(
                     db, result,
                     fence=ImportFence(job_id, claimed.owner_node_id, lease_owner, lease_generation),

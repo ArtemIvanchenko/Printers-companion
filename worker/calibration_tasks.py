@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
-
 from analytics.prediction.calibration import JOB_TYPE, calculate_calibration, publish_calibration
 from analytics.prediction.calibration_inputs import load_calibration_inputs
 from core.config.settings import get_settings
 from domain.models.jobs import BackgroundJob
-from storage.db.session import session_scope
+from storage.db.session import is_database_unavailable, session_scope
 from storage.repositories.jobs_repo import JobsRepository
 from worker.lease_heartbeat import LeaseHeartbeat
 
@@ -53,15 +51,16 @@ def process_next_calibration_task(lease_owner: str, owner_node_id: str | None = 
             # Completion, parameter maps and diagnostics commit together.
             db.get(BackgroundJob, job_id).result_json = result
         logger.info("calibration task %s completed on %s", job_id, owner_node_id)
-    except (OperationalError, SQLAlchemyTimeoutError) as exc:
-        try:
-            with session_scope() as db:
-                JobsRepository(db).defer_infrastructure(job_id, str(exc), **fence)
-        except Exception:
-            logger.exception("could not defer calibration outage for %s", job_id)
-        logger.warning("calibration %s postponed after NAS outage", job_id)
     except Exception as exc:
-        with session_scope() as db:
-            JobsRepository(db).fail(job_id, str(exc), retryable=True, **fence)
-        logger.exception("calibration %s failed; result not published", job_id)
+        if is_database_unavailable(exc):
+            try:
+                with session_scope() as db:
+                    JobsRepository(db).defer_retry(job_id, str(exc), **fence)
+            except Exception:
+                logger.exception("could not defer calibration outage for %s", job_id)
+            logger.warning("calibration %s postponed after NAS outage", job_id)
+        else:
+            with session_scope() as db:
+                JobsRepository(db).fail(job_id, str(exc), retryable=True, **fence)
+            logger.exception("calibration %s failed; result not published", job_id)
     return True

@@ -8,8 +8,10 @@ import pytest
 from core.config.settings import Settings
 from core.utils.files import BROWSER_UPLOAD_PREFIX, iter_source_files, sha256_file
 from domain.services import import_jobs
-from domain.services.ingestion import IngestionResult, IngestionService
+from domain.services.ingestion import IngestionService
 from domain.services.log_archives import expand_log_inputs
+from storage.db.session import SessionLocal
+from storage.repositories.import_jobs import ImportJobsRepository
 from worker import watcher
 from worker.watcher import candidate_signature, import_batch_for, is_import_candidate
 
@@ -152,21 +154,45 @@ def test_private_zip_does_not_trigger_ancestor_expansion(source_tree, monkeypatc
     with zipfile.ZipFile(private / "logs.zip", "w") as archive:
         archive.writestr("only-private.log", b"private")
     seen = []
+    original_parse = import_jobs.IngestionService.parse
+    expected = {".ordinary-hidden/ordinary.log", "public/machine.log"}
 
     def parse(self, path):
         seen.append(path)
-        return IngestionResult(root=str(path))
+        result = original_parse(self, path)
+        assert {item.relative_path for item in result.files} == expected
+        assert {item.relative_path: item.checksum for item in result.files} == (
+            import_jobs.calculate_checksum_manifest(root)
+        )
+        return result
 
     monkeypatch.setattr(import_jobs.IngestionService, "parse", parse)
     monkeypatch.setattr(import_jobs, "archive_raw_import", lambda *args, **kwargs: {})
+    # This test observes source preparation, not the independent session
+    # grouping/analysis. The completeness guard still sees real ingested files.
+    monkeypatch.setattr(import_jobs, "group_files_into_sessions", lambda files: [])
     job = import_jobs.ImportJobRecord(
         owner_node_id="local",
         source_path=str(root),
         source_name="raw",
         source_kind="folder",
     )
+    job.file_snapshot = import_jobs.snapshot_source(root)
+    import_jobs.mark_import_job_confirmed(job)
+    with SessionLocal() as db:
+        repo = ImportJobsRepository(db)
+        repo.save_import_job(job)
+        db.flush()
+        job = repo.claim_next_import_job(
+            owner_node_id=job.owner_node_id, lease_owner="private-source-test-worker", lease_seconds=3600,
+        )
+        db.commit()
+    assert job is not None
     import_jobs.execute_confirmed_import(job, registry=object(), settings=Settings(app_env="test"))
-    assert seen == [root]
+    assert len(seen) == 1 and seen[0] != root
+    assert not seen[0].exists()  # Only the owned computational copy is cleaned.
+    assert root.exists()
+    assert set(job.checksum_manifest) == expected
 
 
 def test_directory_symlink_is_still_rejected_by_archive_expansion(tmp_path):

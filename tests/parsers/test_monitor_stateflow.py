@@ -60,7 +60,7 @@ def test_monitor_marks_underwidth_known_records_as_truncated(tmp_path: Path) -> 
     assert any(d.code == "monitor_truncated_records" for d in result.diagnostics)
 
 
-def test_monitor_recovers_timestamp_prefix_but_not_untimestamped_fragment(tmp_path: Path) -> None:
+def test_monitor_does_not_invent_timestamp_from_numeric_prefix(tmp_path: Path) -> None:
     path = tmp_path / "27.04.2026_Monitor100.log"
     path.write_text(
         "011:03:17 |S|9|1|V9_airToChamber|\n"
@@ -70,11 +70,12 @@ def test_monitor_recovers_timestamp_prefix_but_not_untimestamped_fragment(tmp_pa
 
     result = Monitor100LogParser().parse(path, ParserContext())
 
-    assert result.events[0].event_type == "monitor_state_change"
-    assert result.events[0].payload["recovered_prefix"] == "0"
-    assert result.events[0].payload["structurally_complete"] is True
+    assert result.events[0].ts is None
+    assert result.events[0].payload["raw_text"] == "011:03:17 |S|9|1|V9_airToChamber|"
+    assert "recovered_prefix" not in result.events[0].payload
     assert result.events[1].event_type == "monitor_transition"
-    assert result.metadata["prefixed_records_recovered"] == 1
+    assert result.metadata["prefixed_records_recovered"] == 0
+    assert result.metadata["missing_timestamps"] == 2
     assert result.metadata["unstructured_entries"] == 1
 
 

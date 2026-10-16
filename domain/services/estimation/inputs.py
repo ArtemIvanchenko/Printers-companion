@@ -8,6 +8,8 @@ import math
 from copy import deepcopy
 from typing import Any
 
+from sqlalchemy import select
+
 from core.config.settings import get_settings
 from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
 from domain.services.estimation.contracts import EstimateError, PreparedEstimate
@@ -94,6 +96,15 @@ def params_for_record(repo: PrintsRepository, record: dict) -> dict:
 
 
 def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tuple[dict, dict]:
+    """Read configuration once, then resolve it through the pure shared path."""
+    return resolve_params_with_sources(
+        record, repo.get_machine_params(), repo.get_active_preset_for_material(record["material"]),
+    )
+
+
+def resolve_params_with_sources(
+    record: dict, machine_params: dict | None, preset: dict | None,
+) -> tuple[dict, dict]:
     """Scanning parameters for one print, most specific source winning.
 
     machine_params (global) < material preset < print fields < print scan strategy.
@@ -111,13 +122,12 @@ def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tup
     NULL on the record means "not specified": fall through to the preset, then
     to the machine default, so records that predate these fields are unaffected.
     """
-    params = dict(repo.get_machine_params() or {})
+    params = dict(machine_params or {})
     sources = {
         key: {"source": "machine_settings", "value": params[key]}
         for key in ("layer_thickness_mm", "hatch_distance_mm")
         if params.get(key) is not None
     }
-    preset = repo.get_active_preset_for_material(record["material"])
     if preset:
         params["active_preset_id"] = str(preset["preset_id"]) if preset.get("preset_id") else None
         params.update(
@@ -160,8 +170,10 @@ def _params_with_sources_for_record(repo: PrintsRepository, record: dict) -> tup
                 raise EstimateError("invalid_inputs", "contours_enabled должен быть true или false")
             params[key] = value
             sources[key] = {"source": "print_scan_strategy", "value": strategy[key]}
-    if "hatch_speed_mm_s" in strategy:
-        # The explicit job value must not lose to a material's global speed map.
+    if ("hatch_speed_mm_s" in strategy
+            or (preset and preset.get("hatch_speed_mm_s") is not None)):
+        # Resolve all specific overrides first, then prune only this material's
+        # global entry so the effective preset/job speed cannot lose to it.
         params["hatch_speeds_by_mat"] = {
             key: value for key, value in (params.get("hatch_speeds_by_mat") or {}).items()
             if key != record["material"]
@@ -241,8 +253,9 @@ def prepare_prediction_inputs(
     if record.get("session_id"):
         from domain.models.sessions import BuildSession
 
-        linked_session = repo.db.get(BuildSession, record["session_id"])
-        printer_id = linked_session.printer_id if linked_session is not None else None
+        printer_id = repo.db.scalar(
+            select(BuildSession.printer_id).where(BuildSession.session_id == record["session_id"])
+        )
     if not printer_id:
         candidate = (record.get("metadata_json") or {}).get("printer_id")
         printer_id = str(candidate) if candidate else None
@@ -285,6 +298,26 @@ def geometry_fingerprint(platform_files: list[dict[str, Any]]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return "files-sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def prediction_configuration(prepared: dict[str, Any]) -> dict:
+    """Captured resolved configuration, separate from card/publication fencing.
+
+    Keep all resolved fields and model maps so a future consumed setting is
+    not silently omitted. Only the machine row's update timestamp is volatile;
+    nested model metadata remains part of its captured identity. This describes
+    a configured calculation, not the historical as-run recipe or its admission.
+    """
+    from core.versioning.constants import ANALYSIS_VERSION
+
+    return deepcopy({
+        "schema_version": 1,
+        "analysis_version": ANALYSIS_VERSION,
+        "material": prepared["material"],
+        "printer_id": prepared.get("printer_id"),
+        "powder_cost": prepared["powder_cost"],
+        "params": {key: value for key, value in prepared["params"].items() if key != "updated_at"},
+    })
 
 
 def prediction_input_hash(prepared: dict[str, Any]) -> str:

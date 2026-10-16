@@ -76,12 +76,12 @@ def compute_soft_sensors(
             })
 
     temperatures = telemetry.get("temperatures") or {}
-    active_temperature_series = [
-        values for name, values in temperatures.items()
+    active_temperature_series = {
+        name: values for name, values in temperatures.items()
         if name in {"ST3", "ST4", "ST5"} and len(_finite(values)) >= 5
-    ]
+    }
     if len(active_temperature_series) >= 2:
-        rows = _aligned(*active_temperature_series)
+        rows = _aligned(*active_temperature_series.values())
         gradients = [max(row) - min(row) for row in rows if max(row) > 1.0]
         if gradients:
             metrics.append({
@@ -92,7 +92,7 @@ def compute_soft_sensors(
                 "unit": "°C",
                 "status": "diagnostic",
                 "confidence": 0.7,
-                "inputs": [name for name in ("ST3", "ST4", "ST5") if name in temperatures],
+                "inputs": [name for name in ("ST3", "ST4", "ST5") if name in active_temperature_series],
                 "method": "размах температур активных зон в один момент времени",
             })
 
@@ -128,14 +128,16 @@ def compute_soft_sensors(
                 "method": "формула Магнуса по температуре и относительной влажности",
             })
 
-    chamber_pressure = _finite((telemetry.get("pressure") or {}).get("SP4") or [])
+    raw_pressure = (telemetry.get("pressure") or {}).get("SP4") or []
+    positions = [index for index, value in enumerate(raw_pressure)
+                 if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)]
+    chamber_pressure = _finite(raw_pressure)
     if len(chamber_pressure) >= 5:
-        slope = theil_sen_slope(chamber_pressure)
-        relative_change = (
-            slope * (len(chamber_pressure) - 1) / abs(median(chamber_pressure)) * 100
-            if median(chamber_pressure) else 0.0
-        )
-        metrics.append({
+        slope = theil_sen_slope(chamber_pressure, positions)
+        centre = abs(median(chamber_pressure))
+        relative_change = slope * (positions[-1] - positions[0]) / centre * 100 if slope is not None and centre else None
+        if relative_change is not None and math.isfinite(relative_change):
+            metrics.append({
             "key": "chamber_pressure_drift",
             "name_ru": "Дрейф давления рабочей камеры",
             "value": round(relative_change, 3),
@@ -144,11 +146,13 @@ def compute_soft_sensors(
             "confidence": 0.75,
             "inputs": ["SP4"],
             "method": "робастный наклон Тейла—Сена, приведённый к длине интервала",
-        })
+            })
 
     before = (stats.get("SP11") or {}).get("mean")
     after = (stats.get("SP12") or {}).get("mean")
-    if isinstance(before, (int, float)) and isinstance(after, (int, float)):
+    if (isinstance(before, (int, float)) and not isinstance(before, bool)
+            and isinstance(after, (int, float)) and not isinstance(after, bool)
+            and math.isfinite(before) and math.isfinite(after) and math.isfinite(before - after)):
         metrics.append({
             "key": "filter_pressure_drop_proxy",
             "name_ru": "Расчётный перепад давления на контуре фильтров",
@@ -163,7 +167,7 @@ def compute_soft_sensors(
     return {
         "metrics": metrics,
         "available": len(metrics),
-        "method_version": "soft-sensors-0.1.0",
+        "method_version": "soft-sensors-0.1.2",
     }
 
 

@@ -16,6 +16,7 @@ from analytics.prediction.accuracy import (
     prediction_accuracy,
     recalibrate_and_apply,
 )
+from core.versioning.constants import ANALYSIS_VERSION
 from domain.models.events import LayerSnapshot
 from domain.models.prints import MachineParams, PrintRecord
 from domain.models.sessions import BuildSession
@@ -72,6 +73,8 @@ def _record(
             metadata_json={
                 "session_link_confirmed": True,
                 "prediction": {
+                    "analysis_version": ANALYSIS_VERSION,
+                    "provenance": {"component": "print-estimate", "analysis_version": ANALYSIS_VERSION},
                     "input_revision": 1,
                     "build_origin_source": "explicit",
                     "build_origin_z_mm": 0.0,

@@ -11,6 +11,8 @@ import signal
 import time
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from core.compute_identity import register_compute_node
 from core.config.settings import Settings, get_settings
 from core.logging.config import configure_logging
@@ -20,10 +22,10 @@ from domain.services.print_cards.contracts import CardError
 from domain.services.print_cards.attachments import (
     publish_attachment, publish_object, validate_attachment_record,
 )
-from storage.db.session import session_scope
+from storage.db.session import is_database_unavailable, session_scope
 from storage.object_store.minio_client import ObjectStore
 from storage.repositories.prints_repo import PrintsRepository
-from storage.sync.local_outbox import LocalNasOutbox, OutboxIntegrityError
+from storage.sync.local_outbox import LocalNasOutbox, OutboxIntegrityError, StaleOutboxClaimError
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,7 @@ def process_next(
     if item is None:
         return None
     operation_id = str(item["operation_id"])
+    claim_token = item["claim_token"]
 
     try:
         if item.get("kind") != "print_attachment":
@@ -81,7 +84,7 @@ def process_next(
             existing = repo.find_file_by_checksum(item["record_id"], item["checksum"])
         if existing is not None:
             result = {"duplicate": True, **existing}
-            outbox.complete(operation_id, result)
+            outbox.complete(operation_id, result, claim_token=claim_token)
             return outbox.get(operation_id)
 
         store = store or ObjectStore(settings)
@@ -92,31 +95,40 @@ def process_next(
         # Publish the catalogue pointer only after the complete immutable object
         # is visible and verified. The DB unique index resolves simultaneous
         # uploads from different operator PCs.
-        with session_scope() as db:
-            repo = PrintsRepository(db)
-            saved = publish_attachment(repo, item, object_uri)
+        with outbox.publication_guard(item):
+            with session_scope() as db:
+                repo = PrintsRepository(db)
+                saved = publish_attachment(repo, item, object_uri)
 
-        if saved.get("duplicate") and saved.get("object_uri") != object_uri:
-            # The other PC won the unique-index race. This operation owns its
-            # immutable URI, so removing only that URI cannot delete the winner.
-            if not store.remove_object(item["bucket"], item["object_name"]):
-                logger.warning("NAS sync could not remove duplicate object %s", object_uri)
-
-        outbox.complete(operation_id, saved)
+        # Each claim has a fresh physical URI. A lost claim's transfer may finish
+        # and leave an orphan; retain implicit failed/duplicate objects rather
+        # than coupling cleanup to this catalogue transaction. Explicit operator
+        # deletion remains separate.
+        if not outbox.complete(operation_id, saved, claim_token=claim_token):
+            return outbox.get(operation_id)
         logger.info(
             "NAS sync published %s (%s) for %s",
             item["file_name"],
             item["checksum"][:12],
             item["record_id"],
         )
+    except StaleOutboxClaimError:
+        logger.info("NAS sync ignored replaced claim %s", operation_id)
     except (PermanentSyncError, CardError, EstimateError, OutboxIntegrityError, ValueError) as exc:
-        outbox.fail(operation_id, str(exc))
-        logger.error("NAS sync quarantined %s: %s", operation_id, exc)
+        if outbox.fail(operation_id, str(exc), claim_token=claim_token):
+            logger.error("NAS sync quarantined %s: %s", operation_id, exc)
+    except SQLAlchemyError as exc:
+        if is_database_unavailable(exc):
+            if outbox.release(operation_id, str(exc), claim_token=claim_token):
+                logger.warning("NAS sync postponed %s: %s", operation_id, exc)
+        else:
+            if outbox.fail(operation_id, str(exc), claim_token=claim_token):
+                logger.error("NAS sync quarantined SQL failure %s: %s", operation_id, exc)
     except Exception as exc:
         # PostgreSQL and MinIO outages are deliberately unbounded retries. The
         # local payload is the durable copy until both NAS publications finish.
-        outbox.release(operation_id, str(exc))
-        logger.warning("NAS sync postponed %s: %s", operation_id, exc)
+        if outbox.release(operation_id, str(exc), claim_token=claim_token):
+            logger.warning("NAS sync postponed %s: %s", operation_id, exc)
     return outbox.get(operation_id)
 
 

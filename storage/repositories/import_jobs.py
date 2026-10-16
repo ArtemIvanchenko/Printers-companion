@@ -43,6 +43,7 @@ class ImportJobsRepository:
             "ignored_at": job.ignored_at,
             "last_stability_check_at": job.last_stability_check_at,
             "stability_check_attempts": job.stability_check_attempts,
+            "execution_attempts": job.execution_attempts,
             "file_snapshot": data["file_snapshot"],
             "checksum_manifest": data["checksum_manifest"],
             "source_objects": data["source_objects"],
@@ -236,7 +237,6 @@ class ImportJobsRepository:
         It never revives an expired lease, which could already have been
         reclaimed by a restarted worker on the same operator PC.
         """
-        now = now or datetime.now(timezone.utc)
         row = self.db.scalar(
             select(ImportJob)
             .where(ImportJob.import_job_id == import_job_id)
@@ -249,6 +249,8 @@ class ImportJobsRepository:
         lease_until = row.lease_until
         if lease_until.tzinfo is None:
             lease_until = lease_until.replace(tzinfo=timezone.utc)
+        # SQL/row-lock waits must not authorize an already expired lease.
+        now = now or datetime.now(timezone.utc)
         if lease_until <= now:
             return False
         row.lease_until = now + timedelta(seconds=max(60, lease_seconds))
@@ -262,7 +264,7 @@ _IMPORT_JOB_SCALARS = (
     "detected_at", "updated_at", "confirmation_deadline", "confirmed_by",
     "confirmed_at", "postponed_until", "lease_owner", "lease_until", "lease_generation",
     "ignored_by", "ignored_at",
-    "last_stability_check_at", "stability_check_attempts", "error",
+    "last_stability_check_at", "stability_check_attempts", "execution_attempts", "error",
 )
 _IMPORT_JOB_DICTS = ("file_snapshot", "checksum_manifest", "source_objects")
 _IMPORT_JOB_LISTS = (

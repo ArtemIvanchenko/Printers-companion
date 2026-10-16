@@ -9,9 +9,9 @@ async function loadHomeAttention() {
     const items = [];
 
     const [unlinked, maint, powder] = await Promise.all([
-        fetch('/prints/unlinked-sessions').then(r => r.json()).catch(() => null),
-        fetch('/maintenance/status').then(r => r.json()).catch(() => null),
-        fetch('/powder/status').then(r => r.json()).catch(() => null),
+        fetch('/prints/unlinked-sessions').then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch('/maintenance/status').then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch('/powder/status').then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
 
     if (unlinked && unlinked.n_prints > 0) {
@@ -47,7 +47,7 @@ async function loadHomeAttention() {
 }
 
 function _homePrintStatus(record) {
-    if (record.session_id) return ['ЛОГИ OK', 'ok'];
+    if (record.session_id) return ['Логи привязаны', 'ok'];
     return ['НЕТ ЛОГОВ', 'pending'];
 }
 
@@ -132,7 +132,6 @@ function _homePrintCard(record, index) {
     const summary = record.summary || {};
     const actual = summary.actual_hours != null ? _formatHours(summary.actual_hours) : '—';
     const layers = summary.layers != null ? summary.layers : '—';
-    const anomalies = record.session_id ? 'АНОМ. —' : '— АНОМ.';
     const date = _homeDate(record.printed_at || record.created_at);
     const card = document.createElement('article');
     card.className = 'home-print-card';
@@ -141,24 +140,24 @@ function _homePrintCard(record, index) {
     card.setAttribute('role', 'button');
     card.setAttribute('aria-label', `Открыть печать ${record.name || 'без названия'}`);
     card.innerHTML = `<div class="home-print-preview">
-            <span class="home-preview-fallback">${_homePreviewFallback(index)}</span>
-            <span class="home-view-note">ВИД 45° · ПЕРЕД+ЛЕВО+ВЕРХ</span>
+            <span class="home-preview-fallback">${stlFile ? _homePreviewFallback(index) : 'Нет STL'}</span>
+            <span class="home-view-note">${stlFile ? 'Модель печати' : 'Модель можно приложить позже'}</span>
             <span class="home-print-status ${statusTone}">${_esc(statusLabel)}</span>
         </div>
         <div class="home-print-body">
             <h3 class="home-print-name" title="${_esc(record.name || 'Без названия')}">${_esc(record.name || 'Без названия')}</h3>
             <div class="home-print-topline">${_esc(String(record.record_id || '').replace(/^pr_/, 'S-').slice(0, 8))} · ${_esc(date)} · ${_esc(_homeMaterial(record.material))}</div>
-            <div class="home-print-facts"><span class="home-metric">${_esc(actual)} Ф</span><span class="home-metric">${_esc(layers)} СЛ</span><span class="home-metric ${record.session_id ? '' : 'anomaly'}">${_esc(anomalies)}</span></div>
-            <div class="home-print-footer"><button class="home-card-action primary" type="button">${record.session_id ? 'Открыть' : 'Приложить логи'}</button><button class="home-card-action" type="button">${record.session_id ? 'Логи' : 'Открыть'}</button>${record.session_id ? '<button class="home-card-action" type="button">Отчёт</button>' : ''}</div>
+            <div class="home-print-facts"><span class="home-metric">Время: ${_esc(actual)}</span><span class="home-metric">Слоёв: ${_esc(layers)}</span></div>
+            <div class="home-print-footer"><button class="home-card-action primary" type="button">${record.session_id ? 'Контроль' : 'Приложить логи'}</button><button class="home-card-action" type="button">${record.session_id ? 'Графики' : 'Открыть'}</button>${record.session_id ? '<button class="home-card-action" type="button">Модель</button>' : ''}</div>
         </div>`;
     const open = () => openPrintCard(record.record_id);
     card.addEventListener('click', open);
-    card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+    card.addEventListener('keydown', event => { if (event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); open(); } });
     const actions = card.querySelectorAll('.home-card-action');
+    const actionTabs = record.session_id ? ['outcome', 'process', 'what'] : ['files', 'what'];
     actions.forEach((button, actionIndex) => button.addEventListener('click', event => {
         event.stopPropagation();
-        if (!record.session_id && actionIndex === 0) { openNewPrintRecord(); return; }
-        open();
+        openPrintCard(record.record_id, actionTabs[actionIndex]);
     }));
     _renderHomeStlPreview(card, record, stlFile);
     return card;

@@ -318,10 +318,12 @@ def compute_signal_stats(
 
     for col, vals in arrays.items():
         vals = np.asarray(vals, dtype=np.float64)
+        positions = np.arange(vals.size, dtype=float)
         # Drop non-finite samples: a sensor disconnect can write "nan"/"inf"
         # cells, which float() accepts silently — a single one would poison
         # mean/std/quantile (NaN propagates) for the entire signal.
-        vals = vals[np.isfinite(vals)]
+        finite = np.isfinite(vals)
+        vals, positions = vals[finite], positions[finite]
 
         # Same reasoning, one step further: the printer also writes *finite*
         # impossible values (a Flow H of -2.58e18 %, a Z position of 1.87e9 µm
@@ -366,7 +368,7 @@ def compute_signal_stats(
 
         out_of_range = int((~keep).sum())
         if out_of_range:
-            vals = vals[keep]
+            vals, positions = vals[keep], positions[keep]
 
         n = len(vals)
         if n < 10:
@@ -374,7 +376,7 @@ def compute_signal_stats(
 
         # Robust linear trend within the session. The shared helper sub-samples
         # large arrays before the O(n²) regression (334k rows would take hours).
-        slope_val = theil_sen_slope(vals)
+        slope_val = theil_sen_slope(vals, positions)
 
         # Alarm count (above alarm_high OR below alarm_low).
         thr = thresholds.get(col, {})
@@ -395,7 +397,7 @@ def compute_signal_stats(
             "n":           n,
             "alarm_count": alarm_count,
             "out_of_range": out_of_range,
-            "trend_slope": round(slope_val, 8),
+            "trend_slope": round(slope_val, 8) if slope_val is not None else None,
             "group":       _GROUP.get(col, "unknown"),
         }
 

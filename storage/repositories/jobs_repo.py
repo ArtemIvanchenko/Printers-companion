@@ -43,6 +43,16 @@ class JobsRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def _refresh_lease_state(self, row: BackgroundJob) -> None:
+        # The caller already holds FOR UPDATE, but a cached ORM instance can
+        # still contain an older generation. Full populate_existing discards
+        # pending payload/result changes with autoflush=False; refresh only
+        # repository-owned lease/state fields, without flushing other writes.
+        self.db.refresh(row, attribute_names=[
+            "status", "attempts", "max_attempts", "lease_owner", "lease_until",
+            "lease_generation", "available_at", "started_at", "finished_at", "updated_at",
+        ])
+
     def enqueue(
         self,
         *,
@@ -128,6 +138,7 @@ class JobsRepository:
         )
         if row is None:
             return None
+        self._refresh_lease_state(row)
         if row.status == "running" and row.attempts >= row.max_attempts:
             # A process died during its final allowed attempt. There is no
             # future claimant that could call fail(), so close the orphan here
@@ -169,6 +180,7 @@ class JobsRepository:
         )
         if row is None:
             return None
+        self._refresh_lease_state(row)
         now = _now()
         if row.lease_owner != lease_owner:
             return None
@@ -206,13 +218,15 @@ class JobsRepository:
         already expired lease is deliberately not resurrected: once it becomes
         claimable, only a fresh generation may own the job.
         """
-        now = now or _now()
         row = self.db.scalar(
             select(BackgroundJob)
             .where(BackgroundJob.job_id == job_id)
             .with_for_update()
         )
-        if row is None or row.status != "running":
+        if row is None:
+            return False
+        self._refresh_lease_state(row)
+        if row.status != "running":
             return False
         if row.lease_owner != lease_owner or row.lease_generation != lease_generation:
             return False
@@ -221,6 +235,8 @@ class JobsRepository:
         lease_until = row.lease_until
         if lease_until.tzinfo is None:
             lease_until = lease_until.replace(tzinfo=timezone.utc)
+        # Both the row lock and state refresh may outlast the original lease.
+        now = now or _now()
         if lease_until <= now:
             return False
         row.lease_until = now + timedelta(seconds=max(60, lease_seconds))
@@ -244,6 +260,7 @@ class JobsRepository:
         )
         if row is None:
             return None
+        self._refresh_lease_state(row)
         now = _now()
         if row.lease_owner != lease_owner:
             return None
@@ -267,7 +284,7 @@ class JobsRepository:
         self.db.flush()
         return _as_dict(row)
 
-    def defer_infrastructure(
+    def defer_retry(
         self,
         job_id: str,
         error: str,
@@ -275,11 +292,11 @@ class JobsRepository:
         lease_owner: str,
         lease_generation: int,
     ) -> dict[str, Any] | None:
-        """Release a fenced job without spending its deterministic-error budget.
+        """Defer an expected transient condition without spending the error budget.
 
-        PostgreSQL/MinIO availability is outside the local algorithm's control.
-        Counting an infrastructure interruption as one of three bad-model
-        attempts can permanently strand an otherwise valid estimate. The lease
+        NAS availability, publication contention and changed calculation inputs
+        are outside the local algorithm's control. Counting these interruptions
+        as bad-model attempts can permanently strand valid work. The lease
         fence is identical to ``fail``; only the attempt is returned to the
         budget and the job is made available after bounded backoff.
         """
@@ -290,6 +307,7 @@ class JobsRepository:
         )
         if row is None:
             return None
+        self._refresh_lease_state(row)
         now = _now()
         if row.lease_owner != lease_owner or row.lease_generation != lease_generation:
             return None
@@ -303,12 +321,12 @@ class JobsRepository:
         # lease_generation is monotonic even though infrastructure retries give
         # the algorithm-attempt counter back, so repeated NAS failures still
         # back off instead of hammering a low-power server every five seconds.
-        infrastructure_attempt = max(1, row.lease_generation)
+        retry_attempt = max(1, row.lease_generation)
         row.attempts = max(0, row.attempts - 1)
         row.status = "pending"
         row.error = error[:4000]
         row.available_at = now + timedelta(
-            seconds=min(300, 5 * 2 ** min(16, infrastructure_attempt - 1))
+            seconds=min(300, 5 * 2 ** min(16, retry_attempt - 1))
         )
         row.lease_owner = None
         row.lease_until = None

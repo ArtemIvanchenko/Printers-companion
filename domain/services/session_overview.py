@@ -16,6 +16,16 @@ from analytics.process_health import build_process_health
 from domain.services.session_analysis import PreparedSessionAnalysis, prepare_session_analysis, measured_snapshot
 
 
+def _is_burn_activity(event) -> bool:
+    kind = (event.event_type or "").strip().lower()
+    if kind == "wait_for_burn":
+        return False
+    return (
+        kind in {"burn_start", "burn_end", "burn_event"}
+        or (event.phase or "").strip().lower() == "burn"
+    )
+
+
 def compute_session_spans(
     files: list[IngestedFile],
 ) -> tuple[tuple[datetime | None, datetime | None], tuple[datetime | None, datetime | None]]:
@@ -24,7 +34,8 @@ def compute_session_spans(
     Monitor100 runs continuously and its clock lacks the main log's midnight
     correction, so it is excluded from both spans. Transition starts contribute
     only to the print span. A burn span needs two distinct usable timestamps;
-    layer-bearing events retain their existing role as burn-window evidence.
+    Only burn activity bounds the burn span: a layer reference or waiting for
+    burn does not show that the laser is operating.
     These are elapsed diagnostic windows, not normal machine-cycle durations.
     """
     start = end = burn_start = burn_end = None
@@ -40,10 +51,7 @@ def compute_session_spans(
                 start = ts
             if end is None or ts > end:
                 end = ts
-            if (
-                event.layer is not None or "burn" in (event.event_type or "").lower()
-                or (event.phase or "").lower().strip() == "burn"
-            ):
+            if _is_burn_activity(event):
                 if burn_start is None or ts < burn_start:
                     burn_start = ts
                 if burn_end is None or ts > burn_end:
@@ -102,12 +110,7 @@ def build_group_overview(
     disp_start = span_start or start_ts
     disp_end = span_end or end_ts
 
-    # Count burn events without double-counting (event_type takes priority over phase).
-    burn_events = sum(
-        1 for e in events
-        if "burn" in (e.event_type or "").lower()
-        or (e.phase or "").lower().strip() == "burn"
-    )
+    burn_events = sum(_is_burn_activity(event) for event in events)
 
     # Layer count: number of unique printed layers in this session.
     layer_nums = {e.layer for e in events if e.layer is not None}
@@ -123,18 +126,19 @@ def build_group_overview(
         duration_sec = (span_end - span_start).total_seconds()
     elif isinstance(start_ts, datetime) and isinstance(end_ts, datetime) and end_ts > start_ts:
         duration_sec = (end_ts - start_ts).total_seconds()
-    duration_sec = duration_sec or 0.0
-
     # Preserve the legacy subtotal field, but never call its residual a pause.
     machine_sec = _session_machine_seconds(files)
-    residual_sec = max(0.0, duration_sec - machine_sec) if machine_sec is not None and duration_sec > 0 else None
+    residual_sec = (
+        max(0.0, duration_sec - machine_sec)
+        if machine_sec is not None and duration_sec is not None and duration_sec > 0 else None
+    )
 
     features = {
         **raw_features,
         "first_time": disp_start.strftime("%H:%M") if disp_start else "-",
         "last_time": disp_end.strftime("%H:%M") if disp_end else "-",
         "duration_sec": duration_sec,
-        "duration_min": round(duration_sec / 60, 1),
+        "duration_min": round(duration_sec / 60, 1) if duration_sec is not None else None,
         "machine_seconds": round(machine_sec, 1) if machine_sec is not None else None,
         "machine_min": round(machine_sec / 60, 1) if machine_sec is not None else None,
         "machine_time_scope": "eligible_measured_burn_plus_pour_only",

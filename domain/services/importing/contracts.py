@@ -47,11 +47,15 @@ class ImportJobRecord(BaseModel):
     ignored_by: str | None = None
     ignored_at: datetime | None = None
     last_stability_check_at: datetime | None = None
-    # Local file stability is bounded. Mandatory NAS archival uses this counter
-    # only to calculate a bounded exponential delay and never discards a valid
-    # local batch merely because the NAS stayed offline for a long time.
+    # Local file stability is bounded. NAS archival backoff uses claim generation
+    # instead, so an outage does not spend the local-file stability budget.
     stability_check_attempts: int = 0
+    # Unknown processing failures have a separate durable budget. Claims and
+    # infrastructure retries do not reset it; publication and explicit retry do.
+    execution_attempts: int = 0
     file_snapshot: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Physical intake files, not the logical members produced by ZIP expansion.
+    # Used by registration, immutable browser receipts and copy deduplication.
     checksum_manifest: dict[str, str] = Field(default_factory=dict)
     source_objects: dict[str, str] = Field(default_factory=dict)
     session_ids: list[str] = Field(default_factory=list)

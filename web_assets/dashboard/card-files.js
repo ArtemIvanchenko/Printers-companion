@@ -41,8 +41,16 @@ function _renderPcFiles() {
 
 async function uploadFilesToCard(recordId, fileList) {
     if (!fileList || !fileList.length) return;
-    for (const file of [...fileList]) await uploadArchiveFile(recordId, file, true);
-    openPrintCard(recordId);
+    const generation = _pcLoadGeneration;
+    try {
+        for (const file of [...fileList]) await uploadArchiveFile(recordId, file, true);
+    } catch (error) {
+        // uploadArchiveFile already reports the failure; earlier files may be saved.
+    }
+    if (generation === _pcLoadGeneration && !_pcLoading && _pcRecord?.record_id === recordId
+            && document.getElementById('page-print-card').style.display !== 'none') {
+        await _refreshOpenPrintCardFromSync();
+    }
 }
 
 // Russian plurals need the last two digits, not a "< 5" shortcut:
@@ -206,7 +214,9 @@ async function linkSessionToRecord(sessionId) {
     } catch (e) { showToast('Ошибка привязки: ' + e.message, 'error'); }
 }
 
+let _archiveLoadGeneration = 0;
 async function loadArchive(skip = 0) {
+    const generation = ++_archiveLoadGeneration;
     _archiveSkip = skip;
     loadUnlinkedSessions();
     const body  = document.getElementById('archive-table-body');
@@ -214,7 +224,11 @@ async function loadArchive(skip = 0) {
     const wrap  = document.getElementById('archive-list-wrap');
     const filters = _archiveFilters();
     try {
-        const d = await fetch(`/prints?skip=${skip}&limit=${_ARCHIVE_PAGE_SIZE}${filters}`).then(r => r.json());
+        const d = await fetch(`/prints?skip=${skip}&limit=${_ARCHIVE_PAGE_SIZE}${filters}`).then(r => {
+            if (!r.ok) throw new Error(r.status);
+            return r.json();
+        });
+        if (generation !== _archiveLoadGeneration) return;
         if (!d.total && !filters) {
             empty.style.display = 'block'; wrap.style.display = 'none';
             return;
@@ -227,20 +241,20 @@ async function loadArchive(skip = 0) {
             const date = rawDate ? new Date(rawDate).toLocaleDateString('ru') : '—';
             const dateHint = rec.printed_at ? '' : ' <span style="color:var(--border-hover);" title="Дата создания карточки — дата печати неизвестна">≈</span>';
             const s = rec.summary || {};
-            const timing = _pcTimeMetrics(null, rec.metadata_json?.prediction, s);
+            const timing = _pcTimeMetrics(null, rec.metadata_json?.prediction, s, rec.prediction_is_current);
             const timeScope = timing.scope === 'burn_plus_pour' ? 'прожиг + нанесение' : 'нормальный цикл';
 
             // Plan and outcome sit side by side: the whole point of the
             // list is answering "did the estimate hold?" without opening
             // the record.
             const plan = timing.predictedHours != null
-                ? `<span title="${timeScope}">${timing.predictedHours} ч</span>${s.predicted_cost_rub != null
+                ? `<span title="${timeScope}">${Number(timing.predictedHours.toFixed(3))} ч</span>${s.predicted_cost_rub != null
                     ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${Math.round(s.predicted_cost_rub).toLocaleString('ru')} ₽</div>` : ''}`
                 : '<span style="color:var(--text-muted);">—</span>';
 
             let fact = '<span style="color:var(--text-muted);">—</span>';
             if (timing.actualHours != null) {
-                fact = `<span title="${timeScope}; допуск проверен сервером">${timing.actualHours} ч</span>`;
+                fact = `<span title="${timeScope}; допуск проверен сервером">${Number(timing.actualHours.toFixed(3))} ч</span>`;
             }
 
             let accuracy = '<span style="color:var(--text-muted);">—</span>';
@@ -295,6 +309,7 @@ async function loadArchive(skip = 0) {
                        ${active ? 'background:#2d3748;color:#e2e8f0;' : 'color:#60a5fa;'}">${i + 1}</a>`;
         }).join('');
     } catch (e) {
+        if (generation !== _archiveLoadGeneration) return;
         body.innerHTML = `<tr><td colspan="8" style="color:#ef4444;padding:14px;">Ошибка загрузки архива: ${_esc(e.message)}</td></tr>`;
         empty.style.display = 'none'; wrap.style.display = 'block';
     }
@@ -430,16 +445,11 @@ async function uploadArchiveFile(recordId, file, skipReload = false) {
 }
 
 async function previewArchiveStl(url, name) {
-    document.getElementById('viewer-title').textContent = name;
-    document.getElementById('viewer-meta').innerHTML = '';
-    document.getElementById('viewer-overlay').classList.add('open');
-    const wrap = document.getElementById('viewer-canvas-wrap');
-    wrap.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280;">Загрузка…</div>';
+    const generation = _beginViewer(name);
     try {
         const buf = await fetch(url).then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); });
-        wrap.innerHTML = '<canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>';
-        _initThreeViewer(buf);
+        if (generation === _viewerGeneration) _showViewerBuffer(buf);
     } catch (e) {
-        wrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;">Не удалось загрузить файл: ${_esc(e.message)}</div>`;
+        if (generation === _viewerGeneration) _viewerError(e);
     }
 }

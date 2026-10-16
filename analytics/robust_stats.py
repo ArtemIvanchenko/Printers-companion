@@ -16,11 +16,11 @@ _DEFAULT_MAX_POINTS = 2000
 
 
 def theil_sen_slope(
-    values: Sequence[float] | np.ndarray,
+    values: Sequence[float | None] | np.ndarray,
     xs: Sequence[float] | np.ndarray | None = None,
     *,
     max_points: int = _DEFAULT_MAX_POINTS,
-) -> float:
+) -> float | None:
     """Robust linear trend slope (signal units per x-step).
 
     Args:
@@ -28,35 +28,21 @@ def theil_sen_slope(
         xs: matching x-positions; defaults to ``0, 1, 2, …``.
         max_points: cap before regression — inputs larger than this are
             sub-sampled to evenly-spaced points (theilslopes is O(n²), so
-            330k points would take hours while 2k points take <0.01s).
+            330k points would require billions of pairwise comparisons).
 
-    Returns 0.0 for degenerate input (fewer than 2 points) or if the
-    regression fails, so callers never have to wrap this in try/except.
+    Returns None for unknown/degenerate input or a failed regression. A
+    measured flat trend remains 0.0, distinct from an unavailable trend.
     """
-    vals = np.asarray(values, dtype=float)
-    n = vals.size
-    if n < 2:
-        return 0.0
-
-    x = np.arange(n, dtype=float) if xs is None else np.asarray(xs, dtype=float)
-
-    if n > max_points:
-        idx = np.round(np.linspace(0, n - 1, max_points)).astype(int)
-        vals, x = vals[idx], x[idx]
-
-    try:
-        return float(theilslopes(vals, x).slope)
-    except Exception:
-        return 0.0
+    return theil_sen_slope_ci(values, xs, max_points=max_points)[0]
 
 
 def theil_sen_slope_ci(
-    values: Sequence[float] | np.ndarray,
+    values: Sequence[float | None] | np.ndarray,
     xs: Sequence[float] | np.ndarray | None = None,
     *,
     max_points: int = _DEFAULT_MAX_POINTS,
     alpha: float = 0.95,
-) -> tuple[float, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None]:
     """Theil-Sen slope with a confidence interval on the slope itself.
 
     Returns ``(slope, low_slope, high_slope)`` at the given confidence level.
@@ -64,21 +50,31 @@ def theil_sen_slope_ci(
     scipy cannot estimate them (too few points, degenerate input): callers
     must treat that as "no interval available", not as "the slope is exact".
     """
-    vals = np.asarray(values, dtype=float)
-    n = vals.size
-    if n < 2:
-        return 0.0, None, None
-
-    x = np.arange(n, dtype=float) if xs is None else np.asarray(xs, dtype=float)
-    if n > max_points:
-        idx = np.round(np.linspace(0, n - 1, max_points)).astype(int)
-        vals, x = vals[idx], x[idx]
-
     try:
+        vals = np.asarray(values, dtype=float)
+        x = np.arange(vals.size, dtype=float) if xs is None else np.asarray(xs, dtype=float)
+        if (vals.ndim != 1 or x.ndim != 1 or vals.size != x.size
+                or not isinstance(max_points, int) or isinstance(max_points, bool) or max_points < 2):
+            return None, None, None
+        finite = np.isfinite(vals) & np.isfinite(x)
+        vals, x = vals[finite], x[finite]
+        n = vals.size
+        if n > max_points:
+            idx = np.round(np.linspace(0, n - 1, max_points)).astype(int)
+            vals, x = vals[idx], x[idx]
+        if vals.size < 2 or np.all(x == x[0]):
+            return None, None, None
         result = theilslopes(vals, x, alpha=alpha)
+        slope = float(result.slope)
+        if not np.isfinite(slope):
+            return None, None, None
+        # Two observations define a point slope, not its uncertainty. SciPy's
+        # equal bounds in this case must not be presented as an exact interval.
+        if vals.size < 3:
+            return slope, None, None
         low, high = float(result.low_slope), float(result.high_slope)
-        if not (np.isfinite(low) and np.isfinite(high)):
-            return float(result.slope), None, None
-        return float(result.slope), low, high
+        if not (np.isfinite(low) and np.isfinite(high) and low <= slope <= high):
+            return slope, None, None
+        return slope, low, high
     except Exception:
-        return 0.0, None, None
+        return None, None, None

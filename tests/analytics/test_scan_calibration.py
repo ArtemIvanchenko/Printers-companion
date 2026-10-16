@@ -30,6 +30,7 @@ from analytics.prediction.scan_calibration import (  # noqa: E402
 )
 from domain.enums.common import SourceFileFamily  # noqa: E402
 from analytics.prediction.scan_scope import scan_scope, scan_scope_key  # noqa: E402
+from core.versioning.constants import ANALYSIS_VERSION  # noqa: E402
 from domain.models.prints import MachineParams, PrintRecord  # noqa: E402
 from domain.models.sessions import BuildSession  # noqa: E402
 from domain.schemas.parsing import FileClassification  # noqa: E402
@@ -156,6 +157,8 @@ def _linked_pair(db, tmp_path, record_id: str, series: LayerGeometrySeries,
     row.printer_id = SCAN_PARAMS["printer_id"]
     row.start_ts = datetime(2027, 3, 1, 8, tzinfo=timezone.utc)
     prediction = {
+        "analysis_version": ANALYSIS_VERSION,
+        "provenance": {"component": "print-estimate", "analysis_version": ANALYSIS_VERSION},
         "input_revision": 1,
         "build_origin_source": "explicit",
         "build_origin_z_mm": 0.0,

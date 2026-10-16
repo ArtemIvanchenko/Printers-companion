@@ -36,6 +36,41 @@ def finite_number(value: Any) -> bool:
         return False
 
 
+def machine_cycle_prediction_hours(snapshot: dict) -> float | None:
+    """Admit a stored full-cycle total only with its accepted controller model.
+
+    Older estimators also wrote burn+pour into ``machine_cycle_hours`` when no
+    cycle model applied. Field presence or a numeric value cannot authorize
+    full-cycle comparisons or hourly cost. Read captured evidence, never today's
+    settings, and keep the phase subtotal independently available.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("prediction_time_scope") not in (None, "machine_cycle"):
+        return None
+    if (snapshot.get("layer_overhead_source") != "calibrated_max_base_floor"
+            or snapshot.get("layer_cycle_model_version") != "max_base_floor_v2"):
+        return None
+    base = snapshot.get("layer_overhead_ms")
+    floor = snapshot.get("minimum_layer_cycle_ms")
+    floor_status = snapshot.get("minimum_layer_cycle_status")
+    if not finite_number(base) or not 0 <= base <= 10_000:
+        return None
+    if floor is None:
+        if floor_status != "unidentified":
+            return None
+    elif (not finite_number(floor) or not 0 < floor <= 120_000
+          or floor_status != "identified"):
+        return None
+    total, subtotal = snapshot.get("machine_cycle_hours"), snapshot.get("print_hours")
+    if (not finite_number(total) or total < 0
+            or not finite_number(subtotal) or subtotal < 0
+            # Persisted hours round to 0.001; never derive either value here.
+            or total + .001 < subtotal):
+        return None
+    return float(total)
+
+
 def valid_timing_payload(payload: dict) -> bool:
     """Allow old partial summaries, but never known contradictions or NaN."""
     if not isinstance(payload, dict) or payload.get("timing_valid") is False:

@@ -1,11 +1,12 @@
 """Local telemetry inputs and bounded browser projections; no database access."""
-import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from domain.enums.common import SourceFileFamily
 from domain.services.ingestion import IngestedFile
+from parsers.common.timeline import TimestampQualityTracker
+from parsers.common.timestamps import date_hint_from_filename, parse_timestamp_token
 
 # Raw column -> chart series, grouped by physical meaning (see profiles/m350/signals.yaml).
 _OXYGEN_COLUMNS = ["SO1", "SO2"]
@@ -28,21 +29,6 @@ def _count_lines(parse_result) -> int:
         if isinstance(value, int):
             return value
     return 0
-
-
-def _clock_to_seconds(value: Any) -> float | None:
-    """Parse an 'HH:MM:SS(.fff)' clock string into seconds since midnight."""
-    if not isinstance(value, str):
-        return None
-    parts = value.strip().split(":")
-    if len(parts) != 3:
-        return None
-    try:
-        h, m = int(parts[0]), int(parts[1])
-        s = float(parts[2].replace(",", "."))
-    except ValueError:
-        return None
-    return h * 3600 + m * 60 + s
 
 
 def _downsample(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -127,16 +113,6 @@ def _assemble_groups(time_axis: list, col_series: dict[str, list]) -> dict[str, 
     return telemetry
 
 
-def _sensor_file_date(file: IngestedFile):
-    match = re.search(r"(?<!\d)(\d{2}\.\d{2}\.\d{4})(?!\d)", Path(file.path).name)
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match.group(1), "%d.%m.%Y").date()
-    except ValueError:
-        return None
-
-
 def analysis_telemetry(
     files: list[IngestedFile],
     active_start: datetime | None = None,
@@ -214,11 +190,14 @@ def analysis_telemetry(
         "scope": telemetry.get("scope", "bounded_parser_tables"),
         "read_diagnostics": dict(diagnostics),
         "complete_available_stream": bool(timestamps) and not missing
-            and not diagnostics.get("overlapping_or_out_of_order_rows")
-            and not diagnostics.get("invalid_timestamps"),
+            and not any(diagnostics.get(key) for key in (
+                "overlapping_or_out_of_order_rows", "out_of_order_timestamps",
+                "invalid_timestamps", "unparsed_rows", "malformed_rows", "missing_time_columns",
+            )),
         "limitations_ru": [
             "Полный доступный поток не доказывает полноту выгрузки с принтера.",
             "Пропуски и отсутствующие исходники не интерполируются; выборка для графика не используется для диагностики.",
+            "Без меток основного журнала привязка к слоям использует сохранённую выборку burn-таблицы; невидимые переходы суток не восстанавливаются.",
         ],
     }
     return telemetry, stats, evidence
@@ -272,101 +251,89 @@ def _sample_telemetry(files: list[IngestedFile], limit: int | None = _MAX_TELEME
 
 
 def _layer_burn_times(files: list[IngestedFile]) -> list[dict[str, Any]]:
-    """Per-layer burn duration.
+    """Measured OLD_STATS or same-row NEW_STATS durations, never clock spans.
 
-    Preferred source: the time.log ``OLD_STATS`` lines, parsed into
-    ``layer_timing_summary`` events whose payload carries ``burn_ms`` directly
-    (the machine's own per-layer burn duration). Second choice: derive it from
-    the ``NEW_STATS`` ``Burn_Start``/``Burn_End`` absolute-ms counters. Last
-    resort: approximate from a burn table's N + Time columns.
-
-    (Note: payloads are structured dicts — there is no ``raw_text`` field to
-    regex; reading the parsed numbers directly is both correct and cheaper.)
+    All available phase/cycle evidence shares the existing admission policy:
+    conflicting attempts or known-invalid measurements reject a physical layer.
+    NEW_STATS uptime counters can only be paired within their actual raw row.
     """
-    from analytics.prediction.scan_calibration import _burn_seconds_by_layer
+    from analytics.prediction.timing_validation import calibration_burn_ms, calibration_timing_payloads
 
-    timing_events = [e for f in files if f.parse_result
-                     and f.parse_result.file_family == SourceFileFamily.time_log
-                     for e in f.parse_result.events]
-    if any(e.event_type == "layer_timing_summary" for e in timing_events):
-        return [{"layer": layer, "duration_sec": round(value, 1)}
-                for layer, value in sorted(_burn_seconds_by_layer(timing_events).items())]
-    seen: dict[int, float] = {}
-    # NEW_STATS fallback accumulators (used only if OLD_STATS is absent).
-    burn_start: dict[int, int] = {}
-    burn_end: dict[int, int] = {}
-
+    summaries = []
+    detailed = []
+    duration_pairs = (
+        ("burn_ms", "burn_start", "burn_end"),
+        ("pour_ms", "pour_start", "pour_end"),
+        ("make_layer_ms", "make_layer_start", "layer_end"),
+    )
+    marker_types = {kind for _, started, ended in duration_pairs for kind in (started, ended)}
     for file in files:
         pr = file.parse_result
         if not pr or pr.file_family != SourceFileFamily.time_log:
             continue
+        rows: dict[tuple, dict] = {}
         for event in pr.events:
+            if event.event_type == "layer_timing_summary":
+                summaries.append(event)
+                continue
+            if event.event_type not in marker_types:
+                continue
             payload = event.payload or {}
             layer = payload.get("layer")
-            if not isinstance(layer, int):
+            if type(layer) is not int or layer < 1:
                 continue
-            if event.event_type == "layer_timing_summary":
-                burn_ms = payload.get("burn_ms")
-                if isinstance(burn_ms, int) and burn_ms > 0 and layer not in seen:
-                    seen[layer] = round(burn_ms / 1000.0, 1)
-            elif event.event_type == "burn_start" and isinstance(payload.get("abs_ms"), int):
-                burn_start.setdefault(layer, payload["abs_ms"])
-            elif event.event_type == "burn_end" and isinstance(payload.get("abs_ms"), int):
-                burn_end[layer] = payload["abs_ms"]
-
-    # If no OLD_STATS summaries, derive from NEW_STATS start/end abs-ms counters.
-    if not seen:
-        for layer in burn_start.keys() & burn_end.keys():
-            dur_ms = burn_end[layer] - burn_start[layer]
-            if dur_ms > 0:
-                seen[layer] = round(dur_ms / 1000.0, 1)
-
-    if seen:
-        return [{"layer": layer, "duration_sec": dur} for layer, dur in sorted(seen.items())]
-
-    # Fallback: approximate from a burn table's layer (N) + Time columns.
-    table = None
-    for file in files:
-        if not file.parse_result:
-            continue
-        for t in file.parse_result.tables:
-            if not t.rows:
+            source = event.source
+            line = source.source_line
+            offset = source.source_offset
+            if not ((type(line) is int and line > 0) or (type(offset) is int and offset >= 0)):
+                # Legacy markers without a row location cannot establish a pair.
                 continue
-            # Sample several rows: the first may omit columns the table carries.
-            keys: set[str] = set()
-            for row in t.rows[:10]:
-                keys.update(row.keys())
-            if _LAYER_COLUMN in keys and _TIME_COLUMN in keys:
-                table = t
-                break
-        if table:
-            break
-    if table is None:
-        return []
-
-    spans: dict[int, list[float]] = {}
-    for row in table.rows:
-        layer = row.get(_LAYER_COLUMN)
-        secs = _clock_to_seconds(row.get(_TIME_COLUMN))
-        if not isinstance(layer, int) or secs is None:
-            continue
-        spans.setdefault(layer, [secs, secs])
-        if secs < spans[layer][0]:
-            spans[layer][0] = secs
-        if secs > spans[layer][1]:
-            spans[layer][1] = secs
-    result = [
-        {"layer": layer, "duration_sec": round(hi - lo, 1)}
-        for layer, (lo, hi) in sorted(spans.items())
-        if hi >= lo
-    ]
-    return result
+            row = rows.setdefault((layer, source.source_file_id, line, offset), {})
+            value = payload.get("abs_ms")
+            if (type(value) is not int or value < 0
+                    or (event.event_type in row and row[event.event_type] != value)):
+                row["invalid"] = True
+            else:
+                row[event.event_type] = value
+        for (layer, _, _, _), row in rows.items():
+            payload = {"layer": layer}
+            if row.get("invalid"):
+                payload["timing_valid"] = False
+            for name, started, ended in duration_pairs:
+                if started in row and ended in row:
+                    payload[name] = row[ended] - row[started]
+            if len(payload) > 1:
+                detailed.append({"event_type": "layer_timing_summary", "payload": payload})
+    # Original summaries retain numerical precedence over equivalent details.
+    burns = calibration_burn_ms(calibration_timing_payloads([*summaries, *detailed]))
+    return [{"layer": layer, "duration_sec": round(value / 1000.0, 1)}
+            for layer, value in sorted(burns.items())]
 
 
 def _layer_time_points(files: list[IngestedFile]) -> list[dict[str, Any]]:
-    """Physical layer timestamps from daily burn logs for sensor correlation."""
+    """Logged layer markers for approximate sensor correlation, not burn starts.
+
+    Canonical main-log markers already carry the whole-file normalized calendar.
+    The table-only fallback retains source order and observed rollovers; a
+    sampled table cannot reveal unobserved day boundaries or missing layers.
+    """
     points: list[dict[str, Any]] = []
     seen: set[tuple[int, str]] = set()
+    for file in files:
+        pr = file.parse_result
+        if not pr or pr.file_family != SourceFileFamily.main_event_log:
+            continue
+        for event in pr.events:
+            if (event.event_type != "burn_event" or type(event.layer) is not int
+                    or event.layer < 1 or not isinstance(event.ts, datetime)):
+                continue
+            timestamp = event.ts.isoformat()
+            key = (event.layer, timestamp)
+            if key not in seen:
+                points.append({"layer": event.layer, "timestamp": timestamp})
+                seen.add(key)
+    if points:
+        return sorted(points, key=lambda point: point["timestamp"])
     for file in files:
         if (
             not file.classification
@@ -374,19 +341,20 @@ def _layer_time_points(files: list[IngestedFile]) -> list[dict[str, Any]]:
             or not file.parse_result
         ):
             continue
-        file_date = _sensor_file_date(file)
-        if file_date is None:
-            continue
+        hint = date_hint_from_filename(Path(file.path))
+        timeline = TimestampQualityTracker()
         for table in file.parse_result.tables:
             for row in table.rows:
+                raw_time = row.get(_TIME_COLUMN)
+                timestamp, _, uncertainty = (
+                    parse_timestamp_token(raw_time, hint)
+                    if isinstance(raw_time, str) else (None, None, 0)
+                )
+                timestamp = timeline.add(timestamp, clock_only=uncertainty > 0)
                 layer = row.get(_LAYER_COLUMN)
-                seconds = _clock_to_seconds(row.get(_TIME_COLUMN))
-                if not isinstance(layer, int) or seconds is None:
+                if type(layer) is not int or layer < 1 or timestamp is None:
                     continue
-                timestamp = (
-                    datetime.combine(file_date, datetime.min.time())
-                    + timedelta(seconds=seconds)
-                ).isoformat()
+                timestamp = timestamp.isoformat()
                 key = (layer, timestamp)
                 if key not in seen:
                     points.append({"layer": layer, "timestamp": timestamp})

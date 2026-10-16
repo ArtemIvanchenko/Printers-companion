@@ -29,7 +29,7 @@ const primaryInstance = app.requestSingleInstanceLock();
 if (!primaryInstance) app.quit();
 const state = { version: manifest.version, phase: 'setup', configured: false, busy: false,
   testBuild, deploymentAvailable: manifest.source_state === 'clean' && Object.keys(manifest.images || {}).length === 3,
-  message: '', url: 'http://127.0.0.1:8000', updateReady: false, canRollback: false };
+  message: '', url: 'http://127.0.0.1:8000', updateReady: false, manualUpdateAvailable: false, canRollback: false };
 function notify(value) {
   Object.assign(state, value);
   if (window && !window.isDestroyed()) window.webContents.send('companion:state-changed', { ...state });
@@ -42,7 +42,8 @@ function makeRuntime(root) {
     source: path.resolve(__dirname, '..'), notify: message => notify({ message, busy: true }) });
 }
 async function launch() {
-  if (!runtime || state.busy) return;
+  if (!runtime) return;
+  if (state.busy || runtime.busy || updates?.busy) throw new Error('Другая операция ещё выполняется.');
   clearTimeout(deferredUpdate);
   notify({ phase: 'starting', busy: true, message: 'Проверяю Docker, хранилище и версию приложения…' });
   try {
@@ -59,7 +60,14 @@ async function launch() {
         notify({ phase: 'ready', busy: false, backendVersion: saved.version, backendUpdatePending: true,
           backendSHA: restored.sha, url: localURL(restored.url),
           message: `Обновление не завершено. Работает подтверждённая версия ${saved.version}. ${error.message}`, canRollback: saved.can_rollback });
-        if (error.code === 'busy') deferredUpdate = setTimeout(() => { if (!allowQuit) launch(); }, 30000);
+        if (error.code === 'busy') deferredUpdate = setTimeout(function retry() {
+          if (allowQuit) return;
+          if (state.busy || runtime?.busy || updates?.busy) {
+            deferredUpdate = setTimeout(retry, 30000);
+            return;
+          }
+          launch();
+        }, 30000);
         return;
       } catch { /* Never pretend failed recovery succeeded. */ }
     }
@@ -71,8 +79,10 @@ function handler(name, callback) {
     if (!trustedSender(event, window, page)) throw new Error('Недоверенный источник команды.');
     try { return await callback(...args); }
     catch (error) {
-      // An updater/settings error is not evidence the running API failed.
-      notify({ phase: state.phase === 'ready' ? 'ready' : 'error', busy: false, message: error.message });
+      // A rejected caller does not own another accepted lifecycle operation.
+      // Only its owner may publish terminal phase/busy state.
+      const inFlight = state.busy || runtime?.busy || updates?.busy;
+      notify({ phase: inFlight ? state.phase : state.phase === 'ready' ? 'ready' : 'error', message: error.message });
       throw error;
     }
   });
@@ -81,41 +91,71 @@ function setupHandlers() {
   handler('state', () => ({ ...state }));
   handler('launch', launch);
   handler('configure', async input => {
-    if (state.busy || state.configured || fs.existsSync(installationFile())) throw new Error('Установка уже настроена или занята.');
+    if (state.busy || runtime?.busy || updates?.busy || state.configured || fs.existsSync(installationFile())) throw new Error('Установка уже настроена или занята.');
     if (!state.deploymentAvailable) throw new Error('В тестовом пакете ещё нет проверенной вычислительной сборки. Новая установка не запускается; реквизиты NAS вводить не нужно.');
     const values = settingsInput(input);
     const root = path.join(app.getPath('userData'), 'operator');
     runtime = makeRuntime(root);
     notify({ busy: true, phase: 'starting', message: 'Сохраняю настройки на этом компьютере…' });
-    await runtime.run('configure', values);
-    saveInstallation(installationFile(), root);
-    notify({ configured: true, busy: false });
-    await launch();
+    try {
+      await runtime.run('configure', values);
+      saveInstallation(installationFile(), root);
+      notify({ configured: true, busy: false });
+      await launch();
+    } catch (error) {
+      notify({ phase: 'error', busy: false, message: error.message });
+      throw error;
+    }
   });
   handler('import', async () => {
-    if (state.busy || state.configured || fs.existsSync(installationFile())) throw new Error('Установка уже подключена или занята.');
-    const selection = await dialog.showOpenDialog(window, { title: 'Папка существующего Printer’s Companion', properties: ['openDirectory'] });
-    if (selection.canceled) return;
-    const root = path.resolve(selection.filePaths[0]);
-    if (!fs.existsSync(path.join(root, 'docker-compose.yml'))) throw new Error('В выбранной папке нет установки Printer’s Companion.');
-    // Validate BEFORE committing the binding; a wrong folder remains retryable.
-    runtime = makeRuntime(root);
-    notify({ busy: true, phase: 'starting', message: 'Проверяю существующую установку без переноса данных…' });
-    await runtime.run('adopt');
-    saveInstallation(installationFile(), root);
-    notify({ configured: true, busy: false });
-    await launch();
+    if (state.busy || runtime?.busy || updates?.busy || state.configured || fs.existsSync(installationFile())) throw new Error('Установка уже подключена или занята.');
+    const previousPhase = state.phase; const previousMessage = state.message;
+    // The accepted selector owns the operation before its first await, too.
+    notify({ busy: true, phase: 'starting', message: 'Выбираю существующую установку…' });
+    try {
+      const selection = await dialog.showOpenDialog(window, { title: 'Папка существующего Printer’s Companion', properties: ['openDirectory'] });
+      if (selection.canceled) { notify({ phase: previousPhase, busy: false, message: previousMessage }); return; }
+      const root = path.resolve(selection.filePaths[0]);
+      if (!fs.existsSync(path.join(root, 'docker-compose.yml'))) throw new Error('В выбранной папке нет установки Printer’s Companion.');
+      // Validate BEFORE committing the binding; a wrong folder remains retryable.
+      runtime = makeRuntime(root);
+      notify({ message: 'Проверяю существующую установку без переноса данных…' });
+      await runtime.run('adopt');
+      saveInstallation(installationFile(), root);
+      notify({ configured: true, busy: false });
+      await launch();
+    } catch (error) {
+      notify({ phase: 'error', busy: false, message: error.message });
+      throw error;
+    }
   });
   handler('recover', async () => {
-    if (!runtime || state.busy) throw new Error('Установка недоступна или занята.');
+    if (!runtime || state.busy || runtime.busy || updates?.busy) throw new Error('Установка недоступна или занята.');
+    clearTimeout(deferredUpdate);
     notify({ phase: 'starting', busy: true, message: 'Восстанавливаю подтверждённую предыдущую версию…' });
-    const result = await runtime.run('rollback');
-    notify({ phase: 'ready', busy: false, message: `Восстановлена версия ${result.version}.`, backendVersion: result.version,
-      backendSHA: result.sha, url: localURL(result.url), canRollback: result.can_rollback });
+    try {
+      const result = await runtime.run('rollback');
+      notify({ phase: 'ready', busy: false, message: `Восстановлена версия ${result.version}.`, backendVersion: result.version,
+        backendSHA: result.sha, url: localURL(result.url), canRollback: result.can_rollback });
+    } catch (error) {
+      notify({ phase: 'error', busy: false, message: error.message });
+      throw error;
+    }
   });
   handler('check-update', () => updates.check());
+  handler('open-update', async () => {
+    if (state.busy || runtime?.busy || updates.busy || !updates.manualInstaller) throw new Error('Установщик ещё не выбран или приложение занято.');
+    const url = new URL(updates.manualInstaller.url);
+    if (url.protocol !== 'https:' || url.host !== 'github.com' || url.username || url.password || url.search || url.hash ||
+      !url.pathname.startsWith('/ArtemIvanchenko/Printers-companion/releases/download/')) throw new Error('Недоверенный адрес установщика.');
+    notify({ busy: true, message: 'Открываю установщик на GitHub…' });
+    try {
+      await shell.openExternal(url.href);
+      notify({ message: 'Скачайте установщик и закройте приложение перед установкой. Данные и настройки сохраняются.' });
+    } finally { notify({ busy: false }); }
+  });
   handler('install-update', async () => {
-    if (runtime?.busy || state.busy || !updates.enabled || !updates.ready) throw new Error('Проверенное обновление ещё не готово или приложение занято.');
+    if (runtime?.busy || updates.busy || state.busy || !updates.enabled || !updates.ready) throw new Error('Проверенное обновление ещё не готово или приложение занято.');
     clearTimeout(deferredUpdate);
     const previousPhase = state.phase;
     notify({ phase: 'starting', busy: true, message: 'Завершаю принятые загрузки перед перезапуском…' });
@@ -124,14 +164,15 @@ function setupHandlers() {
       // The short-lived preparation child has exited; install's busy guard
       // must now pass. The durable gate remains until the next launch.
       notify({ phase: previousPhase, busy: false });
-      updates.install();
+      await updates.install();
     } catch (error) {
       allowQuit = false;
       let recovered = true;
       if (runtime) { try { await runtime.run('cancel-restart'); } catch { recovered = false; } }
+      const failure = recovered ? error : new Error('Отмена перезапуска не подтверждена. Нужна проверка восстановления; журнал сохранён.');
       notify({ phase: recovered ? previousPhase : 'error', busy: false, canRollback: !recovered || state.canRollback,
-        message: recovered ? error.message : 'Отмена перезапуска не подтверждена. Нужна проверка восстановления; журнал сохранён.' });
-      throw error;
+        message: failure.message });
+      throw failure;
     }
   });
 }
@@ -141,7 +182,7 @@ async function closeWindow(event) {
   if (closing) return;
   closing = true;
   try {
-  if (state.busy || runtime?.busy) {
+  if (state.busy || runtime?.busy || updates?.busy) {
     await dialog.showMessageBox(window, { type: 'info', message: 'Операция ещё выполняется', detail: 'Дождитесь завершения переключения. Данные и журнал обновления сохраняются.', buttons: ['Продолжить ожидание'] });
     return;
   }
@@ -150,12 +191,16 @@ async function closeWindow(event) {
     detail: 'Можно оставить вычисления работать или остановить приложение. NAS и данные не затрагиваются.',
     buttons: ['Оставить работать и закрыть окно', 'Остановить и выйти', 'Отмена'], defaultId: 0, cancelId: 2 });
   if (answer.response === 2) return;
+  if (state.busy || runtime?.busy || updates?.busy) {
+    await dialog.showMessageBox(window, { type: 'info', message: 'Операция ещё выполняется', detail: 'Дождитесь завершения переключения. Данные и журнал обновления сохраняются.', buttons: ['Продолжить ожидание'] });
+    return;
+  }
+  clearTimeout(deferredUpdate);
   if (answer.response === 1) {
     notify({ busy: true, message: 'Проверяю возможность безопасной остановки…' });
     try { await runtime.run('stop'); }
-    catch (error) { notify({ busy: false, message: error.message }); return; }
+    catch (error) { notify({ phase: 'error', busy: false, message: error.message }); return; }
   }
-  clearTimeout(deferredUpdate);
   allowQuit = true;
   app.quit();
   } finally { closing = false; }
@@ -183,8 +228,11 @@ app.whenReady().then(async () => {
   });
   window.on('close', closeWindow);
   updates = new Updates({ updater: require('electron-updater').autoUpdater,
+    installEvents: require('electron').autoUpdater,
     enabled: app.isPackaged && manifest.desktop_updates_enabled === true,
-    runtimeBusy: () => Boolean(runtime?.busy || state.phase === 'starting'),
+    runtimeBusy: () => Boolean(runtime?.busy || state.busy || state.phase === 'starting'),
+    checkPublishedRelease: () => (runtime || makeRuntime(path.join(app.getPath('userData'), 'operator'))).run('check-release'),
+    backendPending: () => Boolean(state.backendUpdatePending),
     notify, closeForInstall: () => { allowQuit = true; } });
   setupHandlers();
   Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -201,8 +249,10 @@ app.whenReady().then(async () => {
     const bridge = await window.webContents.executeJavaScript('window.companion.state()');
     if (bridge.phase !== 'setup' || bridge.configured) throw new Error('Packaged IPC smoke failed');
     if (testBuild) {
-      await window.webContents.executeJavaScript('window.companion.checkUpdate()');
-      if (!state.message.includes('Тестовая сборка')) throw new Error('Unsigned channel smoke failed');
+      let refused = false;
+      try { await window.webContents.executeJavaScript('window.companion.installUpdate()'); }
+      catch { refused = true; }
+      if (!refused || updates.enabled || state.updateReady) throw new Error('Unsigned install gate smoke failed');
     }
     notify({ message: 'Тестовая сборка · без подключения к рабочим данным' });
     if (smokeDir) {

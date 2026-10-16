@@ -82,6 +82,8 @@ jobs:
     uses: ./.github/workflows/desktop.yml
     with:
       images_artifact: operator-images
+      signed_release: ${{ vars.COMPANION_SIGNED_RELEASE == 'true' }}
+    secrets: inherit
 
   release:
     needs: [publish, desktop]
@@ -91,29 +93,31 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked collector dependencies without Electron/build tooling
+        working-directory: desktop
+        run: npm ci --omit=dev --ignore-scripts
       - uses: actions/download-artifact@v4
         with:
-          pattern: companion-test-*
+          pattern: companion-${{ vars.COMPANION_SIGNED_RELEASE == 'true' && 'signed' || 'test' }}-*
           path: installers
       - uses: actions/download-artifact@v4
         with:
           name: operator-images
-          path: release-assets
-      - name: Collect installers and checksums, never publish an unsigned feed
+          path: operator-images
+      - name: Validate native identities, streamed checksums and optional signed feed
+        env:
+          COMPANION_SIGNED_RELEASE: ${{ vars.COMPANION_SIGNED_RELEASE == 'true' && 'true' || 'false' }}
         run: |
-          python - <<'PY'
-          import hashlib, pathlib, shutil
-          root = pathlib.Path('release-assets')
-          installers = list(pathlib.Path('installers').rglob('Printer-Companion-*'))
-          selected = [p for p in installers if p.suffix in {'.dmg', '.zip', '.exe'}]
-          assert len(selected) == 5, f'Expected 2 Mac DMGs, 2 ZIPs and Windows EXE, got {len(selected)}'
-          for source in selected:
-              target = root / source.name
-              assert not target.exists(), f'Duplicate installer: {source.name}'
-              shutil.copyfile(source, target)
-          hashes = [hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name for p in sorted(root.iterdir()) if p.is_file()]
-          (root / 'SHA256SUMS.txt').write_text('\n'.join(hashes) + '\n')
-          PY
+          set -euo pipefail
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          signed=""
+          if [ "$COMPANION_SIGNED_RELEASE" = true ]; then signed="--signed"; fi
+          node desktop/scripts/collect-release.cjs --installers installers \
+            --images operator-images/operator-images.json --output release-assets \
+            --version "$VERSION" --sha "$GITHUB_SHA" $signed
       - name: Publish only after all platform builds and Docker lifecycle pass
         env:
           GH_TOKEN: ${{ github.token }}

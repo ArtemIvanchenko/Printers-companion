@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
+from core.versioning.provenance import stable_hash
 from domain.models.prints import (
     MachineParams, MachinePreset, PlateGeometryCache, PrintRecord, PrintRecordFile,
 )
@@ -35,6 +36,29 @@ _PARAM_FIELDS = (
     "recoat_time_by_mat", "scan_model_by_mat", "layer_cycle_model_by_mode",
     "build_area_cm2",
 )
+
+
+def card_link_fingerprint(session_id: str | None, metadata: dict[str, Any]) -> str:
+    """Link identity only; unrelated card edits do not cancel an upload."""
+    return stable_hash({
+        "session_id": session_id,
+        "session_link_confirmed": metadata.get("session_link_confirmed"),
+        "session_link_evidence": metadata.get("session_link_evidence"),
+    })
+
+
+def captured_card_link_intent(audit_trail: list[dict], record_id: str) -> dict | None:
+    """One immutable intake observation, or conservative legacy admission."""
+    captures = [row for row in audit_trail if row.get("action") == "card_link_intent_captured"]
+    if len(captures) != 1:
+        return None
+    details = captures[0].get("details") or {}
+    token = details.get("expected_link_fingerprint")
+    if (details.get("record_id") != record_id or not isinstance(token, str) or not token
+            or (details.get("expected_session_id") is not None
+                and not isinstance(details.get("expected_session_id"), str))):
+        return None
+    return details
 
 
 def lock_estimation_configuration(db: Session) -> None:
@@ -376,8 +400,9 @@ class PrintsRepository:
         *,
         compute_node_id: str | None = None,
         link_evidence: dict[str, Any] | None = None,
+        expected_link_fingerprint: str | None = None,
     ) -> bool:
-        """Attach a log session; its start timestamp becomes the authoritative print date."""
+        """CAS an automatic link; explicit operator replacement uses update_print_record."""
         try:
             with self.db.begin_nested():
                 # Same parent-first order as import/calibration/estimation.
@@ -390,6 +415,7 @@ class PrintsRepository:
                     select(PrintRecord)
                     .where(PrintRecord.record_id == record_id)
                     .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
                 if row is None or session is None:
                     return False
@@ -418,8 +444,21 @@ class PrintsRepository:
                 )
                 if existing_link is not None:
                     return False
-                row.session_id = session_id
+                # begin_nested flushed this unit of work before the fresh card
+                # lock. Do not refresh the session and discard prepared outputs.
                 metadata = dict(row.metadata_json or {})
+                if expected_link_fingerprint is not None:
+                    if card_link_fingerprint(row.session_id, metadata) != expected_link_fingerprint:
+                        return False
+                else:
+                    # Old jobs cannot authorise replacing another session or
+                    # undoing a manual unlink. Same-session replay is a no-op.
+                    if (metadata.get("session_link_confirmed") is False
+                            or row.session_id not in (None, session_id)):
+                        return False
+                    if row.session_id == session_id:
+                        return True
+                row.session_id = session_id
                 metadata["session_link_confirmed"] = bool(
                     link_evidence and link_evidence.get("eligible") is True
                     and (link_evidence.get("auto_link_allowed") is True
@@ -638,6 +677,19 @@ class PrintsRepository:
             .limit(1)
         ).first()
         return _preset_to_dict(row) if row else None
+
+    def list_active_presets_for_materials(self, materials: list[str]) -> list[dict[str, Any]]:
+        """Read one catalogue page's configured defaults without per-card queries.
+
+        Keep conflicting legacy defaults visible to the caller rather than
+        guessing which one established an old quote's captured configuration.
+        """
+        if not materials:
+            return []
+        rows = self.db.scalars(select(MachinePreset).where(
+            MachinePreset.material.in_(materials), MachinePreset.is_default.is_(True),
+        )).all()
+        return [_preset_to_dict(row) for row in rows]
 
     def create_preset(self, values: dict[str, Any]) -> dict[str, Any]:
         lock_estimation_configuration(self.db)

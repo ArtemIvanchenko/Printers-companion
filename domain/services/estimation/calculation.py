@@ -13,6 +13,7 @@ from domain.services.estimation.inputs import (
     _geometry_quality,
     prediction_input_hash,
     geometry_fingerprint,
+    prediction_configuration,
 )
 from storage.object_store.minio_client import ObjectStore
 
@@ -74,44 +75,43 @@ def combined_prediction(
         return {"available": False, "reason": "Не удалось нарезать модель — проверьте файлы"}
 
     prediction = est.prediction.to_dict() if est.prediction else None
+    # These values feed saved calibration/comparison/diagnostic arithmetic.
+    # Display rounding belongs to readers, not this computational projection.
     return {
         "available": True,
         "n_parts": sum(1 for b in est.bodies if b.kind == "part"),
         "n_support_bodies": sum(1 for b in est.bodies if b.kind == "support"),
         "method": est.method,
         "build_axis": "Z",
-        "build_origin_z_mm": round(est.build_origin_z_mm, 3),
+        "build_origin_z_mm": est.build_origin_z_mm,
         "build_origin_source": est.build_origin_source,
         "layer_count": est.layer_count,
         "height_mm": round(est.height_mm, 2),
-        "print_hours": round(est.print_hours, 3),
-        "raw_scan_hours": round(est.raw_scan_hours, 3),
-        "raw_recoat_hours": round(est.raw_recoat_hours, 3),
-        "raw_print_hours": round(est.raw_print_hours, 3),
-        "correction_factor": round(est.correction_factor, 3),
-        "scan_hours": round(est.scan_hours, 3),
-        "recoat_hours": round(est.recoat_hours, 3),
+        "print_hours": est.print_hours,
+        "raw_scan_hours": est.raw_scan_hours,
+        "raw_recoat_hours": est.raw_recoat_hours,
+        "raw_print_hours": est.raw_print_hours,
+        "correction_factor": est.correction_factor,
+        "scan_hours": est.scan_hours,
+        "recoat_hours": est.recoat_hours,
         "cost_total_rub": cost_est.total_rub,
         "scan_source": est.scan_source,
         "recoat_time_ms": round(est.recoat_time_ms, 1),
         "recoat_time_source": est.recoat_time_source,
-        "layer_overhead_ms": (
-            round(est.layer_overhead_ms, 1) if est.layer_overhead_ms is not None else None
-        ),
+        "layer_overhead_ms": est.layer_overhead_ms,
         "layer_overhead_source": est.layer_overhead_source,
         "layer_overhead_hours": round(est.layer_overhead_hours, 3),
         "layer_overhead_n_prints": est.layer_overhead_n_prints,
         "layer_overhead_n_layers": est.layer_overhead_n_layers,
         "layer_cycle_n_geometries": est.layer_cycle_n_geometries,
         "layer_cycle_model_version": est.layer_cycle_model_version,
-        "minimum_layer_cycle_ms": (
-            round(est.minimum_layer_cycle_ms, 1) if est.minimum_layer_cycle_ms is not None else None
-        ),
+        "minimum_layer_cycle_ms": est.minimum_layer_cycle_ms,
         "minimum_layer_cycle_status": est.minimum_layer_cycle_status,
         "minimum_cycle_active_layers": est.minimum_cycle_active_layers,
         "minimum_cycle_training_active_layers": est.minimum_cycle_training_active_layers,
         "minimum_cycle_training_active_prints": est.minimum_cycle_training_active_prints,
-        "machine_cycle_hours": round(est.machine_cycle_hours, 3),
+        "machine_cycle_hours": est.machine_cycle_hours,
+        "prediction_time_scope": est.prediction_time_scope,
         "laser_count": int(params.get("laser_count") or 1),
         "geometry_totals": {
             name: round(float(value), 1) for name, value in est.geometry_totals.items()
@@ -150,6 +150,8 @@ def combined_prediction(
         # calibration can later pair it with real burn_ms without re-slicing.
         "scan_geometry": {
             **est.geometry_series.to_snapshot(),
+            # Discrete physical coverage cannot be inferred from rounded Z bounds.
+            "layer_count": est.layer_count,
             "layer_thickness_mm": float(params["layer_thickness_mm"]),
             "laser_count": int(params.get("laser_count") or 1),
         }
@@ -262,7 +264,10 @@ def calculate_prediction_snapshot(
 
     from analytics.prediction.layer_engine import scan_model_key
 
-    machine_cycle_hours = float(result.get("machine_cycle_hours") or result["print_hours"])
+    from analytics.prediction.timing_validation import machine_cycle_prediction_hours
+
+    machine_cycle_hours = machine_cycle_prediction_hours(result)
+    prediction_time_scope = "machine_cycle" if machine_cycle_hours is not None else "burn_plus_pour"
     mode_key = scan_model_key(material, float(params["layer_thickness_mm"]))
     machine_mode_key = (
         f"{prepared.get('printer_id') or 'configured-machine'}|{mode_key}|"
@@ -271,7 +276,9 @@ def calculate_prediction_snapshot(
 
     from analytics.log_insights.geometry import scan_reference
     from analytics.prediction.scan_scope import scan_scope
-    from core.versioning.provenance import stable_hash
+    from core.versioning.provenance import build_provenance, stable_hash
+
+    configuration = prediction_configuration(prepared)
 
     snapshot: dict = {
         "estimated_at": datetime.now(timezone.utc).isoformat(),
@@ -299,10 +306,11 @@ def calculate_prediction_snapshot(
         "build_origin_source": result.get("build_origin_source"),
         "layer_count": result.get("layer_count"),
         "print_hours": result["print_hours"],
-        # Backward-compatible ``print_hours`` remains scan + recoat. The full
-        # machine cycle adds the separately calibrated make-layer residual.
+        # ``print_hours`` remains scan + recoat. The full cycle is unknown
+        # without an admitted controller model, never the phase subtotal.
         "machine_cycle_hours": machine_cycle_hours,
         "machine_hours": machine_cycle_hours,
+        "prediction_time_scope": prediction_time_scope,
         # raw (uncorrected) hours feed the calibration loop, so the learned
         # factor stays absolute and never compounds on itself.
         "raw_print_hours": result.get("raw_print_hours", result["print_hours"]),
@@ -362,6 +370,7 @@ def calculate_prediction_snapshot(
         "geometry_totals": result.get("geometry_totals") or {},
         "geometry_regions": result.get("geometry_regions") or [],
         "calculation_inputs": {
+            "configuration_schema_version": configuration["schema_version"],
             # Configuration origin only; not a firmware-schema confirmation.
             "parameter_sources": prepared.get("parameter_sources") or {},
             "hatch_speed_mm_s": (params.get("hatch_speeds_by_mat") or {}).get(material)
@@ -386,6 +395,7 @@ def calculate_prediction_snapshot(
             "recoat_hours": result.get("recoat_hours"),
             "layer_overhead_hours": result.get("layer_overhead_hours", 0.0),
             "machine_hours": machine_cycle_hours,
+            "prediction_time_scope": prediction_time_scope,
             "scan_source": result.get("scan_source", "physics"),
             "recoat_time_ms_per_layer": result.get("recoat_time_ms"),
             "recoat_source": result.get("recoat_time_source"),
@@ -407,6 +417,23 @@ def calculate_prediction_snapshot(
         "estimate_quality": quality_status,
         "geometry_quality": geometry_quality or None,
     }
+    reference_version = (snapshot["scan_timing_reference"] or {}).get("model_version")
+    model_versions = {"scan_reference": reference_version} if reference_version else {}
+    if machine_cycle_hours is not None and snapshot.get("layer_cycle_model_version"):
+        model_versions["layer_cycle_contract"] = snapshot["layer_cycle_model_version"]
+    snapshot["provenance"] = build_provenance(
+        "print-estimate",
+        inputs={"input_hash": snapshot["input_hash"],
+                "geometry_fingerprint": snapshot["geometry_fingerprint"]},
+        config=configuration,
+        model_versions=model_versions,
+        generated_by=computed_by or "system",
+    )
+    if "layer_cycle_contract" in model_versions:
+        snapshot["provenance"]["limitations"] = [
+            "Точный идентификатор применённого артефакта цикла не сохранён; "
+            "доступна только версия контракта."
+        ]
     from analytics.prediction.input_quality import INPUT_REASON_RU, geometry_input_issues
 
     issues = geometry_input_issues(record.get("metadata_json") or {}, snapshot)

@@ -198,6 +198,7 @@ class ImportJob(Base):
     ignored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_stability_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stability_check_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     file_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=_json_default_dict)
     checksum_manifest: Mapped[dict[str, str]] = mapped_column(JSON, default=_json_default_dict)
     source_objects: Mapped[dict[str, str]] = mapped_column(JSON, default=_json_default_dict)

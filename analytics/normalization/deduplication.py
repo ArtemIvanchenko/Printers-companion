@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 
 from domain.schemas.parsing import CanonicalEventDraft
 
@@ -25,7 +26,12 @@ def deduplicate_events(events: list[CanonicalEventDraft], time_bucket_seconds: i
     for sort_key, group in buckets.values():
         # Never annotate the original parser fact. Timing validation and other
         # projections may still need its unmodified payload/source evidence.
-        canonical = group[0].model_copy(deep=True)
+        # Only source and payload are mutable in this typed event contract.
+        # Copy them without reconstructing its immutable datetime/scalar fields.
+        canonical = group[0].model_copy(update={
+            "source": group[0].source.model_copy(),
+            "payload": deepcopy(group[0].payload),
+        })
         if len(group) > 1:
             provenance = [
                 {

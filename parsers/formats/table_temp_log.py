@@ -8,7 +8,7 @@ from parsers.formats._tables import parse_table_stream
 
 class TableTempLogParser(BaseParser):
     name = "table_temp_log"
-    version = "0.2.0"
+    version = "0.2.2"
     file_family = SourceFileFamily.table_temp_log
     role = FileRole.secondary
 

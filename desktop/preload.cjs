@@ -7,6 +7,7 @@ if (process.isMainFrame) {
     importInstallation: () => ipcRenderer.invoke('companion:import'),
     launch: () => ipcRenderer.invoke('companion:launch'),
     checkUpdate: () => ipcRenderer.invoke('companion:check-update'),
+    openUpdate: () => ipcRenderer.invoke('companion:open-update'),
     installUpdate: () => ipcRenderer.invoke('companion:install-update'),
     recover: () => ipcRenderer.invoke('companion:recover'),
     onState: callback => {

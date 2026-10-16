@@ -52,3 +52,37 @@ test('durable binding is private, read back and never overwritten', t => {
   assert.deepEqual(fs.readFileSync(file), saved);
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
+
+test('release lookup adds only platform selection and exits without binding or lifecycle actions', async () => {
+  let invocation;
+  const runtime = new Runtime({ root: '/tmp/not-configured', bundle: '/bundle', binary: '/host',
+    spawnProcess: (command, args, options) => {
+      invocation = { command, args, options };
+      return fakeChild({ type: 'result', state: { phase: 'release_checked' } });
+    } });
+  const result = await runtime.run('check-release');
+  assert.equal(result.phase, 'release_checked');
+  assert.deepEqual(invocation.args.slice(-4), ['--platform', process.platform, '--arch', process.arch]);
+  assert.equal(invocation.args[0], 'check-release');
+  assert.equal(invocation.options.shell, false);
+  assert.equal(runtime.busy, false);
+});
+
+test('only a hung read-only release child is stopped by its bounded deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = new EventEmitter();
+  for (const name of ['stdin', 'stdout', 'stderr']) child[name] = new PassThrough();
+  const killed = []; const progress = [];
+  child.kill = signal => { killed.push(signal); return true; };
+  const runtime = new Runtime({ root: '/tmp/not-configured', bundle: '/bundle', binary: '/host',
+    notify: value => progress.push(value), spawnProcess: () => child });
+  const failed = assert.rejects(runtime.run('check-release'), /не завершилась вовремя/);
+  assert.equal(runtime.busy, true);
+  t.mock.timers.tick(120000);
+  await failed;
+  assert.deepEqual(killed, ['SIGKILL']);
+  assert.equal(runtime.busy, false);
+  child.stdout.write(JSON.stringify({ type: 'progress', message: 'late' }) + '\n');
+  child.emit('close', 0);
+  assert.deepEqual(progress, []);
+});

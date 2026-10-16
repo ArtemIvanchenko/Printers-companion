@@ -26,6 +26,13 @@ def window(start=0, end=10, layer=1):
 THRESHOLDS = {"SO1": {"high": 1, "unit": "%", "confirmed": True}}
 
 
+def cycle_snapshot(base, floor):
+    return {"layer_overhead_ms": base, "minimum_layer_cycle_ms": floor,
+            "layer_overhead_source": "calibrated_max_base_floor",
+            "layer_cycle_model_version": "max_base_floor_v2", "minimum_layer_cycle_status": "identified",
+            "prediction_time_scope": "machine_cycle", "print_hours": 1, "machine_cycle_hours": 2}
+
+
 def test_exposure_integrates_threshold_crossing_only_inside_burn():
     report = analyze_environment([(0, {"SO1": 0}), (10, {"SO1": 2})],
                                  [window()], [], THRESHOLDS, max_gap_s=10)
@@ -86,6 +93,81 @@ def test_pause_and_burn_windows_exclude_ambiguous_overlaps():
     assert burn_windows(events, pauses) == []
 
 
+@pytest.mark.parametrize("kind", ["restart_attempt", "finish"])
+def test_pause_without_resume_does_not_gain_a_duration_or_recovery(kind):
+    events = [stamp("pause", 2), stamp(kind, 8)]
+    pauses = pause_intervals(events)
+    expected = {"start": seconds(events[0]["ts"]), "end": None, "resumed": False}
+    if kind == "finish":
+        expected["end_upper_bound"] = seconds(events[1]["ts"])
+    assert pauses == [expected]
+    accounting = time_accounting(events, pauses)
+    assert accounting["explicit_pause_seconds"] is None
+    assert accounting["confirmed_explicit_pause_seconds"] == 0
+    assert accounting["open_pause_count"] == 1
+    assert restart_layer_comparison(events, [], pauses)["status"] == "no_resumes"
+    assert analyze_environment([], [], pauses, THRESHOLDS)["recovery"]["count"] == 0
+
+
+@pytest.mark.parametrize("kind", ["burn_start", "burn_event"])
+def test_observed_burn_bounds_unknown_pause_without_swallowing_later_windows(kind):
+    events = [timing(1), timing(2), stamp("pause", 2), stamp("restart_attempt", 4),
+              stamp(kind, 8, 1), stamp("resume", 9),
+              stamp("burn_start", 12, 2)]
+    pauses = pause_intervals(events)
+    assert pauses == [{"start": seconds(stamp("pause", 2)["ts"]), "end": None,
+                       "resumed": False, "end_upper_bound": seconds(stamp(kind, 8)["ts"])}]
+    assert [row["layer"] for row in burn_windows(events, pauses)] == [1, 2]
+    accounting = time_accounting(events, pauses)
+    assert accounting["explicit_pause_seconds"] is None
+    assert accounting["confirmed_explicit_pause_seconds"] == 0
+    assert accounting["open_pause_count"] == 1
+    assert restart_layer_comparison(events, [], pauses)["status"] == "no_resumes"
+    assert analyze_environment([], [], pauses, THRESHOLDS)["recovery"]["count"] == 0
+
+
+def test_unknown_pause_bound_does_not_merge_a_subsequent_complete_pause():
+    events = [stamp("pause", 2), stamp("burn_start", 8, 1),
+              stamp("pause", 12), stamp("resume", 18)]
+    pauses = pause_intervals(events)
+    assert len(pauses) == 2
+    assert pauses[0]["end"] is None
+    assert pauses[1] == {"start": seconds(events[2]["ts"]),
+                         "end": seconds(events[3]["ts"]), "resumed": True}
+    accounting = time_accounting(events, pauses)
+    assert accounting["explicit_pause_seconds"] is None
+    assert accounting["confirmed_explicit_pause_seconds"] == 6
+    assert accounting["open_pause_count"] == 1
+
+
+@pytest.mark.parametrize("kind", ["burn_end", "finish"])
+def test_non_start_activity_bound_keeps_a_later_burn_without_inventing_resume(kind):
+    events = [timing(), stamp("pause", 2), stamp(kind, 8), stamp("burn_start", 12, 1)]
+    pauses = pause_intervals(events)
+    assert pauses == [{"start": seconds(events[1]["ts"]), "end": None, "resumed": False,
+                       "end_upper_bound": seconds(events[2]["ts"])}]
+    assert [row["layer"] for row in burn_windows(events, pauses)] == [1]
+    assert time_accounting(events, pauses)["explicit_pause_seconds"] is None
+
+
+def test_pause_totals_are_unknown_without_pause_evidence():
+    result = time_accounting([timing()])
+    assert result["explicit_pause_seconds"] is None
+    assert result["confirmed_explicit_pause_seconds"] is None
+    assert result["open_pause_count"] is None
+    known = time_accounting([timing()], [])
+    assert known["explicit_pause_seconds"] == 0
+    assert known["confirmed_explicit_pause_seconds"] == 0
+    assert known["open_pause_count"] == 0
+
+
+def test_legacy_finish_bound_is_not_admitted_as_confirmed_pause_duration():
+    result = time_accounting([timing()], [{"start": 0, "end": 100, "resumed": False}])
+    assert result["explicit_pause_seconds"] is None
+    assert result["confirmed_explicit_pause_seconds"] == 0
+    assert result["open_pause_count"] == 1
+
+
 def test_long_burn_window_invalidates_every_nested_layer_not_only_next_one():
     events = [timing(1, burn=20000, make=22000), timing(2), timing(3), timing(4),
               stamp('burn_start', 0, 1), stamp('burn_start', 1, 2),
@@ -105,7 +187,7 @@ def test_invalid_attempt_cannot_leave_same_layer_in_normal_cycle_total(reverse):
     invalid['payload']['timing_valid'] = False
     events = [good, invalid] if not reverse else [invalid, good]
     events.append(timing(2))
-    report = time_accounting(events, cycle_model={'layer_overhead_ms': 1000, 'minimum_layer_cycle_ms': 0})
+    report = time_accounting(events, cycle_model=cycle_snapshot(1000, 1))
     assert report['observed_attempt_cycle_seconds'] == 8
     assert report['ambiguous_layer_count'] == 1
     assert report['normal_layer_count'] == 1
@@ -119,7 +201,7 @@ def test_timezone_conversion_is_consistent_for_naive_machine_clock():
 def test_cycle_components_conserve_measured_time_and_keep_pauses_separate():
     events = [timing(), timing(2, 10000, 1000, 22000)]
     report = time_accounting(events, [{"start": 0, "end": 100, "resumed": True}],
-                             {"layer_overhead_ms": 500, "minimum_layer_cycle_ms": 4000})
+                             cycle_snapshot(500, 4000))
     assert sum(c["seconds"] for c in report["components"]) == 26
     parts = {c["key"]: c["seconds"] for c in report["components"]}
     assert parts["base_overhead"] == 1
@@ -127,6 +209,21 @@ def test_cycle_components_conserve_measured_time_and_keep_pauses_separate():
     assert report["normal_unique_layer_seconds"] == 15.5
     assert report["explicit_pause_seconds"] == 100
     assert report["observed_attempt_cycle_seconds"] == 26
+
+
+@pytest.mark.parametrize("overrides", [
+    {"layer_overhead_source": "unavailable"},
+    {"layer_cycle_model_version": "additive-v1"},
+    {"minimum_layer_cycle_ms": 0},
+    {"machine_cycle_hours": None},
+    {"prediction_time_scope": "burn_plus_pour"},
+])
+def test_unadmitted_cycle_does_not_authorize_normal_time(overrides):
+    model = {**cycle_snapshot(500, 4000), **overrides}
+    report = time_accounting([timing()], [], model)
+    assert report["normal_unique_layer_seconds"] is None
+    assert report["source"] == "calculated"
+    assert sum(component["seconds"] for component in report["components"]) == 4
 
 
 def test_retry_copy_is_not_a_third_physical_attempt():
@@ -244,9 +341,7 @@ def test_long_recorded_phase_is_diagnostic_not_normal_forecast():
     # Real 04.06 layer 1648: the counters agree, but a >5 h pour cannot be
     # assumed to be a continuous normal recoat or a proven operator pause.
     events = [timing(1, 28922, 9000, 38311), timing(1648, 28922, 20081407, 20110718)]
-    result = time_accounting(events, cycle_model={
-        "layer_overhead_ms": 389, "minimum_layer_cycle_ms": 0,
-    })
+    result = time_accounting(events, [], cycle_model=cycle_snapshot(389, 1))
     assert result["observed_attempt_cycle_seconds"] == pytest.approx(20149.029)
     assert sum(c["seconds"] for c in result["components"]) == pytest.approx(20149.029)
     assert result["normal_unique_layer_seconds"] == pytest.approx(38.311)
@@ -259,9 +354,7 @@ def test_long_recorded_phase_is_diagnostic_not_normal_forecast():
 
 
 def test_all_out_of_range_phases_do_not_report_zero_normal_time():
-    result = time_accounting([timing(1, 28922, 20081407, 20110718)], cycle_model={
-        "layer_overhead_ms": 389, "minimum_layer_cycle_ms": 0,
-    })
+    result = time_accounting([timing(1, 28922, 20081407, 20110718)], cycle_model=cycle_snapshot(389, 1))
     assert result["normal_unique_layer_seconds"] is None
     assert result["normal_layer_count"] == 0
 

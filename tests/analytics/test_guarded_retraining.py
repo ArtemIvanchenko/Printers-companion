@@ -147,6 +147,45 @@ def test_shadow_does_not_compare_against_in_sample_champion_answers():
     assert result["metrics"]["temporal_exclusions"]["comparator_training_sample"] == 1
 
 
+def test_shadow_waits_when_future_print_has_no_observed_heuristic_baseline():
+    # A candidate may use a feature such as layer count that is known even
+    # without sensor/drift observations. The comparator then has no score.
+    shadow = {
+        "created_at": "2026-01-01T00:00:00Z", "training_session_ids": [],
+        "artifact": {"type": "logreg", "features": ["layers"],
+                     "mean": [50], "scale": [1], "coef": [0.2], "intercept": 0},
+    }
+    rows = [{"session_id": f"new-{i}", "label": i % 2,
+             "group": {"features": {"layers": 40 + 20 * (i % 2)}},
+             "start_ts": "2026-01-02T00:00:00Z",
+             "label_observed_at": "2026-01-03T00:00:00Z"}
+            for i in range(retraining.MIN_SHADOW_LABELS)]
+
+    result = retraining._shadow_evaluation(rows, shadow, None)
+
+    assert result["decision"] == "wait"
+    assert result["metrics"]["candidate"]["sample_size"] == 0
+    assert result["metrics"]["temporal_exclusions"]["comparator_prediction_unavailable"] == len(rows)
+
+
+def test_active_model_fallback_is_not_evaluated_as_the_active_model(monkeypatch):
+    shadow = {"created_at": "2026-01-01T00:00:00Z", "artifact": {"kind": "candidate"}}
+    active = {"artifact": {"kind": "active"}}
+    rows = [{"session_id": "future", "label": 1, "group": {},
+             "start_ts": "2026-01-02T00:00:00Z",
+             "label_observed_at": "2026-01-03T00:00:00Z"}]
+
+    def score(group, model=None):
+        return {"method": "model", "risk": .9} if model["kind"] == "candidate" else {
+            "method": "heuristic", "risk": .5,
+        }
+
+    monkeypatch.setattr(retraining, "predict_defect_risk", score)
+    result = retraining._shadow_evaluation(rows, shadow, active)
+    assert result["metrics"]["candidate"]["sample_size"] == 0
+    assert result["metrics"]["temporal_exclusions"]["comparator_prediction_unavailable"] == 1
+
+
 def test_training_snapshot_preserves_label_observation_time_and_identity():
     from domain.models.quality import QualityOutcome
     from domain.models.sessions import BuildSession

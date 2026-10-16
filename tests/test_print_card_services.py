@@ -1,17 +1,22 @@
 """Card/attachment application boundaries, including failures between stores."""
 
 from datetime import datetime, timezone
+import io
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from api.main import app
+from core.config.settings import get_settings
+from domain.services.print_cards.attachments import upload_attachment
 from storage.db.session import engine, session_scope
 from storage.repositories.prints_repo import PrintsRepository
+from storage.sync.local_outbox import LocalNasOutbox
+from worker.nas_sync import process_next
 
 
 class MemoryStore:
@@ -178,6 +183,60 @@ def test_cleanup_only_observes_committed_deletion(card_client):
     assert removals == [True] and MemoryStore.objects == {}
 
 
+@pytest.mark.parametrize("lost_ack", [False, True], ids=["completed_reopen", "pending_lost_ack_retry"])
+def test_exact_uri_delete_cannot_remove_republished_attachment(card_client, monkeypatch, lost_ack):
+    record = new_card(card_client)
+    if lost_ack:
+        original_commit = Session.commit
+        calls = 0
+        def uncertain(self):
+            nonlocal calls
+            calls += 1
+            original_commit(self)
+            if calls == 1:
+                raise OperationalError("COMMIT", None, RuntimeError("ACK lost"), connection_invalidated=True)
+        with monkeypatch.context() as patch:
+            patch.setattr(Session, "commit", uncertain)
+            assert upload(card_client, record).status_code == 202
+    else:
+        assert upload(card_client, record).status_code == 200
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        original = repo.list_print_files(record["record_id"])[0]
+        before_delete_revision = repo.get_print_record(record["record_id"])["revision"]
+    replacement = {}
+    def republish_after_reference_check():
+        MemoryStore.on_remove = None
+        if lost_ack:
+            queue = LocalNasOutbox.from_settings(get_settings())
+            manifest_path = next((queue.root / "pending").glob("*/manifest.json"))
+            manifest = queue._read_json(manifest_path)
+            manifest["next_attempt_at"] = "2000-01-01T00:00:00+00:00"
+            queue._write_json(manifest_path, manifest)
+            state = process_next(outbox=queue, store=MemoryStore(), settings=get_settings())
+            assert state["status"] == "completed"
+            replacement.update(state["result"])
+        else:
+            with session_scope() as db:
+                result = upload_attachment(
+                    PrintsRepository(db), record["record_id"], io.BytesIO(b"durable attachment"),
+                    file_name="drawing.pdf", file_type="doc", store_factory=MemoryStore,
+                )
+                assert not result.queued
+                replacement.update(result.payload)
+    MemoryStore.on_remove = republish_after_reference_check
+    assert card_client.delete(f"/prints/{record['record_id']}/files/{original['file_id']}").status_code == 200
+    bucket, _, name = replacement["object_uri"].removeprefix("s3://").partition("/")
+    assert MemoryStore.objects[bucket, name] == b"durable attachment"
+    assert replacement["object_uri"] != original["object_uri"]
+    assert len(MemoryStore.objects) == 1, "operator cleanup removes only its original exact URI"
+    with session_scope() as db:
+        repo = PrintsRepository(db)
+        files = repo.list_print_files(record["record_id"])
+        assert len(files) == 1 and files[0]["object_uri"] == replacement["object_uri"]
+        assert repo.get_print_record(record["record_id"])["revision"] == before_delete_revision + 2
+
+
 def test_upload_has_no_sql_connection_during_object_transfer(card_client):
     record = new_card(card_client)
     held, checked = set(), []
@@ -214,7 +273,7 @@ def test_card_deleted_during_transfer_cannot_receive_a_file(card_client):
     assert upload(card_client, record).status_code == 404
     with session_scope() as db:
         assert PrintsRepository(db).list_print_files(record["record_id"]) == []
-    assert MemoryStore.objects == {}
+    assert list(MemoryStore.objects.values()) == [b"durable attachment"]
 
 
 def test_changed_owner_cannot_receive_old_geometry_upload(card_client):
@@ -235,7 +294,33 @@ def test_changed_owner_cannot_receive_old_geometry_upload(card_client):
     assert response.status_code == 403
     with session_scope() as db:
         assert PrintsRepository(db).list_print_files(record["record_id"]) == []
-    assert MemoryStore.objects == {}
+    assert list(MemoryStore.objects.values()) == [b"geometry"]
+
+
+@pytest.mark.parametrize("phase", ["precheck", "publication"])
+def test_http_sql_bug_is_not_acknowledged_as_automatic_nas_retry(card_client, monkeypatch, phase):
+    record = new_card(card_client)
+    if phase == "precheck":
+        def fail(self, record_id):
+            self.db.execute(text("SELECT missing_upload_column FROM print_records"))
+        monkeypatch.setattr(PrintsRepository, "get_print_record", fail)
+    else:
+        original = PrintsRepository.add_print_file
+        def fail(self, values):
+            return original(self, {**values, "file_name": None})
+        monkeypatch.setattr(PrintsRepository, "add_print_file", fail)
+    response = upload(TestClient(app, raise_server_exceptions=False), record)
+    assert response.status_code == 500
+    queue = LocalNasOutbox.from_settings(get_settings())
+    assert queue.status()["counts"]["pending"] == 0
+    assert not list((queue.root / "completed").iterdir())
+    if phase == "publication":
+        assert queue.status()["counts"]["failed"] == 1
+        assert next((queue.root / "failed").glob("*/payload")).read_bytes() == b"durable attachment"
+        assert list(MemoryStore.objects.values()) == [b"durable attachment"]
+    else:
+        assert queue.status()["bytes_waiting"] == 0
+        assert not MemoryStore.objects
 
 
 def test_card_geometry_mapping_uses_detached_inputs(card_client, monkeypatch):
@@ -255,7 +340,10 @@ def test_card_geometry_mapping_uses_detached_inputs(card_client, monkeypatch):
             record["record_id"],
             {
                 "session_id": "card_geometry",
-                "metadata_json": {"prediction": {"scan_geometry": {"layers": []}}},
+                "metadata_json": {"prediction": {
+                    "input_revision": record["revision"],
+                    "scan_geometry": {"layers": []},
+                }},
             },
         )
     held, checked = set(), []
@@ -320,6 +408,7 @@ def test_card_reads_stored_anomalies_with_real_geometry_mapper(card_client):
         PrintsRepository(db).update_print_record(record["record_id"], {
             "session_id": "card_geometry_projection",
             "metadata_json": {"prediction": {
+                "input_revision": record["revision"],
                 "scan_geometry": snapshot,
                 "geometry_quality": {"status": "lower_bound"},
             }},
@@ -338,7 +427,7 @@ def test_card_reads_stored_anomalies_with_real_geometry_mapper(card_client):
         event.remove(Session, "loaded_as_persistent", loaded)
 
     assert response.status_code == 200
-    assert materialized == ["BuildSession"]
+    assert materialized == []  # Neither a heavy session context nor job payload is loaded.
     assert response.json()["estimate_job"] == {
         "job_id": "card_projection_estimate", "status": "pending",
     }

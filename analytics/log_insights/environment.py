@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import defaultdict
-from datetime import timedelta
 from pathlib import Path
 
 from analytics.log_insights.clocks import iso, seconds
 from analytics.prediction.timing_validation import finite_number
 from parsers.common.encoding import estimate_encoding, iter_text_lines
+from parsers.common.timeline import TimestampQualityTracker
 from parsers.common.timestamps import date_hint_from_filename, parse_timestamp_token
+from parsers.formats._tables import build_header, looks_like_header, reconcile_row_width, split_row, table_delimiter
 from profiles.signal_catalog import load_signal_catalog, signal_display_name
 
 
@@ -33,61 +34,75 @@ def sensor_samples(files, thresholds, diagnostics, clock_timezone="Europe/Moscow
         if str(source.classification.family) != "sensors_log":
             continue
         path = Path(source.path)
-        try:
-            date_hint = str(date_hint_from_filename(path) or "")
-        except ValueError:
-            date_hint = ""
+        date_hint = str(date_hint_from_filename(path) or "")
         # Identical clock-only samples recorded on different dates are
         # different observations. Copies from the SAME dated source dedupe.
         paths.setdefault((source.checksum or source.path, date_hint), path)
     def date_key(path):
-        try:
-            hint = date_hint_from_filename(path)
-            return str(hint or ""), str(path)
-        except ValueError:
-            return "", str(path)
+        return str(date_hint_from_filename(path) or ""), str(path)
 
-    for path in sorted(paths.values(), key=date_key):
+    for source_key, path in sorted(paths.items(), key=lambda item: date_key(item[1])):
         if not path.is_file():
             diagnostics["missing_files"] += 1
             continue
-        try:
-            hint = date_hint_from_filename(path)
-        except ValueError:
-            hint = None
-        columns, previous, shift = {}, None, 0
+        hint = date_hint_from_filename(path)
+        columns = None
+        delimiter = None
+        header_signature = None
+        timeline = TimestampQualityTracker()
         for _, _, line in iter_text_lines(path, estimate_encoding(path)):
-            cells = [c.strip() for c in line.split("|")]
-            if "Time" in cells:
-                columns = {key: i for i, key in enumerate(cells)}
+            if not line.strip():
                 continue
-            if "Time" not in columns or columns["Time"] >= len(cells):
+            if delimiter is None:
+                delimiter = table_delimiter(line)
+            cells = [value.strip() for value in split_row(line, delimiter)]
+            if columns is None:
+                is_header = looks_like_header(cells)
+                if is_header:
+                    header_signature = cells
+                    header = build_header(cells)
+                else:
+                    header = [f"col_{index}" for index in range(len(cells))]
+                columns = {name: index for index, name in enumerate(header)}
+                # The header and profile stay fixed for this file. Resolve
+                # requested channels once, preserving their requested order.
+                signal_columns = [
+                    (key, columns[key], catalog.get(key, {}))
+                    for key in thresholds if key in columns
+                ]
+                source_columns = diagnostics.setdefault("source_columns", {})
+                source_columns[f"{source_key[0]}:{source_key[1]}"] = [
+                    {"index": index, "raw_name": cell if is_header else "", "column": header[index]}
+                    for index, cell in enumerate(cells)
+                ]
+                if "Time" not in columns:
+                    diagnostics["missing_time_columns"] += 1
+                if is_header:
+                    continue
+            if header_signature is not None and cells == header_signature:
+                diagnostics["repeated_headers"] += 1
+                continue
+            diagnostics["total_rows"] += 1
+            cells, malformed = reconcile_row_width(cells, len(columns))
+            if malformed:
+                diagnostics["malformed_rows"] += 1
+            if "Time" not in columns:
+                diagnostics["unparsed_rows"] += 1
                 continue
             raw_clock = cells[columns["Time"]]
-            stamp, _, _ = parse_timestamp_token(raw_clock, hint)
+            stamp, _, uncertainty = parse_timestamp_token(raw_clock, hint)
+            adjusted = timeline.add(stamp, clock_only=uncertainty > 0)
             if stamp is None:
                 diagnostics["invalid_timestamps"] += 1
+                diagnostics["unparsed_rows"] += 1
                 continue
-            # Daily clock-only logs may run through midnight within one file.
-            clock_only = len(raw_clock) <= 16
-            adjusted = stamp + timedelta(days=shift if clock_only else 0)
-            if clock_only and previous and adjusted < previous - timedelta(hours=12):
-                shift += 1
-                adjusted += timedelta(days=1)
-                diagnostics["midnight_rollovers"] += 1
-            previous = adjusted
             values = {}
-            for key in thresholds:
-                idx = columns.get(key)
-                if idx is None:
-                    continue
+            for key, idx, rule in signal_columns:
                 value = None
-                if idx is not None and idx < len(cells):
-                    try:
-                        value = float(cells[idx].replace(",", "."))
-                    except ValueError:
-                        pass
-                rule = catalog.get(key, {})
+                try:
+                    value = float(cells[idx].replace(",", "."))
+                except ValueError:
+                    pass
                 if (not finite_number(value) or abs(value) > 1e7
                         or value in rule.get("invalid_values", [])
                         or (apply_profile_ranges and rule.get("min_val") is not None and value < rule["min_val"])
@@ -96,6 +111,8 @@ def sensor_samples(files, thresholds, diagnostics, clock_timezone="Europe/Moscow
                     diagnostics[f"invalid_cells:{key}"] += 1
                 values[key] = value
             yield seconds(adjusted, clock_timezone), values
+        diagnostics["midnight_rollovers"] += timeline.rollover_days
+        diagnostics["out_of_order_timestamps"] += timeline.out_of_order_count
 
 
 def _excess_segment(left, right, duration, threshold):

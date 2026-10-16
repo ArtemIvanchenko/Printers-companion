@@ -74,6 +74,29 @@ class ParseResult(BaseModel):
     data_quality: list[DataQualityStatus] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @property
+    def malformed_row_count(self) -> int:
+        """Count integer row facts, never bounded diagnostic examples.
+
+        Tables are authoritative when present: their counters are commonly
+        duplicated in metadata. Non-tabular parsers retain the count there.
+        This property is deliberately not an additional serialized field.
+        """
+        if self.tables:
+            return sum(table.malformed_rows for table in self.tables
+                       if type(table.malformed_rows) is int and table.malformed_rows >= 0)
+        count = self.metadata.get("malformed_rows", 0)
+        return count if type(count) is int and count >= 0 else 0
+
+    @property
+    def repeated_header_count(self) -> int:
+        """Use observed counters, with tables authoritative over metadata."""
+        if self.tables:
+            return sum(table.repeated_headers for table in self.tables
+                       if type(table.repeated_headers) is int and table.repeated_headers >= 0)
+        count = self.metadata.get("repeated_headers", 0)
+        return count if type(count) is int and count >= 0 else 0
+
 
 class FileClassification(BaseModel):
     path: str

@@ -10,6 +10,7 @@ from analytics.prediction import calibration
 from analytics.prediction.calibration_inputs import load_calibration_inputs
 from api.main import app
 from core.config.settings import get_settings
+from core.versioning.constants import ANALYSIS_VERSION
 from domain.models.events import LayerSnapshot
 from domain.models.jobs import BackgroundJob
 from domain.models.prints import MachineParams, PrintRecord
@@ -34,6 +35,8 @@ def history():
                 record_id=f"cal-record-{i}", name=f"Печать {i}", session_id=sid,
                 origin_compute_node_id=node, material="steel", layer_thickness_mm=0.06,
                 metadata_json={"session_link_confirmed": True, "prediction": {
+                    "analysis_version": ANALYSIS_VERSION,
+                    "provenance": {"component": "print-estimate", "analysis_version": ANALYSIS_VERSION},
                     "input_revision": 1, "build_origin_source": "explicit", "build_origin_z_mm": 0,
                     "raw_print_hours": 9, "raw_scan_hours": 8.86, "raw_recoat_hours": 0.14,
                     "print_hours": 9, "material": "steel", "layer_thickness_mm": 0.06,
@@ -263,7 +266,7 @@ def test_nas_outage_keeps_owner_job_retryable_without_spending_attempt(history, 
     from sqlalchemy.exc import OperationalError
 
     def offline(*args, **kwargs):
-        raise OperationalError("read", {}, ConnectionError("NAS offline"))
+        raise OperationalError("read", {}, ConnectionError("NAS offline"), connection_invalidated=True)
 
     monkeypatch.setattr(calibration_tasks, "load_calibration_inputs", offline)
     calibration_tasks.process_next_calibration_task("worker")

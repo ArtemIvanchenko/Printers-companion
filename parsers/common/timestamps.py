@@ -1,26 +1,29 @@
 import re
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
+
+from parsers.common.timeline import TimestampQualityTracker
 
 
 TIMESTAMP_PATTERNS = [
-    re.compile(r"(?P<date>\d{4}[-/.]\d{2}[-/.]\d{2})[ T_]+(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"),
-    re.compile(r"(?P<date>\d{2}[-/.]\d{2}[-/.]\d{4})[ T_]+(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"),
-    re.compile(r"(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"),
+    re.compile(r"(?<!\d)(?P<date>\d{4}[-/.]\d{2}[-/.]\d{2})[ T_]+(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)(?!\d)"),
+    re.compile(r"(?<!\d)(?P<date>\d{2}[-/.]\d{2}[-/.]\d{4})[ T_]+(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)(?!\d)"),
+    re.compile(r"(?<!\d)(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)(?!\d)"),
 ]
 
 
 def date_hint_from_filename(path: Path) -> date | None:
     candidates = [
-        re.search(r"(20\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?([0-3]\d)", path.name),
-        re.search(r"([0-3]\d)[-_.](0[1-9]|1[0-2])[-_.](20\d{2})", path.name),
+        re.search(r"(?<!\d)(20\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?([0-3]\d)(?!\d)", path.name),
+        re.search(r"(?<!\d)([0-3]\d)[-_.](0[1-9]|1[0-2])[-_.](20\d{2})(?!\d)", path.name),
     ]
-    if candidates[0]:
-        year, month, day = candidates[0].groups()
-        return date(int(year), int(month), int(day))
-    if candidates[1]:
-        day, month, year = candidates[1].groups()
-        return date(int(year), int(month), int(day))
+    for index, match in enumerate(candidates):
+        if match:
+            year, month, day = match.groups() if index == 0 else match.groups()[::-1]
+            try:
+                return date(int(year), int(month), int(day))
+            except ValueError:
+                return None
     return None
 
 
@@ -39,47 +42,35 @@ def parse_timestamp_token(text: str, date_hint: date | None = None) -> tuple[dat
         time_part = match.group("time").replace(",", ".")
         date_part = match.groupdict().get("date")
         try:
+            # Keep the same accepted clock range across Python versions, without
+            # float rounding of fractional seconds or normalization of 24:00.
+            hour, minute, seconds = time_part.split(":")
+            if int(hour) > 23 or int(minute) > 59 or int(seconds.split(".")[0]) > 59:
+                raise ValueError("Invalid clock fields")
+            parsed_time = time.fromisoformat(time_part)
             if date_part:
                 if re.match(r"\d{4}", date_part):
-                    normalized = f"{date_part.replace('/', '-').replace('.', '-')} {time_part}"
-                    return datetime.fromisoformat(normalized), raw, 0.0
-                day, month, year = re.split(r"[-/.]", date_part)
-                return datetime.fromisoformat(f"{year}-{month}-{day} {time_part}"), raw, 0.0
+                    normalized = date_part.replace("/", "-").replace(".", "-")
+                else:
+                    day, month, year = re.split(r"[-/.]", date_part)
+                    normalized = f"{year}-{month}-{day}"
+                return datetime.combine(date.fromisoformat(normalized), parsed_time), raw, 0.0
             if date_hint:
-                hour, minute, sec = time_part.split(":")
-                seconds = float(sec)
-                whole_seconds = int(seconds)
-                microseconds = int((seconds - whole_seconds) * 1_000_000)
-                return (
-                    datetime(
-                        date_hint.year,
-                        date_hint.month,
-                        date_hint.day,
-                        int(hour),
-                        int(minute),
-                        whole_seconds,
-                        microseconds,
-                    ),
-                    raw,
-                    86400.0,
-                )
+                return datetime.combine(date_hint, parsed_time), raw, 86400.0
         except ValueError:
-            continue
+            # An explicit but invalid date is evidence of damaged time data,
+            # not permission to reinterpret its clock with the filename date.
+            return None, raw, 0.0
+        return None, raw, 0.0
     return None, None, 0.0
 
 
-def apply_midnight_rollover(timestamps: list[datetime | None]) -> list[datetime | None]:
-    adjusted: list[datetime | None] = []
-    day_shift = 0
-    previous: datetime | None = None
-    for ts in timestamps:
-        if ts is None:
-            adjusted.append(None)
-            continue
-        candidate = ts + timedelta(days=day_shift)
-        if previous and candidate + timedelta(hours=12) < previous:
-            day_shift += 1
-            candidate = ts + timedelta(days=day_shift)
-        adjusted.append(candidate)
-        previous = candidate
-    return adjusted
+def apply_midnight_rollover(
+    timestamps: list[datetime | None], *, clock_only: list[bool] | None = None,
+) -> list[datetime | None]:
+    """Adjust only clocks whose date came from a hint; preserve explicit dates."""
+    flags = [False] * len(timestamps) if clock_only is None else clock_only
+    if len(flags) != len(timestamps):
+        raise ValueError("Each timestamp requires one clock-only flag")
+    tracker = TimestampQualityTracker()
+    return [tracker.add(ts, clock_only=flag) for ts, flag in zip(timestamps, flags, strict=True)]

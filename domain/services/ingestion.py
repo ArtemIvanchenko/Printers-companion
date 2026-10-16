@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from fnmatch import fnmatch
+from os import stat_result
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,32 @@ from parsers.common.encoding import estimate_encoding, is_probably_binary
 from profiles.base.profile import PrinterProfilePlugin
 
 logger = logging.getLogger(__name__)
+
+# Only OS metadata is universally irrelevant. Machine source selection belongs
+# to the selected profile; burn logs carry independent layer times.
+_METADATA_SOURCE_PATTERNS = ("._*", ".DS_Store", "Thumbs.db", "desktop.ini")
+
+
+def source_exclusion_reason(
+    file_name: str,
+    *,
+    size_bytes: int | None,
+    profile: PrinterProfilePlugin | None = None,
+) -> str | None:
+    """Apply the same source policy to current files and captured physical inputs.
+
+    A missing file can still have an intentional name exclusion. A size exclusion
+    requires a known captured size, not a guess from its name or parser family.
+    """
+    patterns = _METADATA_SOURCE_PATTERNS + tuple(getattr(profile, "excluded_source_patterns", ()))
+    for pattern in patterns:
+        if fnmatch(file_name, pattern):
+            return f"source excluded by metadata/profile policy: '{pattern}'"
+    if isinstance(size_bytes, int) and not isinstance(size_bytes, bool):
+        for pattern, limit in getattr(profile, "source_size_limits", {}).items():
+            if fnmatch(file_name, pattern) and size_bytes > limit:
+                return f"profile source size limit: '{pattern}' exceeds {limit} bytes"
+    return None
 
 
 class IngestedFile(BaseModel):
@@ -40,26 +67,6 @@ class IngestionResult(BaseModel):
 
 
 class IngestionService:
-    # Only OS metadata is universally irrelevant. Machine source selection
-    # belongs to the selected profile; burn logs carry independent layer times.
-    SKIP_PATTERNS: tuple[str, ...] = (
-        "._*",            # macOS AppleDouble metadata files
-        ".DS_Store",      # Finder folder metadata — ingested as a "session" otherwise
-        "Thumbs.db",      # Windows Explorer thumbnail cache
-        "desktop.ini",
-    )
-    def _should_skip(self, path: Path) -> str | None:
-        """Return a skip reason string if this file should not be ingested, else None."""
-        name = path.name
-        patterns = self.SKIP_PATTERNS + tuple(getattr(self.profile, "excluded_source_patterns", ()))
-        for pattern in patterns:
-            if fnmatch(name, pattern):
-                return f"source excluded by metadata/profile policy: '{pattern}'"
-        for pattern, limit in getattr(self.profile, "source_size_limits", {}).items():
-            if fnmatch(name, pattern) and path.stat().st_size > limit:
-                return f"profile source size limit: '{pattern}' exceeds {limit} bytes"
-        return None
-
     def __init__(self, registry: ParserRegistry, profile: PrinterProfilePlugin | None = None) -> None:
         self.registry = registry
         self.profile = profile
@@ -75,16 +82,26 @@ class IngestionService:
             try:
                 if not path.is_file():
                     continue
-                # _should_skip may stat() the file; a file deleted/rotated mid-scan
-                # would raise OSError here — keep it inside the guard so one
-                # vanishing file can't abort the whole scan.
-                skip_reason = self._should_skip(path)
+                skip_reason = source_exclusion_reason(
+                    path.name, size_bytes=None, profile=self.profile,
+                )
+                if skip_reason is None:
+                    stat = path.stat()
+                    skip_reason = source_exclusion_reason(
+                        path.name, size_bytes=stat.st_size, profile=self.profile,
+                    )
                 if skip_reason:
-                    result.skipped.append({"path": str(path), "reason": skip_reason})
+                    result.skipped.append({
+                        "path": str(path), "reason": skip_reason,
+                        "code": "source_policy_excluded",
+                    })
                     continue
-                result.files.append(self._inspect_file(path, relative_root))
+                result.files.append(self._inspect_file(path, relative_root, stat))
             except OSError as exc:
-                result.skipped.append({"path": str(path), "reason": str(exc)})
+                result.skipped.append({
+                    "path": str(path), "reason": str(exc),
+                    "code": "source_inspection_error",
+                })
         return result
 
     def parse(self, root: Path) -> IngestionResult:
@@ -109,8 +126,7 @@ class IngestionService:
                 logger.warning("Parsing failed for %s: %s", path, exc)
         return result
 
-    def _inspect_file(self, path: Path, root: Path) -> IngestedFile:
-        stat = path.stat()
+    def _inspect_file(self, path: Path, root: Path, stat: stat_result) -> IngestedFile:
         size = stat.st_size
         classification = classify_file(path)
         data_quality = DataQualityStatus.ok

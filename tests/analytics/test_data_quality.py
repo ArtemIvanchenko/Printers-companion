@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from analytics.data_quality import assess_session_quality
 from domain.enums.common import SourceFileFamily
+from domain.schemas.parsing import ParseResult
 
 UTC = timezone.utc
 
@@ -13,7 +14,8 @@ def _ev(layer=None, ts=None):
 
 
 def _file(family, events=None, transitions=None, tables=None, diagnostics=None):
-    pr = SimpleNamespace(
+    pr = ParseResult.model_construct(
+        parser_name="fixture", parser_version="0", role="primary",
         file_family=family,
         events=events or [],
         transitions=transitions or [],
@@ -58,16 +60,16 @@ def test_layer_gaps_flagged():
     assert result["score"] < 85
 
 
-def test_time_gap_flagged():
+def test_event_gap_does_not_prove_missing_sensor_data():
     base = datetime(2026, 3, 23, 16, 0, tzinfo=UTC)
     times = [base + timedelta(minutes=i) for i in range(5)]
     times += [base + timedelta(hours=3) + timedelta(minutes=i) for i in range(5)]  # 3h gap
     events = [_ev(layer=i, ts=t) for i, t in enumerate(times, start=1)]
     files = _full_print_files(events)
     result = assess_session_quality(files, events, {}, {})
-    kinds = {i["kind"] for i in result["issues"]}
-    assert "time_gaps" in kinds
-    gap = next(i for i in result["issues"] if i["kind"] == "time_gaps")
+    assert result["issues"] == []
+    assert result["score"] == 100
+    gap = next(i for i in result["diagnostics"] if i["kind"] == "event_gaps")
     assert gap["max_gap_min"] > 120
 
 
@@ -79,18 +81,32 @@ def test_monitor100_does_not_trigger_time_gap():
                   _ev(ts=datetime(2026, 3, 23, 23, 0, tzinfo=UTC))]
     files = _full_print_files(events) + [_file(SourceFileFamily.monitor100_log, events=mon_events)]
     result = assess_session_quality(files, events, {}, {})
-    assert "time_gaps" not in {i["kind"] for i in result["issues"]}
+    assert "event_gaps" not in {i["kind"] for i in result["diagnostics"]}
 
 
-def test_sensor_stuck_flagged():
+def test_constant_sensor_is_an_observation_not_a_confirmed_failure():
     events = [_ev(layer=i, ts=datetime(2026, 3, 23, 16, 0, tzinfo=UTC) + timedelta(seconds=i))
               for i in range(1, 20)]
     files = _full_print_files(events)
     stats = {"SO1": {"n": 1000, "std": 0.0}, "SO2": {"n": 1000, "std": 0.05}}
     result = assess_session_quality(files, events, {}, stats)
-    stuck = next((i for i in result["issues"] if i["kind"] == "sensor_stuck"), None)
-    assert stuck is not None
-    assert "SO1" in stuck["signals"]
+    assert result["issues"] == []
+    assert result["score"] == 100
+    constant = next((i for i in result["diagnostics"] if i["kind"] == "constant_signals"), None)
+    assert constant is not None
+    assert "SO1" in constant["signals"]
+
+
+def test_constant_signal_does_not_hide_its_missing_samples():
+    events = [_ev(layer=i) for i in range(1, 20)]
+    files = _full_print_files(events)
+    stats = {"SO1": {"n": 1000, "std": .04}, "SO2": {"n": 1000, "std": .03},
+             "ST3": {"n": 60, "std": 0.0}}
+    result = assess_session_quality(files, events, {}, stats)
+    assert result["diagnostics"][0]["signals"] == ["ST3"]
+    assert result["issues"][0]["kind"] == "sensor_dropout"
+    assert result["issues"][0]["signals"] == ["ST3"]
+    assert result["score"] < 100
 
 
 def test_sensor_dropout_flagged():
@@ -127,9 +143,27 @@ def test_parse_warnings_flagged():
     warn = next((i for i in result["issues"] if i["kind"] == "parse_warnings"), None)
     assert warn is not None
     assert warn["malformed_rows"] == 42
+    assert "42 строк с нарушенным форматом или значениями" in warn["detail"]
 
 
 def test_empty_session_does_not_crash():
     result = assess_session_quality([], [], {}, {})
-    assert result["score"] == 100.0
+    assert result["score"] is None
+    assert result["grade"] == "unknown"
+    assert result["checks"]["layers"] is False
+    assert result["checks"]["time"] is False
+    assert result["checks"]["sensors"] is False
     assert result["issues"] == []
+
+
+def test_empty_family_files_do_not_establish_measurement_quality():
+    result = assess_session_quality(_full_print_files([]), [], {}, {"SO1": {"n": 0}})
+    assert result["score"] is None
+    assert result["grade"] == "unknown"
+
+
+def test_single_observation_is_not_claimed_as_a_continuity_check():
+    result = assess_session_quality(_full_print_files([_ev(layer=1)]), [_ev(layer=1)], {}, {})
+    assert result["score"] == 100
+    assert result["checks"]["layers"] is False
+    assert result["checks"]["time"] is False

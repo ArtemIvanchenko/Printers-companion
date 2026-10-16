@@ -167,26 +167,6 @@ def notify_import_detected(path: Path) -> dict:
         return response.json()
 
 
-def auto_confirm_import(response: dict) -> None:
-    """Auto-confirm only when the installation explicitly disables approval."""
-    settings = get_settings()
-    if settings.require_operator_import_confirmation:
-        logger.info("Import awaits operator confirmation")
-        return
-    import_job_id = response.get("job", {}).get("import_job_id")
-    if not import_job_id:
-        return
-    url = f"{settings.internal_api_url.rstrip('/')}/agent/import-callback"
-    headers = {"X-API-Token": settings.agent_api_token}
-    callback_data = f"import:{import_job_id}:confirm"
-    try:
-        with httpx.Client(timeout=20) as client:
-            client.post(url, json={"callback_data": callback_data, "actor": "watcher"}, headers=headers)
-        logger.info("Auto-confirmed import job %s", import_job_id)
-    except Exception as exc:
-        logger.error("Failed to auto-confirm import job %s: %s", import_job_id, exc)
-
-
 def _handle_candidate(path: Path, incoming_path: Path, tracker: CandidateTracker) -> None:
     candidate = import_batch_for(path, incoming_path)
     if candidate is None:
@@ -196,8 +176,7 @@ def _handle_candidate(path: Path, incoming_path: Path, tracker: CandidateTracker
         return
     logger.info("Detected import candidate: %s", candidate)
     try:
-        resp = notify_import_detected(candidate)
-        auto_confirm_import(resp)
+        notify_import_detected(candidate)
     except Exception as exc:
         logger.error("Failed to notify about import candidate %s: %s", candidate, exc)
         tracker.release(candidate, signature)

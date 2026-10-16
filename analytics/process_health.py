@@ -1,6 +1,6 @@
-"""Process-health analytics derived from decoded M-450-M telemetry.
+"""Process-health analytics derived from available aligned telemetry.
 
-Three capabilities, all pure functions over the compact telemetry dict produced by
+Three capabilities, all pure functions over the local telemetry dict produced by
 ``domain.services.session_overview`` (so they run at ingest and are storage-agnostic):
 
 1. detect_process_anomalies  — oxygen / humidity / temperature excursions.
@@ -17,15 +17,19 @@ import math
 from datetime import datetime
 from statistics import fmean, median
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _clean(values: list[Any]) -> list[float]:
     """Return finite, non-firmware-garbage floats."""
     result = []
     for v in values:
-        if not isinstance(v, (int, float)):
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
             continue
-        f = float(v)
+        try:
+            f = float(v)
+        except OverflowError:
+            continue
         if math.isfinite(f) and abs(f) <= 1e7:
             result.append(f)
     return result
@@ -33,45 +37,30 @@ def _clean(values: list[Any]) -> list[float]:
 
 def _clean_signal(signal: str, values: list[Any]) -> list[float]:
     """Apply physical bounds when the profile agrees with the sampled data."""
-    cleaned = _clean(values)
-    if not cleaned:
-        return []
-    from analytics.thresholds import (
-        load_valid_ranges,
-        should_apply_valid_range,
-        value_in_valid_range,
-        value_is_explicitly_invalid,
-    )
-
-    rng = load_valid_ranges().get(signal) or {}
-    if not rng:
-        return cleaned
-    cleaned = [value for value in cleaned if not value_is_explicitly_invalid(value, rng)]
-    if not cleaned:
-        return []
-    accepted = [value for value in cleaned if value_in_valid_range(value, rng)]
-    # Candidate profile mappings can have wrong units. Match the full-stats
-    # parser: confirmed ranges stay active while contradictory candidate ranges
-    # are ignored instead of erasing data.
-    rejected_fraction = 1.0 - len(accepted) / len(cleaned)
-    return accepted if should_apply_valid_range(rng, rejected_fraction) else cleaned
+    return [value for _, value in _clean_signal_indexed(signal, values)]
 
 
 def _clean_signal_indexed(signal: str, values: list[Any]) -> list[tuple[int, float]]:
-    """The same physical filtering as :func:`_clean_signal`, retaining row ids.
+    """Filter analog values and physical bounds while retaining array row ids.
 
     An anomaly without its source row cannot later be associated with print
-    progress, layer height or an STL region.  The legacy helper remains intact
-    for callers that only need values; this indexed variant is used by anomaly
-    detection and adds provenance without changing any existing result keys.
+    progress, layer height or an STL region. Value-only callers use this same
+    preparation; physical filtering never renumbers the observations.
     """
-    candidates = [
-        (index, float(value))
-        for index, value in enumerate(values)
-        if isinstance(value, (int, float))
-        and math.isfinite(float(value))
-        and abs(float(value)) <= 1e7
-    ]
+    candidates: list[tuple[int, float]] = []
+    try:
+        indexed_values = enumerate(values)
+    except TypeError:
+        return []
+    for index, value in indexed_values:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        try:
+            numeric = float(value)
+        except OverflowError:
+            continue
+        if math.isfinite(numeric) and abs(numeric) <= 1e7:
+            candidates.append((index, numeric))
     if not candidates:
         return []
     from analytics.thresholds import (
@@ -136,17 +125,18 @@ def _robust_spike(values: list[float]) -> tuple[int, float] | None:
         return (peak_idx, (values[peak_idx] - med) / scale)
     # Truly constant baseline with a single different value.
     if values[peak_idx] != med:
-        return (peak_idx, 99.0)
+        return (peak_idx, math.copysign(99.0, values[peak_idx] - med))
     return None
 
 
-def _coefficient_of_variation(values: list[float]) -> float:
+def _coefficient_of_variation(values: list[float]) -> float | None:
     if len(values) < 2:
-        return 0.0
+        return None
     mean = fmean(values)
+    sd = _pstdev(values)
     if mean == 0:
-        return 0.0
-    return _pstdev(values) / abs(mean)
+        return 0.0 if sd == 0 else None
+    return sd / abs(mean)
 
 
 def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5) -> list[dict[str, Any]]:
@@ -161,21 +151,31 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
     thresholds = load_alarm_thresholds()
     time_axis = telemetry.get("time") or []
     timestamp_axis = telemetry.get("timestamps") or []
+    clock_zone = None
+    if isinstance(telemetry.get("clock_timezone"), str):
+        try:
+            clock_zone = ZoneInfo(telemetry["clock_timezone"])
+        except (ValueError, ZoneInfoNotFoundError):
+            pass
     layer_time_points: list[tuple[datetime, int]] = []
     for point in telemetry.get("layer_time_points") or []:
-        if not isinstance(point, dict) or not isinstance(point.get("layer"), int):
+        if (not isinstance(point, dict) or not isinstance(point.get("layer"), int)
+                or isinstance(point["layer"], bool)):
             continue
         try:
-            layer_time_points.append((datetime.fromisoformat(point["timestamp"]), point["layer"]))
+            moment = datetime.fromisoformat(point["timestamp"])
+            if moment.tzinfo is None and clock_zone is not None:
+                moment = moment.replace(tzinfo=clock_zone)
+            layer_time_points.append((moment, point["layer"]))
         except (KeyError, TypeError, ValueError):
             continue
-    layer_time_points.sort()
-    layer_steps = [
-        (layer_time_points[index][0] - layer_time_points[index - 1][0]).total_seconds()
-        for index in range(1, len(layer_time_points))
-        if layer_time_points[index][0] > layer_time_points[index - 1][0]
-    ]
-    typical_layer_step = median(layer_steps) if layer_steps else None
+    layer_time_points.sort(key=lambda point: (point[0].tzinfo is not None, point[0]))
+    # Keep naive and timezone-aware frames separate, as the lookup did before.
+    # Partition once; derive cadence lazily only for a frame actually queried.
+    layer_frames: dict[bool, list[tuple[datetime, int]]] = {False: [], True: []}
+    for point in layer_time_points:
+        layer_frames[point[0].tzinfo is not None].append(point)
+    layer_tolerances: dict[bool, float] = {}
 
     def _layer_location(timestamp: Any) -> dict[str, Any]:
         if not isinstance(timestamp, str) or not layer_time_points:
@@ -184,19 +184,31 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
             moment = datetime.fromisoformat(timestamp)
         except ValueError:
             return {}
+        if moment.tzinfo is None and clock_zone is not None:
+            moment = moment.replace(tzinfo=clock_zone)
+        frame = moment.tzinfo is not None
+        compatible = layer_frames[frame]
+        if not compatible:
+            return {}
+        if frame not in layer_tolerances:
+            layer_steps = [(later[0] - earlier[0]).total_seconds()
+                           for earlier, later in zip(compatible, compatible[1:])
+                           if later[0] > earlier[0]]
+            typical_layer_step = median(layer_steps) if layer_steps else None
+            layer_tolerances[frame] = max(300.0, (typical_layer_step or 0.0) * 2.5)
         nearest_time, nearest_layer = min(
-            layer_time_points, key=lambda point: abs((point[0] - moment).total_seconds())
+            compatible, key=lambda point: abs((point[0] - moment).total_seconds())
         )
         distance = abs((nearest_time - moment).total_seconds())
-        tolerance = max(300.0, (typical_layer_step or 0.0) * 2.5)
+        tolerance = layer_tolerances[frame]
         if distance <= tolerance:
             return {
                 "layer": nearest_layer,
                 "layer_mapping_precision": "nearest_burn_log_timestamp",
                 "layer_time_distance_sec": round(distance, 1),
             }
-        before = [layer for ts, layer in layer_time_points if ts <= moment]
-        after = [layer for ts, layer in layer_time_points if ts >= moment]
+        before = [layer for ts, layer in compatible if ts <= moment]
+        after = [layer for ts, layer in compatible if ts >= moment]
         if before and after:
             return {
                 "layer_range": [min(before[-1], after[0]), max(before[-1], after[0])],
@@ -210,9 +222,9 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
             "sample_index": source_index,
             "sample_count": sample_count,
         }
-        if source_index < len(time_axis) and time_axis[source_index] is not None:
+        if len(time_axis) == sample_count and time_axis[source_index] is not None:
             result["time"] = time_axis[source_index]
-        if source_index < len(timestamp_axis) and timestamp_axis[source_index] is not None:
+        if len(timestamp_axis) == sample_count and timestamp_axis[source_index] is not None:
             result["timestamp"] = timestamp_axis[source_index]
             result.update(_layer_location(timestamp_axis[source_index]))
         return result
@@ -229,6 +241,8 @@ def detect_process_anomalies(telemetry: dict[str, Any], z_threshold: float = 3.5
                     "start": _location(start, sample_count),
                     "end": _location(previous, sample_count),
                 })
+                if len(ranges) == 20:
+                    return ranges
                 start = index
             previous = index
         ranges.append({
@@ -305,25 +319,44 @@ def analyze_layer_burn_drift(layer_burn_times: list[dict[str, Any]]) -> dict[str
     Returns {n_layers, mean_sec, slope_sec_per_layer, trend, outlier_layers}.
     Rising burn time across layers is an early indicator of process degradation.
     """
-    points = [
-        (p["layer"], float(p["duration_sec"]))
-        for p in layer_burn_times
-        if isinstance(p.get("duration_sec"), (int, float)) and p["duration_sec"] > 0
-    ]
-    if len(points) < 3:
-        return {"n_layers": len(points), "trend": "insufficient_data",
-                "mean_sec": None, "slope_sec_per_layer": None, "outlier_layers": []}
+    points: list[tuple[int, float]] = []
+    for point in layer_burn_times:
+        if not isinstance(point, dict):
+            continue
+        layer, duration = point.get("layer"), point.get("duration_sec")
+        if (not isinstance(layer, int) or isinstance(layer, bool)
+                or not isinstance(duration, (int, float)) or isinstance(duration, bool)):
+            continue
+        try:
+            duration = float(duration)
+            float(layer)
+        except OverflowError:
+            continue
+        if math.isfinite(duration) and duration > 0:
+            points.append((layer, duration))
+    n_layers = len({layer for layer, _ in points})
+    insufficient = {"n_layers": n_layers, "trend": "insufficient_data",
+                    "mean_sec": None, "slope_sec_per_layer": None, "outlier_layers": []}
+    if n_layers < 3:
+        return insufficient
 
     xs = [float(layer) for layer, _ in points]
     ys = [dur for _, dur in points]
-    mean_x, mean_y = fmean(xs), fmean(ys)
-    denom = sum((x - mean_x) ** 2 for x in xs)
-    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom if denom else 0.0
+    try:
+        mean_x, mean_y = fmean(xs), fmean(ys)
+        denom = sum((x - mean_x) ** 2 for x in xs)
+        if not denom or not math.isfinite(denom):
+            return insufficient
+        slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denom
+    except (ArithmeticError, ValueError):
+        return insufficient
 
     # Judge the estimated change over the observed layer span. Comparing a
     # per-layer slope directly with the mean made the same 10→20 s drift look
     # weaker merely because a build had more layers.
     rel_change = slope * (max(xs) - min(xs)) / mean_y if mean_y else 0.0
+    if not (math.isfinite(slope) and math.isfinite(rel_change)):
+        return insufficient
     if rel_change > 0.05:
         trend = "rising"
     elif rel_change < -0.05:
@@ -331,14 +364,17 @@ def analyze_layer_burn_drift(layer_burn_times: list[dict[str, Any]]) -> dict[str
     else:
         trend = "stable"
 
-    zs = _zscores(ys)
+    try:
+        zs = _zscores(ys)
+    except (ArithmeticError, ValueError):
+        return insufficient
     outliers = [
         {"layer": layer, "duration_sec": round(dur, 1), "z_score": round(z, 2)}
         for (layer, dur), z in zip(points, zs)
         if abs(z) >= 3.0
     ]
     return {
-        "n_layers": len(points),
+        "n_layers": n_layers,
         "mean_sec": round(mean_y, 1),
         "slope_sec_per_layer": round(slope, 4),
         "relative_change_pct": round(rel_change * 100, 1),
@@ -371,6 +407,8 @@ def atmosphere_readiness_score(telemetry: dict[str, Any]) -> dict[str, Any]:
             if len(values) < 5:
                 continue
             cv = _coefficient_of_variation(values)
+            if cv is None:
+                continue
             stability = max(0.0, 1.0 - cv / 0.5)
             thr = thresholds.get(signal) or {}
             high, low = thr.get("alarm_high"), thr.get("alarm_low")

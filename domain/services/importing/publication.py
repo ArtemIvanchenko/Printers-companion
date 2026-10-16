@@ -7,7 +7,7 @@ The worker owns the surrounding transaction; rollback preserves the old card.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from datetime import timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -67,7 +67,7 @@ def publish_import(
     from analytics.prediction.calibration import enqueue_calibration
     from analytics.prediction.retraining import enqueue_retraining_for_session
     from domain.services.print_linking import auto_link_print_records
-    from storage.repositories.prints_repo import PrintsRepository
+    from storage.repositories.prints_repo import PrintsRepository, captured_card_link_intent
     from storage.repositories.runtime import RuntimeRepository
     from storage.repositories.reports import ReportsRepository
     from storage.repositories.import_jobs import ImportJobsRepository
@@ -165,11 +165,14 @@ def publish_import(
     if result.job.print_record_id and len(result.job.session_ids) == 1:
         sid = result.job.session_ids[0]
         session = db.get(BuildSession, sid)
-        if PrintsRepository(db).link_session(
+        prints = PrintsRepository(db)
+        intent = captured_card_link_intent(result.job.audit_trail, result.job.print_record_id)
+        if prints.link_session(
             result.job.print_record_id,
             sid,
             session.start_ts if session else None,
             compute_node_id=fence.owner_node_id,
+            expected_link_fingerprint=intent["expected_link_fingerprint"] if intent else None,
             link_evidence={
                 "method": "operator_card_upload",
                 "import_job_id": fence.import_job_id,
@@ -178,6 +181,17 @@ def publish_import(
             },
         ):
             links.append({"session_id": sid})
+        else:
+            record = prints.get_print_record(result.job.print_record_id) or {}
+            result.job.audit_trail.append({
+                "action": "card_link_skipped", "actor": "system",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "details": {
+                    "record_id": result.job.print_record_id,
+                    "current_session_id": record.get("session_id"), "requested_session_id": sid,
+                    "reason": "link_intent_changed_or_session_claimed",
+                },
+            })
     links.extend(auto_link_print_records(db, origin_compute_node_id=fence.owner_node_id))
     for sid in {str(link["session_id"]) for link in links if link.get("session_id")}:
         enqueue_retraining_for_session(db, sid)

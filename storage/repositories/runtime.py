@@ -419,22 +419,26 @@ class RuntimeRepository:
             )
             if card is None:
                 raise QualityOutcomeConflict("Карточка печати больше не существует")
-            current = self.db.scalar(
+            from domain.services.quality import final_outcome_head
+
+            finals = self.db.scalars(
                 select(QualityOutcome)
                 .where(
                     QualityOutcome.print_record_id == str(print_record_id),
                     QualityOutcome.is_final.is_(True),
                 )
-                .order_by(QualityOutcome.timestamp.desc(), QualityOutcome.outcome_id.desc())
                 .with_for_update()
-                .limit(1)
-            )
+                .execution_options(populate_existing=True)
+            ).all()
+            current = final_outcome_head([_quality_outcome_to_dict(row) for row in finals])
+            if finals and current is None:
+                raise QualityOutcomeConflict("Цепочка итогов контроля неоднозначна; история сохранена")
             if current is None:
                 if supersedes_id:
                     raise QualityOutcomeConflict(
                         "Первый итог контроля не должен ссылаться на исправляемую запись"
                     )
-            elif str(supersedes_id or "") != current.outcome_id:
+            elif str(supersedes_id or "") != current["outcome_id"]:
                 raise QualityOutcomeConflict(
                     "Итог контроля уже изменён; обновите карточку и повторите исправление"
                 )
@@ -476,13 +480,28 @@ class RuntimeRepository:
     ) -> list[dict[str, Any]]:
         stmt = select(QualityOutcome)
         if session_id is not None:
-            stmt = stmt.where(QualityOutcome.session_id == session_id)
+            # Include the whole card lineage before selecting its head. A
+            # successor linked elsewhere must not resurrect this ancestor.
+            from sqlalchemy import or_
+
+            cards = select(QualityOutcome.print_record_id).where(
+                QualityOutcome.session_id == session_id,
+                QualityOutcome.print_record_id.is_not(None),
+            )
+            stmt = stmt.where(or_(QualityOutcome.session_id == session_id,
+                                  QualityOutcome.print_record_id.in_(cards)))
         if print_record_id is not None:
             stmt = stmt.where(QualityOutcome.print_record_id == print_record_id)
         rows = self.db.scalars(
             stmt.order_by(QualityOutcome.timestamp.desc(), QualityOutcome.outcome_id.desc())
         ).all()
-        return [_quality_outcome_to_dict(row) for row in rows]
+        from domain.services.quality import final_outcome_heads
+
+        history = [_quality_outcome_to_dict(row) for row in rows]
+        heads = {row["outcome_id"] for row in final_outcome_heads(history)}
+        # Keep every immutable row. Only a validated head receives precedence;
+        # display timestamps never confer authority on an ambiguous history.
+        return sorted(history, key=lambda row: row["outcome_id"] not in heads)
 
     def save_historical_verdict(self, verdict: dict[str, Any]) -> None:
         verdict = jsonable_encoder(verdict)

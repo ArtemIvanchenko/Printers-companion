@@ -30,7 +30,6 @@ def _capture_notifications(monkeypatch):
         return {"job": {"import_job_id": "test-job"}}
 
     monkeypatch.setattr(watcher, "notify_import_detected", notify)
-    monkeypatch.setattr(watcher, "auto_confirm_import", lambda response: None)
     return calls
 
 
@@ -108,7 +107,6 @@ def test_failed_notification_releases_exact_signature_for_retry(tmp_path, monkey
         return {"job": {"import_job_id": "test-job"}}
 
     monkeypatch.setattr(watcher, "notify_import_detected", notify)
-    monkeypatch.setattr(watcher, "auto_confirm_import", lambda response: None)
 
     scan_existing_candidates(tmp_path, tracker)
     scan_existing_candidates(tmp_path, tracker)

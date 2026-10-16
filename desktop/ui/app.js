@@ -7,7 +7,7 @@ function render(state) {
   el('version').textContent = state.version ? 'v' + state.version + (state.testBuild ? ' · тест' : '') : '';
   el('status').textContent = state.message || '';
   el('update').disabled = Boolean(state.busy);
-  el('update').textContent = state.updateReady ? 'Обновить и перезапустить' : state.backendUpdatePending ? 'Завершить обновление' : 'Проверить обновления';
+  el('update').textContent = state.updateReady ? 'Обновить и перезапустить' : state.manualUpdateAvailable ? 'Скачать установщик' : state.backendUpdatePending ? 'Завершить обновление' : 'Проверить обновления';
   el('onboarding').hidden = Boolean(state.configured || state.busy);
   el('operation').hidden = (!state.configured && !state.busy) || (state.phase === 'ready');
   el('dashboard').hidden = state.phase !== 'ready';
@@ -41,6 +41,6 @@ el('setup-form').addEventListener('submit', event => {
 el('import').addEventListener('click', () => action(() => window.companion.importInstallation()));
 el('retry').addEventListener('click', () => action(() => window.companion.launch()));
 el('recover').addEventListener('click', () => action(() => window.companion.recover()));
-el('update').addEventListener('click', () => action(() => current.updateReady ? window.companion.installUpdate() : current.backendUpdatePending ? window.companion.launch() : window.companion.checkUpdate()));
+el('update').addEventListener('click', () => action(() => current.updateReady ? window.companion.installUpdate() : current.manualUpdateAvailable ? window.companion.openUpdate() : current.backendUpdatePending ? window.companion.launch() : window.companion.checkUpdate()));
 window.companion.onState(render);
 window.companion.state().then(render);

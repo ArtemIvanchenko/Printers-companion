@@ -6,6 +6,8 @@ import pytest
 
 from domain.services.log_archives import expand_log_inputs, validated_members
 from scripts.maintenance.organize_print_catalog import copy_verified, make_archive
+from storage.db.session import SessionLocal
+from storage.repositories.import_jobs import ImportJobsRepository
 
 
 def zip_file(path, entries):
@@ -197,18 +199,34 @@ def test_import_uses_expansion_manifest_and_passes_logs_to_ingestion(tmp_path, m
     zip_file(archive_path, [('17.07.2026.log', b'test')])
     job = import_jobs.ImportJobRecord(import_job_id='archive_integration', owner_node_id='test',
                                      source_path=str(source), source_name=source.name, source_kind=source_kind)
+    job.file_snapshot = import_jobs.snapshot_source(source)
+    import_jobs.mark_import_job_confirmed(job)
+    with SessionLocal() as db:
+        repo = ImportJobsRepository(db)
+        repo.save_import_job(job)
+        db.flush()
+        job = repo.claim_next_import_job(
+            owner_node_id=job.owner_node_id, lease_owner='archive-manifest-test-worker', lease_seconds=3600,
+        )
+        db.commit()
+    assert job is not None
     observed = []
     archived = []
-    manifest_reads = []
+    captured_reads = []
     original_parse = import_jobs.IngestionService.parse
-    original_manifest = import_jobs.calculate_checksum_manifest
+    original_capture = import_jobs._capture_import_sources
 
-    def manifest(path):
-        assert path == source  # Never rescan the prepared temporary tree.
-        manifest_reads.append(path)
-        return original_manifest(path)
+    def capture(relative_root, target, paths, lease_check):
+        assert paths == [archive_path]
+        captured_reads.extend(paths)
+        return original_capture(relative_root, target, paths, lease_check)
 
     def archive(*args, **kwargs):
+        captured_source = args[1]
+        captured_paths = kwargs['source_files']
+        assert captured_source != source
+        assert captured_paths[0].read_bytes() == archive_path.read_bytes()
+        assert kwargs['checksum_manifest'] == {'logs.zip': hashlib.sha256(archive_path.read_bytes()).hexdigest()}
         archived.append(source)
         return {'logs.zip' if source_kind == 'folder' else '__source_archive__': 's3://raw/archive.zip'}
 
@@ -219,12 +237,12 @@ def test_import_uses_expansion_manifest_and_passes_logs_to_ingestion(tmp_path, m
 
     monkeypatch.setattr(import_jobs.IngestionService, 'parse', parse)
     monkeypatch.setattr(import_jobs, 'archive_raw_import', archive)
-    monkeypatch.setattr(import_jobs, 'calculate_checksum_manifest', manifest)
+    monkeypatch.setattr(import_jobs, '_capture_import_sources', capture)
     monkeypatch.setattr(import_jobs, 'group_files_into_sessions', lambda files: [])
     import_jobs.execute_confirmed_import(job, registry=object(), settings=Settings(app_env='test'))
     assert observed == ['17.07.2026.log']
-    assert manifest_reads == ([source] if source_kind == 'folder' else [])
-    assert job.checksum_manifest == {'17.07.2026.log': hashlib.sha256(b'test').hexdigest()}
+    assert captured_reads == [archive_path]
+    assert job.checksum_manifest == {'logs.zip': hashlib.sha256(archive_path.read_bytes()).hexdigest()}
     assert job.source_objects['17.07.2026.log'] == 's3://raw/archive.zip'
 
 
@@ -240,6 +258,17 @@ def test_ingestion_rejects_source_changed_after_expansion(tmp_path, monkeypatch,
     zip_file(archive_path, [('day.log', b'original')])
     job = import_jobs.ImportJobRecord(owner_node_id='test', source_path=str(source),
                                      source_name=source.name, source_kind=source_kind)
+    job.file_snapshot = import_jobs.snapshot_source(source)
+    import_jobs.mark_import_job_confirmed(job)
+    with SessionLocal() as db:
+        repo = ImportJobsRepository(db)
+        repo.save_import_job(job)
+        db.flush()
+        job = repo.claim_next_import_job(
+            owner_node_id=job.owner_node_id, lease_owner='archive-change-test-worker', lease_seconds=3600,
+        )
+        db.commit()
+    assert job is not None
     original_parse = import_jobs.IngestionService.parse
 
     def changed_parse(self, path):
@@ -250,33 +279,105 @@ def test_ingestion_rejects_source_changed_after_expansion(tmp_path, monkeypatch,
     monkeypatch.setattr(import_jobs, 'archive_raw_import', lambda *args, **kwargs: {})
     with pytest.raises(import_jobs.RetryableImportError, match='изменился между архивированием и разбором'):
         import_jobs.execute_confirmed_import(job, registry=object(), settings=Settings(app_env='test'))
-    assert job.checksum_manifest == {'day.log': hashlib.sha256(b'original').hexdigest()}
+    assert job.checksum_manifest == {'logs.zip': hashlib.sha256(archive_path.read_bytes()).hexdigest()}
     with zipfile.ZipFile(archive_path) as archive:
         assert archive.read('day.log') == b'original'
 
 
-@pytest.mark.parametrize('analysis_fails', [False, True])
-def test_prepared_sources_live_through_analysis_and_cleanup_only_owned_tree(tmp_path, monkeypatch, analysis_fails):
+@pytest.mark.parametrize('analysis_error', [None, RuntimeError, FileNotFoundError])
+def test_prepared_sources_live_through_analysis_and_cleanup_only_owned_tree(tmp_path, monkeypatch, analysis_error):
     from contextlib import nullcontext
     from datetime import datetime, timezone
     from core.config.settings import Settings
     from domain.services import import_jobs
+    from domain.services.importing.fence import ImportFence
 
     source = tmp_path / 'logs.zip'
     zip_file(source, [('day.log', b'original')])
     original_bytes = source.read_bytes()
     job = import_jobs.ImportJobRecord(owner_node_id='test', source_path=str(source),
                                      source_name=source.name, source_kind='zip')
+    job.file_snapshot = import_jobs.snapshot_source(source)
+    import_jobs.mark_import_job_confirmed(job)
+    with SessionLocal() as db:
+        repo = ImportJobsRepository(db)
+        repo.save_import_job(job)
+        db.flush()
+        job = repo.claim_next_import_job(
+            owner_node_id=job.owner_node_id, lease_owner='archive-cleanup-test-worker', lease_seconds=3600,
+        )
+        db.commit()
+    assert job is not None
+    fence = ImportFence(job.import_job_id, job.owner_node_id, job.lease_owner, job.lease_generation)
     monkeypatch.setattr(import_jobs, 'archive_raw_import', lambda *a, **k: {'__source_archive__': 's3://raw/zip'})
-    outcome = pytest.raises(RuntimeError, match='analysis failed') if analysis_fails else nullcontext()
+    outcome = pytest.raises(analysis_error, match='analysis failed') if analysis_error else nullcontext()
     with outcome:
         with import_jobs._prepared_import_sources(
-            job, settings=Settings(app_env='test'), now=datetime.now(timezone.utc), lease_guard=None,
-        ) as (root, members):
+            job, settings=Settings(app_env='test'), now=datetime.now(timezone.utc),
+            lease_guard=None, fence=fence,
+        ) as (root, members, parse_manifest):
             assert root != tmp_path and root.exists()
             assert (root / 'day.log').read_bytes() == b'original'
             assert members == {'day.log': 'day.log'}
-            if analysis_fails:
-                raise RuntimeError('analysis failed')
+            assert parse_manifest == {'day.log': hashlib.sha256(b'original').hexdigest()}
+            assert job.checksum_manifest == {'logs.zip': hashlib.sha256(original_bytes).hexdigest()}
+            if analysis_error:
+                raise analysis_error('analysis failed')
     assert not root.exists()
     assert source.read_bytes() == original_bytes
+
+
+def test_capture_hashes_copied_bytes_and_preserves_nested_names_and_mtime(tmp_path):
+    from domain.services.import_jobs import _capture_import_sources
+
+    source = tmp_path / 'input'
+    path = source / 'nested' / 'day.log'
+    path.parent.mkdir(parents=True)
+    data = b'raw machine data' * 100000
+    path.write_bytes(data)
+    before = path.stat()
+    target = tmp_path / 'captured'
+    checksums = _capture_import_sources(source, target, [path], lambda: None)
+    copied = target / 'nested' / 'day.log'
+    assert copied.read_bytes() == path.read_bytes() == data
+    assert checksums == {'nested/day.log': hashlib.sha256(data).hexdigest()}
+    assert copied.stat().st_mtime_ns == before.st_mtime_ns
+    # Replacement of the external source cannot change the captured byte view.
+    path.write_bytes(b'replacement')
+    assert copied.read_bytes() == data
+
+
+@pytest.mark.parametrize('change', ['grow', 'shrink'])
+def test_capture_bounds_mutation_during_copy(tmp_path, change):
+    from domain.services.import_jobs import _capture_import_sources, RetryableImportError
+
+    path = tmp_path / 'day.log'
+    data = b'x' * (3 * 1024**2)
+    path.write_bytes(data)
+    calls = 0
+
+    def change_source():
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # First copied block; the source descriptor is open.
+            if change == 'grow':
+                with path.open('ab') as out:
+                    out.write(b'additional row')
+            else:
+                with path.open('r+b') as out:
+                    out.truncate(1024**2)
+
+    with pytest.raises(RetryableImportError, match='во время копирования'):
+        _capture_import_sources(tmp_path, tmp_path / 'captured', [path], change_source)
+
+
+def test_capture_rejects_insufficient_local_space_before_copy(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from domain.services.import_jobs import _capture_import_sources
+
+    path = tmp_path / 'day.log'
+    path.write_bytes(b'original')
+    monkeypatch.setattr('domain.services.import_jobs.shutil.disk_usage', lambda path: SimpleNamespace(free=0))
+    with pytest.raises(ValueError, match='Недостаточно места'):
+        _capture_import_sources(tmp_path, tmp_path / 'captured', [path], lambda: None)
+    assert path.read_bytes() == b'original'

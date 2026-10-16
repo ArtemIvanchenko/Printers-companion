@@ -8,7 +8,7 @@ from parsers.formats._tables import parse_table_stream
 
 class BurnLogParser(BaseParser):
     name = "burn_log"
-    version = "0.2.0"
+    version = "0.2.2"
     file_family = SourceFileFamily.burn_log
     role = FileRole.primary
 

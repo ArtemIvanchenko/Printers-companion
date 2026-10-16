@@ -14,6 +14,7 @@
 #   - docker (with buildx multiplatform support)
 #   - gh CLI (github.com/cli/cli) — used for GHCR auth
 #   - git (clean working tree required for a reproducible release)
+#   - Python 3.11+ (standard-library metadata validation)
 #   - Flash drive at /Volumes/SANDISK (optional, skip with --no-flash)
 
 set -euo pipefail
@@ -91,21 +92,64 @@ fi
 # ── Bump version files ────────────────────────────────────────────────────────
 step "Bumping version $CURRENT → $NEW_VERSION"
 
-echo "$NEW_VERSION" > VERSION
-info "Updated VERSION"
+# Validate all existing package identities before changing any version file.
+# A stale pyproject used to make sed silently miss its version; desktop package
+# declarations were never bumped and then failed the existing CI identity check.
+python3 - "$CURRENT" "$NEW_VERSION" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+import tomllib
 
-# pyproject.toml — update the version = "..." line in [project] section
-if [[ "$(uname)" == "Darwin" ]]; then
-  sed -i '' "s/^version = \"${CURRENT}\"/version = \"${NEW_VERSION}\"/" pyproject.toml
-else
-  sed -i "s/^version = \"${CURRENT}\"/version = \"${NEW_VERSION}\"/" pyproject.toml
-fi
-info "Updated pyproject.toml"
+current, new = sys.argv[1:]
+project_path = Path("pyproject.toml")
+project_text = project_path.read_text(encoding="utf-8")
+project = tomllib.loads(project_text)
+package_text = Path("desktop/package.json").read_text(encoding="utf-8")
+lock_text = Path("desktop/package-lock.json").read_text(encoding="utf-8")
+package = json.loads(package_text)
+lock = json.loads(lock_text)
+versions = {
+    "pyproject.toml [project]": project["project"]["version"],
+    "desktop/package.json": package["version"],
+    "desktop/package-lock.json": lock["version"],
+    "desktop/package-lock.json packages['']": lock["packages"][""]["version"],
+}
+if mismatches := [f"{name}={value!r}" for name, value in versions.items() if value != current]:
+    raise SystemExit(f"Package metadata must match VERSION={current}: " + ", ".join(mismatches))
+
+section = re.search(r"(?m)^\[project\][^\n]*\n", project_text)
+if section is None:
+    raise SystemExit("Missing [project] section in pyproject.toml; no files changed")
+following = re.search(r"(?m)^\[", project_text[section.end():])
+end = section.end() + following.start() if following else len(project_text)
+body, count = re.subn(
+    r'(?m)^([ \t]*version[ \t]*=[ \t]*")[^"\r\n]*(")',
+    lambda match: match[1] + new + match[2], project_text[section.end():end],
+)
+if count != 1:
+    raise SystemExit("Expected one static [project].version in pyproject.toml; no files changed")
+package["version"] = lock["version"] = lock["packages"][""]["version"] = new
+outputs = {
+    "VERSION": new + "\n",
+    "pyproject.toml": project_text[:section.end()] + body + project_text[end:],
+    "desktop/package.json": (json.dumps(package, indent=2, ensure_ascii=False) + "\n"
+                             if new != current else package_text),
+    "desktop/package-lock.json": (json.dumps(lock, indent=2, ensure_ascii=False) + "\n"
+                                  if new != current else lock_text),
+}
+for name, contents in outputs.items():
+    path = Path(name)
+    if path.read_text(encoding="utf-8") != contents:
+        path.write_text(contents, encoding="utf-8")
+PY
+info "Updated VERSION, pyproject.toml and desktop package metadata"
 
 # ── Git commit + tag ──────────────────────────────────────────────────────────
 step "Git commit and tag v$NEW_VERSION"
 
-run git add VERSION pyproject.toml
+run git add VERSION pyproject.toml desktop/package.json desktop/package-lock.json
 if ! git diff --cached --quiet; then
   run git commit -m "chore: release v${NEW_VERSION}
 

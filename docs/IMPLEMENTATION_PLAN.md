@@ -1,9 +1,297 @@
 # Рабочий план развития
 
-Актуальный план текущего цикла. Архитектурные инварианты и правила выполнения
-описаны в корневом `AGENTS.md`.
+Актуальный план текущего цикла. Владелец повторно предоставил AGENTS.md:
+текущие архитектурные инварианты снова действуют. Исторические записи ниже
+не заменяют текущие требования и не подтверждают восстановление потерянного кода.
+
+Текущее локальное поколение аналитики —0.5.11, log-insights1.0.11: TimeLogParser0.5.1
+сохраняет точное число повреждённых строк до quality/JSON; общий табличный формат
+не переключается по десятичной запятой в значениях; computational capture фаз,
+цикла/base/floor/datum больше не теряет точность из-за display-rounding.
+Producer при отсутствии пригодного main-журнала не публикует «пауз0» из
+time-only данных; неизвестное остаётся null, явные интервалы не теряются.
+Старые сохранённые снимки и модели не переименовываются; новая семантика требует
+повторного анализа исходников и прежних version/schema admission gates.
+Прежний parser/quality/snapshot/ML прогон129checks относится к0.5.7; новая
+интеграция и границы приведены хронологически в night review. VERSION остаётся
+восстановленным1.8.0, новая опубликованная сборка не выпускалась.
+
+### Продолжение по прямому запросу владельца — 13 октября 2026
+
+Запрос «продолжай работу пока не скажу остановиться» отменил прежний предел
+09:00. Та же heartbeat-задача возобновлена без даты окончания; внешние публикации,
+операторская БД/NAS и запуск рабочих вычислителей по-прежнему не разрешены.
+
+Завершено после ночного цикла:
+
+- Исправлен cold/warm geometry cache: точные вычислительные массивы, ключ v7,
+  прежнее компактное представление опубликованного снимка сохранено.
+- В опубликованном scan_geometry сохраняется точное физическое число слоёв;
+  последний слой не теряется из-за округлённой высоты снимка.
+- Установка миграций и drift-check на отдельной новой SQLite проверены;
+  единая команда `python -m scripts.check_migration_drift`, без PYTHONPATH обхода.
+- Повторный запрос log-insights после сетевой ошибки действительно выполняется;
+  отсоединённая карточка не получает запоздалое обновление.
+- Загрузка фото/документа продолжает уже принятый owner-local estimate на новой
+  revision. Вложение, revision и новый запрос публикуются атомарно.
+- GET/list/PATCH отдают одинаковый допуск актуальности прогноза. Неподтверждённый
+  снимок остаётся историей, не текущим временем/стоимостью/геометрией/ошибкой.
+- Автоматический intake применяет approval policy в общей регистрации, а не
+  вторым HTTP запросом watcher; явный ingest и recovery сохраняют queued job.
+- Первый SQLite SAVEPOINT атомарен с caller commit/rollback. Общий hook сохраняет
+  существующий configuration guard и legacy поведение обычных чтений.
+- SQL commit/rollback и close до HTTP заголовков: function-scoped DB dependencies,
+  обычные repository factories. Отказ commit не возвращает ложное accepted.
+  Streaming/cleanup boundaries сохранены; minimum существующего FastAPI >=0.121.
+
+Завершена scalar JSON-проекция health/telemetry вместо загрузки всего контекста
+сессии для геометрической привязки; synthetic чтение88.30→29.43ms с равным
+результатом. Это не замер всего экрана/NAS.
+
+В обычном монотонном сценарии проверен downstream QC→ML: новый исход и audited
+correction не зависят от freshness прогноза и не меняют аналитический snapshot.
+Последующий аудит 14 октября обнаружил и исправил отдельное нарушение порядка
+исправлений при разных часах ПК; ниже указан остаток публикации модели.
+
+Завершена отдельная проверка текущей конфигурации: оценщик сохраняет общий
+build/config provenance; GET/list сверяют конфигурацию пакетно через общий
+чистый parameter resolver. План различает сохранённый прогноз и расчёт по
+нынешним настройкам, не скрывает историю и предлагает существующий перерасчёт.
+Legacy-конфигурация неизвестна, не достраивается из сегодняшних параметров.
+Полный correction factor больше не округляется перед capture scan reference.
+Исправлен общий приоритет active preset над material speed map; STL preview
+использует тот же resolver, его дублированный merge удалён. Калибровочный scope
+отвергает несовместимую скорость без смены версии геометрического кэша.
+Сохранение карточки сразу обновляет план/метрики, сохраняет все новые поля,
+QC-черновик, фокус, выбранную камеру и существующий STL renderer.
+Принятый estimate теперь продолжается после приёма/привязки логов общей
+consumer-политикой, без ослабления revision/hash/lease. Старый запрос остаётся
+failed, successor создаётся/объединяется атомарно; UI следует уже существующему
+активному заданию без нового POST. До блокировки job publication берёт
+configuration/session/card.108 совместных backend и137 web checks после
+объединения; отдельно более широкий backend прогон329pass. Native browser
+недоступен: точный отказ Browser is not available: iab, временный API остановлен.
+
+Далее: разграничение card-revision fencing со свежестью физических входов.
+Последнее пока НЕ
+исправлено: заметка/фото/QC могут консервативно снять допуск старого расчёта.
+Новый configuration flag не участвует в исторической калибровке: иначе обновление
+модели уничтожит собственную обучающую выборку. Настройки проверяются при
+GET/list, без нового SSE-механизма; открытый экран требует повторного чтения.
+Не ослаблять fencing и не вводить частные исключения для отдельных полей.
+Нужны самостоятельная привязка физических источников и отделение сохранённого
+до печати прогноза от retrospective reconstruction в оценке точности.
+Реальная браузерная проверка новых retry/history недоступна (CUA browsers=[]);
+предыдущая synthetic browser QA не выдаётся за новую. Нативный desktop/update,
+PostgreSQL и независимая физическая точность прогноза этими проверками не
+подтверждены. Подробные причины и границы — в night review.
+
+Последующее объединение: фиксированный table delimiter/Monitor status,
+истинная readiness desktop, QC/archive/viewer/upload/telemetry lifecycle.
+Оценщик читает только linked printer_id и блокирует session_id без telemetry
+context (synthetic prepare50.17→3.31ms, одинаковый полный input). Reclaim старого
+estimate не создаёт третий расчёт, если accepted goal уже подтверждён свежим
+полным input/config capture; ручной более новый запрос и fencing сохраняются.
+Часы фаз/cycle, base/floor/datum и исторические intervalbounds не округляются
+до численных consumers; UI округляет только вывод. Старые roundedcaptures не
+переписываются: общий numerical-capture gate исключает старое/неизвестное
+поколение из нового ratio/NNLS обучения, сохраняя историю и log-only recoat/cycle.
+Текущая конфигурация не подменяет исторический as-run. Уже применённые старые
+поправки не переписаны; физическая/held-out точность остаётся отдельным долгом.
+Причины, independentmath, nativeTTLproof и честные ограничения — в nightreview.
+Новая immutable загрузка вложения получает новый file_id, повторы её manifest
+сохраняют ID: старое DELETE не удаляет заново загруженный STL. Незавершённый
+lost-ACK manifest сохраняет прежний recovery контракт; это не полная отмена
+всех pending записей при удалении. Прежняя тёплая тёмная палитра восстановлена
+по прямому запросу владельца 14 октября, без отката UI workflow/кнопок/графиков.
+Исправлена общая потеря structured logging после programmatic migration:
+инициализация приложения сохраняет свои handlers/request ID/uvicorn logger,
+CLI Alembic остаётся самостоятельным. Cold/repeat upgrade и настоящий временный
+API проверены; открытый preview8002 не перезапускался. Полная readiness/worker
+и независимая точность времени этим не подтверждены.
+Завершён source→snapshot→HTTP аудит pause evidence на реальных03June копиях:
+unknown вместо falsezero, измеренные30435.953s не меняются.119 scoped checks и
+39 current ML/version-admission checks pass; полнота выгрузки не доказана.
+Завершена защита принятого physical снимка между retries: missing main/time/ZIP
+не забывается и не разрешает частичный done; используется одна чистая политика
+источников в ingestion/stability/completeness. Исключения metadata/profile/size,
+дозапись, добавления и широкая raw/intake identity сохранены.94 совместных
+целевых checks pass; normal-cycle/physical accuracy этим не доказаны.
+Завершён fenced physical-source checkpoint до hash/archive/expand. Одна выборка
+из единственной stability проверки, mandatory claim во всех окружениях; только
+file_snapshot/штатный updated_at, не весь failed result. Новые файлы проходят
+прежний bounded defer, growth/restore и crash/reclaim сохраняют состав. Commit
+failure/lost ACK не разрешают архивирование и не стирают committed evidence.
+17 native checks, root129 совместных и3 error-scope controls pass; это не полный
+suite или NAS/физическая accuracy приёмка.
+Закрыто подтверждённое raw/expanded несоответствие: одна owned копия всех принятых
+physical файлов, SHA во время copy, затем raw upload/expansion/parser/telemetry
+читают эти же байты. Внешняя замена ZIP/лога после archive не меняет опубликованное
+поколение. Non-ZIP original_path/runtime paths и точный mtime сохранены; policy,
+CRC/лимиты, lease, исходники и pre-yield error scope не ослаблены. Поздний файл
+после единственной stability проверки не подмешивается; нужен следующий приём.
+227 scoped checks pass29.28s, включая6 строгих native byte-generation cases.
+Это не identical differential/full suite/реальный NAS. Copy требует дополнительно
+место под raw;64MiB warm step30.171→40.084ms, не ускорение полного импорта.
+Atomic snapshot меняющейся файловой системы, real NAS/PG/native A→B и физическая
+accuracy этим не подтверждены. Границы и артефакты — в night review.
+Продолжение14.10: устранено общее смешение physical upload и logical ZIP member
+SHA в job. Завершённый ZIP больше не делает остаточную upload receipt ложным
+needs_attention и не теряет checksum-copy identity. Job сохраняет physical
+manifest, parser/completeness используют отдельный локальный parse manifest;
+SourceFile/member evidence/fencing/старые записи не меняются. Native baseline
+ZIP1fail/loose1control → обаpass, вместе134targetchecks; дополнительный copied
+batch control2pass переиспользует тот жеjob без новыхслоёв. РабочийNAS не проверен.
+
+### 14 октября: порядок QC и действительность фоновых результатов
+
+Исправлено продление lease после задержанного SQL: import и generic heartbeat
+читают часы после row lock/refresh, не воскрешают истёкшую generation. Явный now,
+owner и прежняя очередь сохранены; два существующих repository файла проходят
+независимые 22 целевые проверки. PostgreSQL lock concurrency не проверена.
+
+Подтверждённый QC audit head теперь определяется общей полной supersedes-цепочкой
+до session projection, а не timestamp/UUID. Repository correction, отчёт, риск,
+переобучение и UI не выбирают разные итоги. История и время наблюдения сохранены;
+неоднозначный итог не становится разметкой ML. Native HTTP clock baseline
+3 fail / 1 control стал 4 pass, без подмены парсинга или SQL алгоритма.
+
+Исправлена серийная потеря принятой коррекции после регистрации shadow:
+сверяется fingerprint её исходных training_session_ids, не всего выросшего
+набора. Старый кандидат отвергается с сохранением артефакта, следующий обучается
+на свежем итоге; будущие новые исходы не сбрасывают holdout. Формулы, пороги,
+ANALYSIS_VERSION и сохранённые JSON не меняются. Это не доказательство ML-качества.
+Root текущий checkout: 90 QC/ML/API/report checks pass, 58 web checks pass.
+Итог физической карточки сохраняется при исправлении связи с логами; сводка
+контроля считает отдельные карточки. Неоднозначное объединение QC нескольких
+карточек в один session-label исключает только этот ML label, не их реальные
+результаты контроля. API-only pre-link fallback сохранён; strict ML admission
+не расширялся на неподтверждённую связь финального исхода.
+
+Закрыт prepare→publish долг по прямому запросу 14 октября: новый короткий UoW
+берёт общий registry lifecycle guard и SHARE NOWAIT на sessions/quality_outcomes,
+сверяет QC/feature fingerprint и raw active/shadow IDs, затем пишет registry
+и завершает job последним с актуальным lease fence. SQLite BEGIN IMMEDIATE
+исключает конкурентного writer. Изменившиеся входы/занятость переносят расчёт
+с bounded backoff, не расходуя алгоритмический budget; потеря generation/lease
+откатывает весь результат. Native PostgreSQL проверяет UPDATE, phantom INSERT,
+доступность SELECT, порядок locks и rollback регистрации/повышения после
+реального row-lock wait. Обучение остаётся вне БД, математические формулы прежние.
+Это не проверка качества ML, физического времени печати или рабочего NAS.
+
+14 октября владелец остановил автономную работу: heartbeat PAUSED, новые
+субагенты не запускаются. Следующий прямой запрос разрешил только завершение,
+проверку и публикацию указанного исправления. Для GitHub подготовлена отдельная
+ветка от опубликованного main: прочие накопленные dirty изменения остаются
+в текущем checkout и не включаются в целевой PR. Нет нового релиза/installer.
+
+### Приоритет к утру — простой GitHub update, прямой запрос 14 октября
+
+Существующий Electron updater и короткоживущий host сохраняются; новые демоны,
+сервисы, frameworks и зависимости не нужны. По официальной документации выбран
+GitHub Releases → штатный installer → safe restart → пакетный backend SHA/digests.
+Без подписи macOS автоматическую замену обещать нельзя; проверка публикации
+не равна установке. Пока канал тестовый, обеспечить реальный on-demand GitHub
+check и понятный совместимый installer/manual action без unsigned auto-run.
+Разделять локальную dirty/unpublished версию, опубликованный stable release и
+готовность backend; не выдавать container-only release за native installer.
+После этого проверить локальный frozen/window smoke без рабочего stack и
+подготовить coherent signed feed/build path. Сертификаты и реальная публичная
+публикация остаются внешними prerequisites; секреты/релизы/GitHub не менять.
+Интернет-проверка14.10: latest страница показывает1.7.0; baseline1.8.0 не означает
+готовый опубликованный desktop update. Владелец спит: вопросы не задавать.
+
+Read-only update выполнен14.10: точный native DMG/EXE selector, защищённый manual
+IPC/button, bounded короткоживущий host без NAS/Docker/регистрации установки.
+Portable TLS включён в frozen host (уже используемый certifi, explicit build pin),
+не зависит от Homebrew CA на другом Mac. Root137 Python +90 Node pass; реальный
+Mac ARM DMG/ZIP, packaged IPC/window и клик GitHub→frozen host→public latest
+проверены на отдельном профиле. Измерен только child:1.27s/36.7MiB peak RSS,
+не вся Electron/Docker установка. Signed A→B, native Windows текущей правки,
+публичный coherent feed и backend/NAS e2e пока не доказаны. Публикации нет;
+остаток — opt-in signed CI/feed, сертификаты и отдельный будущий A→B допуск.
+Opt-in CI/feed подготовлен и локально проверен: signed_release=false default,
+explicit repository variable, clean vVERSION tag/images, signing env только
+package step; builders --publish never, final streamed collector5installers/
+3manifest/fullSHA/digests, SHA512/size и combined MacARM/Intel feed. Root108 Node
+pass3.42s, YAML parses/syntax/diff-check; fixtures не подпись и не выполненный
+GitHub workflow. Канал не включён/не опубликован. Остаток теперь исключительно
+actual certificates, test→public binding и native signed A→B/backend допуск,
+внешняя публикация только по новому прямому разрешению. См. DESKTOP_APP/OPERATOR_GUIDE.
+Actual pinned builder writer→collector→updater SDK probe принят: combinedfeeds
+читаются настоящими parse/resolve, ARM/Intel выбирают своиZIP, NSIS выбираетx64
+EXE и сохраняет metadata. Это transfer-boundary проверка вtmp, не signature,
+скачивание/установка Windows или native A→B; три targetpaths в одном probe,
+не новый полный108-test прогон.
+
+### Параллельные чаты по прямому запросу пользователя
+
+Три новых локальных чата используют тот же checkout, без worktree/веток.
+Запись разделена, существующие dirty changes сохраняются:
+
+- Логи/парсинг/лог-аналитика: `01a13668-3f24-7712-9bb9-7f23c4776cd0`;
+  `parsers/`, normalization/log_insights и перечисленные численные sensor-модули,
+  без prediction/domain/worker/storage/API/UI и общей версии аналитики.
+  Отдельный результат — `docs/reviews/2026-10-13_parallel_logs.md`.
+- Desktop/update: `01a13668-2d0a-76e3-bdc6-110c121886d5`;
+  `desktop/`, `core/updating/`, `checks/updating/`, без release/CI/version/API.
+  Результат — `docs/reviews/2026-10-13_parallel_desktop.md`.
+- UI контроля: `01a13668-1e0a-7e20-9c65-8edfb03e1926`;
+  card-analysis/card-files/catalog/telemetry/dashboard.css/log-insights/template.
+  Дополнительно разрешён `models.js`: один lifecycle существующего STL viewer,
+  сохранение history/bytes и очистка его прежних ресурсов без нового manager.
+  Не менять `archive.js`, `card-editor.js`, card-lifecycle/card-time tests,
+  backend или вычислительные контракты. Результат — отдельный
+  `docs/reviews/2026-10-13_parallel_ui.md`.
+
+Общие AGENTS/план/night-review и estimate/import цепочку пока ведёт основной
+чат. Будущие итерации сначала учитывают эти области и читают собственные
+review параллельных чатов, не повторяют исправления и не перезаписывают файлы.
+Реальные рабочие данные, NAS, исходники и GitHub не затрагивать ни в одном чате.
 
 ## Функциональные этапы
+
+### Ночная стабилизация после очистки диска — 13 октября 2026
+
+С согласия владельца восстановлен опубликованный main587b16b; неопубликованные
+изменения 7–8 октября не восстановлены. Текущий цикл — только ошибки, дебаггинг
+и рефакторинг, без новых функций. Первые исправления: settings auto-lock,
+persistence fence/rollback, отдельный NAS backoff, desktop install lifecycle,
+actual burn-window и nullable неизвестной длительности. Продолжены общие исправления:
+execution/stability budgets и точное восстановление прежней migration0022,
+pause evidence, cycle admission/cost, single-model/plate math parity,
+timestamp/calendar/table structure, unknown quality/trends и metadata release.
+Завершены общая SQL availability policy, batch completeness, async card lifecycle,
+process-health math, native repaired geometry parity/topology и current comparison
+admission. Исторический reference больше не подменяет forecast и читает scalar
+stream вместо тяжёлых contexts. Завершены outbox claim-token/fresh physical key,
+bounded chart vs source-frame height mapping, unknown defect risk/shadow admission,
+IPC operation ownership и measured topology/process-health/receipt cleanup gains.
+Завершены BackgroundJob fresh lease/retry classification всех executors, StateFlow
+exact-repeat CPU path, chart lifecycle, truthful completion/QC/material state,
+desktop selector/event ownership. Завершены bounded StateFlow diagnostics/counts,
+ZIP logical-name/native-provenance separation и truthful runtime cancel recovery.
+Завершены repeated header count, physical-layer mapping без растяжения и fresh
+close-dialog check. Завершены import link-intent CAS, canonical timestamp/
+measured-burn projections, async estimate/QC identity и physical QC range gate.
+Selective event copy измеренно ускорена без изменения фактов. В работе общие
+ошибки recovery/desktop: truthful abort recovery и deterministic link-intent
+при reupload завершены. Операторский UI изменён: контроль/высоты/графики прежде
+диагностики, QC draft guard;110 web checks и isolated browser QA. Общая CSS
+консолидация и весь legacy UI ещё не завершены. Найден public cold/warm geometry
+cache rounding defect (11→10layers). На момент окончания ночи patch не был
+выполнен; исправление проверено уже в продолжении по новому прямому запросу
+владельца (выше). Это не означает готовность всего estimator к релизу.
+По дополнительному запросу владельца с05:00MSK13.10 — человекоориентированный
+редизайн existing UI: контроль высот/графики/действия сначала, technical detail
+по раскрытию, без новых функций/framework и без физических утверждений из
+косвенных признаков. Финальный срок ночи09:00MSK сохранён. Full StateFlow
+size gate и native desktop limits сохранены и явно описаны.
+Исходные данные и рабочие storage не изменены; внешнего выпуска нет.
+Причины, before/after,
+короткие проверки и оставшиеся ограничения:
+`docs/reviews/2026-10-13_night_work.md`. Исторические готовые пункты ниже не
+подтверждают состояние потерянной локальной версии1.8.1.
 
 ### Архитектура принятия решений (11 сентября 2026)
 

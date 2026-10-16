@@ -11,23 +11,33 @@ from domain.schemas.parsing import ParseDiagnosticRecord, ParsedTableBatch
 from parsers.common.encoding import estimate_encoding, iter_text_lines
 
 
-def split_row(line: str) -> list[str]:
-    stripped = line.strip()
-    # Pipe is the primary delimiter for M-450-M table logs
-    # (burn / sensors / table_temp / Monitor). Cells are space-padded; callers strip.
-    if "|" in stripped:
+def table_delimiter(line: str) -> str:
+    """Select the existing table format from its first nonempty line."""
+    if "|" in line:
+        return "|"
+    if ";" in line:
+        return ";"
+    if "\t" in line:
+        return "\t"
+    if "," in line and len(line.split(",")) > 2:
+        return ","
+    return " "
+
+
+def split_row(line: str, delimiter: str | None = None) -> list[str]:
+    # Table readers retain the header's delimiter: a decimal comma in a later
+    # whitespace row must not change the format to CSV.
+    selected = delimiter if delimiter is not None else table_delimiter(line)
+    if selected == "|":
+        stripped = line.strip()
         cells = next(csv.reader([stripped], delimiter="|"))
         # A trailing delimiter ("a|b|") produces a spurious empty final cell — drop it.
         if cells and cells[-1].strip() == "":
             cells.pop()
         return cells
-    if ";" in line:
-        return next(csv.reader([line], delimiter=";"))
-    if "\t" in line:
-        return next(csv.reader([line], delimiter="\t"))
-    if "," in line and len(line.split(",")) > 2:
-        return next(csv.reader([line], delimiter=","))
-    return re.split(r"\s+", line.strip())
+    if selected == " ":
+        return re.split(r"\s+", line.strip())
+    return next(csv.reader([line], delimiter=selected))
 
 
 def coerce_value(value: str) -> Any:
@@ -52,11 +62,21 @@ def looks_like_header(values: list[str]) -> bool:
 def build_header(values: list[str]) -> list[str]:
     """Build stable, unique column names from a possibly damaged header row."""
     names: list[str] = []
-    seen: Counter[str] = Counter()
+    used: set[str] = set()
+    reserved = {value.strip() for value in values if value.strip()}
+    suffixes: Counter[str] = Counter()
     for index, value in enumerate(values):
         base = value.strip() or f"col_{index}"
-        seen[base] += 1
-        names.append(base if seen[base] == 1 else f"{base}_{seen[base]}")
+        name = base
+        if name in used or (not value.strip() and name in reserved):
+            suffix = max(2, suffixes[base])
+            name = f"{base}_{suffix}"
+            while name in used or name in reserved:
+                suffix += 1
+                name = f"{base}_{suffix}"
+            suffixes[base] = suffix + 1
+        used.add(name)
+        names.append(name)
     return names
 
 
@@ -93,6 +113,7 @@ def parse_table_stream(
     encoding = estimate_encoding(path)
     diagnostics: list[ParseDiagnosticRecord] = []
     header: list[str] | None = None
+    delimiter: str | None = None
     header_signature: list[str] | None = None
     sampled: list[tuple[int, list[str]]] = []
     reservoir: list[tuple[int, list[str]]] = []
@@ -113,7 +134,9 @@ def parse_table_stream(
     for line_no, _offset, line in iter_text_lines(path, encoding):
         if not line.strip():
             continue
-        values = split_row(line)
+        if delimiter is None:
+            delimiter = table_delimiter(line)
+        values = split_row(line, delimiter)
         if header is None:
             if looks_like_header(values):
                 header_signature = [value.strip() for value in values]

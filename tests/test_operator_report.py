@@ -1,4 +1,5 @@
 from domain.services.operator_report import build_operator_report
+import pytest
 
 
 def _group() -> dict:
@@ -87,3 +88,70 @@ def test_print_card_without_logs_requests_log_linking():
 
     assert report["state"]["code"] == "not_a_confirmed_print"
     assert any("привязать логи" in item for item in report["recommendations"])
+
+
+def test_classification_does_not_substitute_for_missing_quality_measurements():
+    group = {"classification": "REAL_PRINT", "confidence": .95,
+             "data_quality": {"score": None, "grade": "unknown", "issues": []}}
+    report = build_operator_report(session_id="s1", group=group)
+    assert report["state"]["code"] == "insufficient_data"
+    assert any("исходных измерений" in value for value in report["recommendations"])
+    accepted = build_operator_report(session_id="s1", group=group,
+                                    quality_outcomes=[{"result": "accepted"}])
+    assert accepted["state"]["code"] == "accepted"
+
+
+def test_known_incomplete_telemetry_never_becomes_a_clean_process_conclusion():
+    for evidence in [{"complete_available_stream": False, "sample_count": 100},
+                     {"sample_count": 0}]:
+        group = {"classification": "REAL_PRINT", "confidence": .99,
+                 "data_quality": {"score": 100, "issues": []},
+                 "health": {"evidence": evidence, "anomalies": []}}
+        report = build_operator_report(session_id="s1", group=group)
+        assert report["state"]["code"] == "insufficient_data"
+        assert report["confidence"]["level_ru"] == "средняя"
+
+
+def test_explicit_unknown_quality_score_is_not_replaced_with_legacy_feature():
+    report = build_operator_report(session_id="s1", group={
+        "classification": "REAL_PRINT", "confidence": .99,
+        "features": {"data_quality_score": 100}, "data_quality": {"score": None},
+    })
+    assert report["state"]["code"] == "insufficient_data"
+    assert report["confidence"]["data_quality_score"] is None
+
+
+@pytest.mark.parametrize("classification", ["REAL_PRINT", "REAL_PRINT_WITH_RESUME"])
+@pytest.mark.parametrize("completion", [None, "unknown", "finished"])
+def test_print_classification_does_not_assert_completion(classification, completion):
+    group = {
+        "classification": classification, "confidence": .8,
+        "data_quality": {"score": 92},
+        "features": {"pause_count": 1},
+    }
+    if completion is not None:
+        group["features"]["completion_status"] = completion
+    report = build_operator_report(session_id="start-only", group=group)
+    assert report["state"]["code"] == "review_recommended"
+    text = report["classification"]["label_ru"] + report["state"]["label_ru"]
+    assert ("завершена" in text) is (completion == "finished")
+
+
+def test_confirmed_inspection_is_not_overruled_by_unreliable_log_data():
+    group = {
+        "classification": "REAL_PRINT", "confidence": .8,
+        "data_quality": {"score": 31, "issues": [{
+            "kind": "missing_log_family", "severity": "high", "detail": "Нет sensors.log",
+        }]},
+        "health": {"evidence": {"sample_count": 0, "complete_available_stream": False}},
+    }
+    accepted = build_operator_report(session_id="s", group=group, quality_outcomes=[{
+        "outcome_id": "confirmed-qc", "session_id": "s",
+        "is_final": True, "result": "accepted", "inspection_result": "Размеры проверены",
+    }])
+    assert accepted["state"]["code"] == "accepted_with_observations"
+    assert accepted["quality_outcome"]["result"] == "accepted"
+    assert accepted["confidence"]["level_ru"] != "высокая"
+    assert accepted["deviations"]
+    unknown = build_operator_report(session_id="s", group=group)
+    assert unknown["state"]["code"] == "insufficient_data"

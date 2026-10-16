@@ -13,11 +13,40 @@ from typing import Any, Callable
 from sqlalchemy import select
 
 from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
-from domain.services.importing.contracts import ImportPersistenceError
+from domain.services.importing.contracts import ImportPersistenceError, RetryableImportError
 from domain.services.importing.fence import ImportFence, StaleImportLeaseError
-from storage.db.session import SessionLocal
+from storage.db.session import SessionLocal, is_database_unavailable
 
 logger = logging.getLogger(__name__)
+
+
+def is_retryable_import_failure(error: BaseException) -> bool:
+    """Preserve explicit retries, but inspect the cause of SQL persistence errors."""
+    while isinstance(error, RetryableImportError):
+        if error.__cause__ is None:
+            return True
+        error = error.__cause__
+    return is_database_unavailable(error)
+
+
+def checkpoint_import_sources(
+    fence: ImportFence,
+    snapshot: dict[str, dict[str, Any]],
+) -> None:
+    """Accept physical source membership before IO, without changing job state."""
+    try:
+        with SessionLocal() as db:
+            row = fence.verify(db)
+            row.file_snapshot = snapshot
+            # verify refreshes the authoritative row. Flush first so it cannot
+            # erase this write when the Session uses autoflush=False.
+            db.flush()
+            fence.verify(db)
+            db.commit()
+    except StaleImportLeaseError:
+        raise
+    except Exception as exc:
+        raise ImportPersistenceError(f"Could not checkpoint import sources: {exc}") from exc
 
 
 def persist_parse_results_to_db(
@@ -44,10 +73,6 @@ def persist_parse_results_to_db(
         repo = RuntimeRepository(db)
 
         for ingested_file in ingested_files:
-            if fence:
-                fence.verify(db)
-            else:
-                _require_current_lease(lease_guard)
             # Deterministic id from session + file content hash: re-persisting the
             # same file (retry / re-detected folder) UPSERTS the same row instead
             # of inserting a duplicate. (uuid4 here doubled every file/event on
@@ -58,6 +83,10 @@ def persist_parse_results_to_db(
             )
             source_file_id = "file_" + _stable_hash(session_id, ingested_file.checksum or file_name)
             try:
+                if fence:
+                    fence.verify(db)
+                else:
+                    _require_current_lease(lease_guard)
                 repo.save_source_file(
                     source_file_id=source_file_id,
                     session_id=session_id,
@@ -68,7 +97,7 @@ def persist_parse_results_to_db(
                     ),
                     file_name=file_name,
                     checksum=ingested_file.checksum,
-                    original_path=ingested_file.path,
+                    original_path=ingested_file.metadata.get("original_path", ingested_file.path),
                     size_bytes=ingested_file.size_bytes,
                     family=ingested_file.classification.family,
                     role=ingested_file.classification.role,
@@ -78,7 +107,11 @@ def persist_parse_results_to_db(
                 )
                 files_saved += 1
                 logger.info("Saved source file %s for session %s", file_name, session_id)
+            except StaleImportLeaseError:
+                db.rollback()
+                raise
             except Exception as exc:
+                db.rollback()
                 logger.error("Failed to save source file %s: %s", file_name, exc)
                 raise ImportPersistenceError(
                     f"Could not persist source file {file_name}: {exc}"
@@ -136,6 +169,7 @@ def persist_parse_results_to_db(
                 fence.verify(db)
             db.commit()
         except StaleImportLeaseError:
+            db.rollback()
             raise
         except Exception as exc:
             logger.error("Failed to commit parse results to database: %s", exc)
@@ -161,12 +195,15 @@ def _flush_event_batch(
     """Save and commit a complete canonical-event batch or raise for retry."""
     if not batch:
         return 0
-    if fence:
-        fence.verify(repo.db)
-    else:
-        _require_current_lease(lease_guard)
     try:
+        if fence:
+            fence.verify(repo.db)
+        else:
+            _require_current_lease(lease_guard)
         saved = repo.save_canonical_event_batch(batch)
+    except StaleImportLeaseError:
+        repo.db.rollback()
+        raise
     except Exception as exc:
         repo.db.rollback()
         logger.error("Failed to save event batch: %s", exc)

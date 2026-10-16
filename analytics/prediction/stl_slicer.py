@@ -9,6 +9,10 @@ from __future__ import annotations
 import io
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trimesh import Trimesh
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,10 @@ class SliceResult:
     is_watertight: bool = True
     was_repaired: bool = False
     warnings: list[str] = field(default_factory=list)
+
+    # Transient, local handoff to consumers: the exact mesh used for slicing,
+    # including successful MeshFix repair. Not a saved geometry cache.
+    prepared_mesh: Trimesh | None = field(default=None, repr=False, compare=False)
 
     @property
     def avg_area_mm2(self) -> float:
@@ -174,6 +182,7 @@ def slice_stl(stl_bytes: bytes, layer_thickness_mm: float) -> SliceResult:
         is_watertight=bool(mesh.is_watertight),
         was_repaired=repaired,
         warnings=warnings,
+        prepared_mesh=mesh,
     )
 
 

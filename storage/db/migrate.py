@@ -31,6 +31,9 @@ _ALEMBIC_INI = _ROOT / "alembic.ini"
 def upgrade_to_head() -> None:
     """Run ``alembic upgrade head`` against the configured database."""
     cfg = Config(str(_ALEMBIC_INI))
+    # The caller owns logging; the Alembic CLI config would replace its
+    # handlers and disable existing application/server loggers.
+    cfg.attributes["configure_logger"] = False
     # Absolute paths so it works regardless of the process CWD.
     cfg.set_main_option("script_location", str(_ROOT / "migrations"))
     cfg.set_main_option("sqlalchemy.url", get_settings().database_url)

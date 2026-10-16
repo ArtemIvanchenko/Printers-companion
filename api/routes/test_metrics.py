@@ -73,7 +73,7 @@ def _latest_session_id(db: Session) -> str:
 
 @router.get("/latest")
 def get_latest_test_metrics(
-    refresh: bool = False, db: Session = Depends(get_db)
+    refresh: bool = False, db: Session = Depends(get_db, scope="function")
 ) -> dict:
     session_id = _latest_session_id(db)
     return _get_test_metrics(session_id, refresh, db)
@@ -81,7 +81,7 @@ def get_latest_test_metrics(
 
 @router.get("/{session_id}")
 def get_test_metrics(
-    session_id: str, refresh: bool = False, db: Session = Depends(get_db)
+    session_id: str, refresh: bool = False, db: Session = Depends(get_db, scope="function")
 ) -> dict:
     return _get_test_metrics(session_id, refresh, db)
 

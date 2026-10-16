@@ -7,6 +7,7 @@ from analytics.log_insights.timing import restart_layer_comparison, time_account
 from core.config.settings import get_settings
 from core.versioning.constants import LOG_INSIGHTS_VERSION
 from core.versioning.provenance import build_provenance
+from domain.enums.common import DataQualityStatus, SourceFileFamily
 
 
 def build_log_insights(files, events, *, thresholds=None):
@@ -18,6 +19,15 @@ def build_log_insights(files, events, *, thresholds=None):
         if not isinstance(rule, dict) or not finite_number(rule.get("high")):
             raise ValueError("Порог анализа среды должен содержать конечное число high")
     pauses = pause_intervals(events, settings.log_insights_clock_timezone)
+    main_sources = [f for f in files if f.classification.family == SourceFileFamily.main_event_log]
+    # An empty list can mean no pause was seen, or no usable pause log exists.
+    pause_source_available = bool(main_sources) and all(
+        f.parse_result is not None and bool(f.parse_result.events)
+        and f.data_quality_status == DataQualityStatus.ok
+        and f.parse_result.data_quality == [DataQualityStatus.ok]
+        and all(e.ts is not None for e in f.parse_result.events)
+        for f in main_sources
+    )
     windows = burn_windows(events, pauses, settings.log_insights_clock_timezone)
     diagnostics = Counter()
     environment = analyze_environment(
@@ -31,7 +41,7 @@ def build_log_insights(files, events, *, thresholds=None):
         "method_version": LOG_INSIGHTS_VERSION, "source": "calculated",
         "environment": environment,
         "recovery": {**environment.pop("recovery"), "layer_comparison": restart_layer_comparison(events, windows, pauses)},
-        "time_accounting": time_accounting(events, pauses),
+        "time_accounting": time_accounting(events, pauses if pauses or pause_source_available else None),
         "read_diagnostics": dict(diagnostics),
         "provenance": build_provenance(
             "log_insights", inputs={f.relative_path: f.checksum for f in files},

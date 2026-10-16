@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import logging
 from sqlalchemy import select
 
+from analytics.prediction.input_quality import INPUT_REASON_RU, prediction_is_current
 from domain.services.compute_affinity import ComputeAffinityError, require_compute_owner
 from domain.services.estimation.inputs import require_local_print
 from domain.services.print_cards.comparison import attach_plan_vs_fact
@@ -219,6 +220,13 @@ def update_card(
     if not record:
         raise CardError("not_found", "Карточка печати не найдена")
     repo.flush()
+    snapshot = (record.get("metadata_json") or {}).get("prediction") or {}
+    record["prediction_is_current"] = prediction_is_current(
+        snapshot, record["revision"],
+    )
+    # A partial write response has not compared the saved recipe with current
+    # settings. Clear any previous client claim; GET/list provide that projection.
+    record["prediction_configuration_is_current"] = None
     # Changed or removed links and corrected modes invalidate calibration too.
     # The short save only queues work; it never reads logs or fits models.
     if {"session_id", "material", "layer_thickness_mm", "hatch_distance_mm"} & values.keys():
@@ -270,19 +278,14 @@ def get_card(repo: PrintsRepository, record_id: str) -> dict:
         print_record_id=record_id,
     )
     snapshot = (record.get("metadata_json") or {}).get("prediction") or {}
+    record["prediction_is_current"] = prediction_is_current(
+        snapshot, record.get("revision", 0),
+    )
     if record.get("session_id") and snapshot.get("scan_geometry"):
-        input_revision = snapshot.get("input_revision")
-        snapshot_is_current = not isinstance(input_revision, int) or record.get("revision") in {
-            input_revision,
-            input_revision + 1,
-        }
-        if not snapshot_is_current:
+        if not record["prediction_is_current"]:
             record["geometry_analysis"] = {
                 "status": "stale_prediction",
-                "reason_ru": (
-                    "Карточка или STL изменились после расчёта; привязка аномалий скрыта "
-                    "до повторного расчёта."
-                ),
+                "reason_ru": INPUT_REASON_RU["stale_prediction"],
                 "items": [],
             }
             repo.db.rollback()
@@ -290,19 +293,21 @@ def get_card(repo: PrintsRepository, record_id: str) -> dict:
         from analytics.geometry_context import map_anomalies_to_geometry
         from domain.models.sessions import BuildSession
 
-        session = repo.db.get(BuildSession, record["session_id"])
-        group = (
-            (((session.context or {}).get("runtime_payload") or {}).get("group") or {})
-            if session is not None
-            else {}
-        )
+        # Geometry mapping needs only these two saved projections, not the
+        # report, import metadata or entire session context from the NAS.
+        health, telemetry = repo.db.execute(
+            select(
+                BuildSession.context["runtime_payload"]["group"]["health"],
+                BuildSession.context["runtime_payload"]["group"]["telemetry"],
+            ).where(BuildSession.session_id == record["session_id"])
+        ).one_or_none() or (None, None)
         repo.db.rollback()
         try:
             record["geometry_analysis"] = map_anomalies_to_geometry(
-                group.get("health"),
+                health,
                 snapshot.get("scan_geometry"),
                 geometry_regions=snapshot.get("geometry_regions"),
-                telemetry=group.get("telemetry"),
+                telemetry=telemetry,
                 geometry_quality=snapshot.get("geometry_quality"),
             )
         except Exception:

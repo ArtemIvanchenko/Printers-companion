@@ -20,7 +20,8 @@ def test_catalog_and_import_frontend_modules(script):
 def test_estimate_feedback_is_not_hidden_in_legacy_card_form():
     html = dashboard_source()
     assert 'id="estimate-status" role="status"' in html
-    source = html.split('function _setEstimateStatus(text)', 1)[1].split('async function', 1)[0]
+    archive = (Path(__file__).resolve().parents[1] / 'web_assets/dashboard/archive.js').read_text()
+    source = archive.split('function _setEstimateStatus(', 1)[1].split('async function', 1)[0]
     assert "getElementById('estimate-status')" in source
     assert 'textContent' in source
     assert 'pc-save-result' not in source
