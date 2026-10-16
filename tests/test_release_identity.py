@@ -197,6 +197,8 @@ def test_operator_installers_are_bound_to_images_and_release_waits_for_native_ch
     assert jobs['release']['permissions']['contents'] == 'write'
     capture = next(step['run'] for step in jobs['publish']['steps'] if step.get('name', '').startswith('Capture'))
     assert 'capture_desktop_images.py' in capture
+    capture_dependencies = next(step['run'] for step in jobs['publish']['steps'] if step.get('name', '').startswith('Install the application base runtime'))
+    assert 'pip install -r requirements.base.txt' in capture_dependencies
     publish = jobs['release']['steps'][-1]['run']
     assert 'gh release create' in publish and '--verify-tag' in publish
     desktop = yaml.load((ROOT / '.github/workflows/desktop.yml').read_text(), Loader=yaml.BaseLoader)
