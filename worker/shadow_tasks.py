@@ -2,11 +2,9 @@
 import logging
 import multiprocessing
 
-from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
-
 from core.config.settings import get_settings
 from domain.services.shadow_analysis import JOB_TYPE, calculate_shadow, shadow_inputs
-from storage.db.session import session_scope
+from storage.db.session import is_database_unavailable, session_scope
 from storage.repositories.jobs_repo import JobsRepository
 from worker.lease_heartbeat import LeaseHeartbeat
 
@@ -83,14 +81,15 @@ def process_next_shadow_task(lease_owner, owner_node_id):
             # Completion checks the fresh lease AFTER waiting for session lock.
             # Only the job result changes; no card, report or model is promoted.
             JobsRepository(db).complete(job_id, result, **fence)
-    except (OperationalError, SQLAlchemyTimeoutError) as exc:
-        try:
-            with session_scope() as db:
-                JobsRepository(db).defer_infrastructure(job_id, str(exc), **fence)
-        except Exception:
-            logger.exception("could not defer shadow task after NAS outage")
     except Exception as exc:
-        with session_scope() as db:
-            JobsRepository(db).fail(job_id, str(exc), retryable=False, **fence)
-        logger.warning("Optional shadow experiment failed: %s", exc)
+        if is_database_unavailable(exc):
+            try:
+                with session_scope() as db:
+                    JobsRepository(db).defer_retry(job_id, str(exc), **fence)
+            except Exception:
+                logger.exception("could not defer shadow task after NAS outage")
+        else:
+            with session_scope() as db:
+                JobsRepository(db).fail(job_id, str(exc), retryable=False, **fence)
+            logger.warning("Optional shadow experiment failed: %s", exc)
     return True

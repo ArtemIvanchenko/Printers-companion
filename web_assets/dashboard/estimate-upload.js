@@ -16,8 +16,8 @@ async function uploadStlAndSave(file) {
     // Файл выбран — оператор выбирает метод расчёта
     document.getElementById('stl-result').innerHTML = `
         <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;">
-            <div style="font-size:13px;color:#e2e8f0;margin-bottom:4px;">🧊 ${file.name}</div>
-            <div style="font-size:12px;color:#6b7280;margin-bottom:16px;">${(file.size / 1024 / 1024).toFixed(1)} МБ · расчёт по реальным траекториям лазера (PySLM)</div>
+            <div style="font-size:13px;color:#e2e8f0;margin-bottom:4px;">🧊 ${_esc(file.name)}</div>
+            <div style="font-size:12px;color:#6b7280;margin-bottom:16px;">${(file.size / 1024 / 1024).toFixed(1)} МБ · оценка по послойной геометрии STL</div>
             <div style="margin-bottom:16px;">
                 <label style="font-size:12px;color:#a0aec0;display:block;margin-bottom:5px;">Шаг штриховки (мкм) <span title="Зависит от режима печати. По умолчанию 120 мкм." style="color:#6b7280;cursor:help;">ⓘ</span></label>
                 <input id="stl-hatch-um" type="number" min="1" step="1" value="120"
@@ -29,7 +29,7 @@ async function uploadStlAndSave(file) {
                 <button onclick="runStlEstimate()"
                     style="flex:1;min-width:200px;background:#10b981;color:white;border:none;border-radius:10px;padding:14px;font-size:14px;font-weight:600;cursor:pointer;">
                     🎯 Рассчитать время и стоимость
-                    <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">PySLM — реальные траектории лазера</div>
+                    <div style="font-weight:400;font-size:11px;opacity:.8;margin-top:3px;">По геометрии и параметрам печати</div>
                 </button>
             </div>
         </div>`;
@@ -45,26 +45,34 @@ function _renderPrediction(p) {
     if (!p) return '';
     if (!p.available) {
         return `<div style="background:#1a2332;border:1px solid #2d3748;border-radius:8px;padding:10px 12px;font-size:12px;color:#a0aec0;margin-top:12px;">
-            ℹ️ Расчёт по геометрии недоступен: ${p.reason}</div>`;
+            ℹ️ Расчёт по геометрии недоступен: ${_esc(p.reason)}</div>`;
     }
     const cost = Object.entries(p.cost_breakdown || {})
-        .map(([k, v]) => `<span style="margin-right:14px;">${k}: <b style="color:#e2e8f0;">${v.toLocaleString('ru')} ₽</b></span>`)
+        .map(([k, v]) => `<span style="margin-right:14px;">${_esc(k)}: <b style="color:#e2e8f0;">${_esc(v.toLocaleString('ru'))} ₽</b></span>`)
         .join('');
     const warns = (p.warnings || []).map(w =>
-        `<div style="color:#fcd34d;font-size:11px;margin-top:4px;">⚠️ ${w}</div>`).join('');
+        `<div style="color:#fcd34d;font-size:11px;margin-top:4px;">⚠️ ${_esc(w)}</div>`).join('');
     const methodLabel = {
-        pyslm: 'PySLM — реальные траектории лазера',
+        pyslm: 'по послойной геометрии STL',
+        cohatch: 'по послойной геометрии STL',
+        'cohatch+fitted': 'по геометрии и модели прожига из логов',
     }[p.method] || p.method;
     const corr = (p.correction_factor && Math.abs(p.correction_factor - 1) > 0.001)
         ? ` · калибровка ×${p.correction_factor}` : '';
+    const cycleHours = p.time_breakdown?.machine_cycle_hours;
+    const fullCycle = p.time_breakdown?.prediction_time_scope === 'machine_cycle'
+        && typeof cycleHours === 'number' && Number.isFinite(cycleHours) && cycleHours >= 0;
+    const hours = fullCycle ? cycleHours : p.print_hours;
+    const days = fullCycle && typeof p.total_days === 'number' && Number.isFinite(p.total_days)
+        ? ` (${p.total_days} сут)` : '';
     return `
         <div style="background:#0f2438;border:1px solid #1a5276;border-radius:12px;padding:16px;margin-top:14px;">
             <div style="color:#60a5fa;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">
-                Расчёт по геометрии · ${p.material} · ${methodLabel}</div>
+                Расчёт по геометрии · ${_esc(p.material)} · ${_esc(methodLabel)}</div>
             <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:10px;">
                 <div>
-                    <div style="font-size:26px;font-weight:700;color:#10b981;">${p.print_hours} <span style="font-size:13px;">ч</span></div>
-                    <div style="color:#6b7280;font-size:12px;">время печати (${p.total_days} сут)</div>
+                    <div style="font-size:26px;font-weight:700;color:#10b981;">${hours ?? '—'} <span style="font-size:13px;">ч</span></div>
+                    <div style="color:#6b7280;font-size:12px;">${fullCycle ? 'нормальный машинный цикл' : 'прожиг + нанесение'}${days}</div>
                 </div>
                 <div>
                     <div style="font-size:26px;font-weight:700;color:#f59e0b;">${p.cost_total_rub.toLocaleString('ru')} <span style="font-size:13px;">₽</span></div>
@@ -102,7 +110,7 @@ async function loadStlMaterials() {
 async function uploadStl(file, _buf, hatchMm = null) {
     const res = document.getElementById('stl-result');
     if (!file) return;
-    res.innerHTML = '<div style="color:#60a5fa;">Генерируем траектории лазера (PySLM)… до ~30 сек для крупных моделей</div>';
+    res.innerHTML = '<div style="color:#60a5fa;">Рассчитываем послойную геометрию…</div>';
     const fd = new FormData();
     fd.append('file', file);
     const material = document.getElementById('stl-material')?.value || 'steel';
@@ -111,15 +119,16 @@ async function uploadStl(file, _buf, hatchMm = null) {
         if (hatchMm && hatchMm > 0) url += `&hatch_distance_mm=${hatchMm}`;
         const r = await fetch(url, { method: 'POST', body: fd });
         const d = await r.json();
+        if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : `Ошибка API: ${r.status}`);
         const vol = d.volume_cm3;
         const est = d.estimate;
         const pred = d.prediction;
         const warns = (d.warnings || []).map(w =>
-            `<div style="background:#451a03;border:1px solid #92400e;border-radius:6px;padding:8px 10px;font-size:12px;color:#fcd34d;margin-top:8px;">⚠️ ${w}</div>`
+            `<div style="background:#451a03;border:1px solid #92400e;border-radius:6px;padding:8px 10px;font-size:12px;color:#fcd34d;margin-top:8px;">⚠️ ${_esc(w)}</div>`
         ).join('');
         res.innerHTML = `
             <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;padding:20px;">
-                <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">${d.filename}</div>
+                <div style="font-size:13px;color:#6b7280;margin-bottom:12px;">${_esc(d.filename)}</div>
                 <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px;">
                     <div>
                         <div style="font-size:28px;font-weight:700;color:#10b981;">${vol} <span style="font-size:14px;">см³</span></div>
@@ -130,7 +139,7 @@ async function uploadStl(file, _buf, hatchMm = null) {
                         <div style="color:#6b7280;font-size:12px;">средн. по истории (справочно)</div>
                     </div>` : ''}
                 </div>
-                <div style="color:#a0aec0;font-size:12px;">${est.note} · ${est.sessions_used} сессий</div>
+                <div style="color:#a0aec0;font-size:12px;">${_esc(est.note)} · ${est.sessions_used} сессий</div>
                 ${_renderPrediction(pred)}
                 ${warns}
                 <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
@@ -141,10 +150,10 @@ async function uploadStl(file, _buf, hatchMm = null) {
                 </div>
             </div>`;
         // Save to model history (prefer geometry-based hours)
-        const histHours = (pred && pred.available) ? pred.print_hours : est.avg_session_hours;
+        const histHours = (pred && pred.available) ? pred.print_hours : null;
         _saveModelEntry(file.name, vol, histHours);
     } catch(e) {
-        res.innerHTML = `<div style="color:#ef4444;">Ошибка загрузки: ${e.message || e}<br><small style="color:#6b7280;">Убедитесь что API запущен (docker compose up)</small></div>`;
+        res.innerHTML = `<div style="color:#ef4444;">Ошибка загрузки: ${_esc(e.message || e)}</div>`;
     }
 }
 

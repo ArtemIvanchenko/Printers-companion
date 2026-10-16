@@ -12,7 +12,7 @@ import math
 
 # Bump when the geometry/default scan policy changes, even if the input field
 # names stay the same; an old fitted beta may absorb that policy's errors.
-VERSION = "configured-scan-v2"
+VERSION = "configured-scan-v3"
 _NUMERIC_FIELDS = (
     "hatch_speed_mm_s", "contour_speed_mm_s", "support_speed_mm_s",
     "jump_speed_mm_s", "jump_delay_ms", "hatch_distance_mm", "laser_count",

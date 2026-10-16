@@ -10,7 +10,7 @@ from analytics.prediction.timing_snapshot import MANIFEST_KEY, read_timing_publi
 from analytics.prediction.input_quality import (
     geometry_input_issues, prediction_is_current, session_link_is_confirmed,
 )
-from core.versioning.constants import LOG_INSIGHTS_VERSION
+from core.versioning.constants import ANALYSIS_VERSION, LOG_INSIGHTS_VERSION
 from core.config.settings import get_settings
 from core.versioning.provenance import build_provenance, stable_hash
 from domain.models.events import LayerSnapshot
@@ -102,6 +102,32 @@ def print_log_insights(record_id):
     target_comparison = comparison(target)
     target_comparison["comparison_key"] = key
     reference_comparisons = [comparison(r) for r in refs]
+    normal_reference = time_accounting(events, cycle_model=snapshot if valid_context else None)
+    analysis = group.get("analysis_snapshot") or {}
+    saved_accounting = analysis.get("time_accounting") or {}
+    manifest = publications.get(target["session_id"]) or {}
+    pause_seconds = saved_accounting.get("explicit_pause_seconds")
+    confirmed_pause_seconds = saved_accounting.get("confirmed_explicit_pause_seconds")
+    open_pauses = saved_accounting.get("open_pause_count")
+    # Recalculated layer timings contain no pause markers. Project their
+    # independently published summary only from this analytical generation;
+    # absent/legacy/mixed evidence must not become a zero-pause observation.
+    if (base.get("method_version") == LOG_INSIGHTS_VERSION
+            and analysis.get("schema_version") == 1 and bool(analysis.get("analysis_id"))
+            and (analysis.get("provenance") or {}).get("analysis_version") == ANALYSIS_VERSION
+            and saved_accounting == base.get("time_accounting")
+            and states.get(target["session_id"]) in {"complete", "empty", "no_time_log"}
+            and group.get("timing_publication_id") == manifest.get("publication_id")
+            and type(open_pauses) is int and open_pauses >= 0
+            and finite_number(confirmed_pause_seconds) and confirmed_pause_seconds >= 0
+            and ((finite_number(pause_seconds) and pause_seconds == confirmed_pause_seconds and open_pauses == 0)
+                 or (pause_seconds is None and open_pauses > 0))):
+        normal_reference.update(explicit_pause_seconds=pause_seconds, open_pause_count=open_pauses,
+                                confirmed_explicit_pause_seconds=confirmed_pause_seconds)
+    pause_projection = {key: normal_reference[key] for key in
+                        ("explicit_pause_seconds", "confirmed_explicit_pause_seconds", "open_pause_count")}
+    if isinstance(base.get("time_accounting"), dict):
+        base["time_accounting"].update(pause_projection)
     return {
         **base, "record_id": record_id, "session_id": target["session_id"],
         "status": "needs_reanalysis" if states.get(target["session_id"]) == "invalid" else "ok" if base or timings else "needs_reanalysis",
@@ -112,9 +138,9 @@ def print_log_insights(record_id):
         "geometry_residuals": residuals,
         "repeatability": compare_repeats(target_comparison, reference_comparisons),
         "inspection_map": inspection_map(base.get("environment") or {}, residuals, snapshot if valid_context else {}),
-        "normal_time_reference": {**time_accounting(events, cycle_model=snapshot if valid_context else None),
-                                  "scope": "validated_unique_layers_only"},
+        "normal_time_reference": {**normal_reference, "scope": "validated_unique_layers_only"},
         "provenance": build_provenance("print_log_insights", inputs={"record": target, "timings": timings,
+                                         "pause_accounting": pause_projection,
                                          "source_provenance": base.get("provenance"),
                                          "references": reference_comparisons},
                                        config={"method": LOG_INSIGHTS_VERSION, "max_candidates": 100},

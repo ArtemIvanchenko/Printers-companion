@@ -91,29 +91,31 @@ async function estimateRecord(recordId, stayOnCard = false) {
     if (window._pendingEstimateRequests?.has(recordId)) return;
     window._pendingEstimateRequests ||= new Set();
     window._pendingEstimateRequests.add(recordId);
+    const generation = stayOnCard ? _pcLoadGeneration : null;
+    const status = text => _setEstimateStatus(text, stayOnCard ? recordId : undefined, generation);
     let queued = false;
-    _setEstimateStatus('Проверяем данные для расчёта…');
+    status('Проверяем данные для расчёта…');
     try {
         const r = await fetch(`/prints/${recordId}/estimate`, { method: 'POST' });
         const d = await r.json();
         if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : d.detail?.message || JSON.stringify(d.detail || r.status));
         showToast('Расчёт поставлен в очередь на этом ПК', 'success');
         queued = true;
-        _pollEstimate(recordId, d.job_id, stayOnCard);
+        _pollEstimate(recordId, d.job_id, stayOnCard, 0, generation);
     } catch (e) {
-        _setEstimateStatus('Расчёт не выполнен: ' + e.message);
+        status('Расчёт не выполнен: ' + e.message);
         showToast('Ошибка расчёта: ' + e.message, 'error');
     } finally { if (!queued) window._pendingEstimateRequests.delete(recordId); }
 }
 
 // Poll the durable job itself: timestamp-only polling could wait ten
 // minutes on an idempotently returned completed job or hide a failure.
-async function _pollEstimate(recordId, jobId, stayOnCard, attempt = 0) {
-    const refresh = () => stayOnCard ? openPrintCard(recordId) : loadArchive(_archiveSkip);
-    if (attempt === 0) _setEstimateStatus('Расчёт в очереди на этом ПК. Ожидаем вычислительный процесс…');
+async function _pollEstimate(recordId, jobId, stayOnCard, attempt = 0, generation = stayOnCard ? _pcLoadGeneration : null) {
+    const status = text => _setEstimateStatus(text, stayOnCard ? recordId : undefined, generation);
+    if (attempt === 0) status('Расчёт в очереди на этом ПК. Ожидаем вычислительный процесс…');
     if (attempt >= 120) {          // 120 × 5 s = 10 минут
         window._pendingEstimateRequests?.delete(recordId);
-        _setEstimateStatus('Ожидание длится больше 10 минут. Проверьте состояние задания; оно сохранено в очереди.');
+        status('Ожидание длится больше 10 минут. Проверьте состояние задания; оно сохранено в очереди.');
         return;
     }
     if (attempt > 0) await new Promise(res => setTimeout(res, 5000));
@@ -121,25 +123,61 @@ async function _pollEstimate(recordId, jobId, stayOnCard, attempt = 0) {
         const response = await fetch(`/background-analysis/jobs/${jobId}`);
         if (!response.ok) throw new Error(response.status);
         const job = await response.json();
-        if (job.status === 'done') {
+        let complete = job.status === 'done';
+        const sameView = !stayOnCard || (generation === _pcLoadGeneration && !_pcLoading
+            && _pcRecord?.record_id === recordId
+            && document.getElementById('page-print-card').style.display !== 'none');
+        if (job.status === 'failed' && sameView && job.job_type === 'print_estimate'
+                && job.entity_type === 'print_record' && job.entity_id === recordId
+                && job.payload?.record_id === recordId && typeof job.owner_node_id === 'string'
+                && job.owner_node_id && job.payload.owner_node_id === job.owner_node_id) {
+            // An accepted calculation follows changed inputs, not a terminal
+            // request ID. Resolve its existing current card, without another POST.
+            const cardResponse = await fetch(`/prints/${recordId}`);
+            if (!cardResponse.ok) throw new Error(cardResponse.status);
+            const card = await cardResponse.json();
+            if (card.record_id === recordId && card.origin_compute_node_id === job.owner_node_id) {
+                const successor = card.estimate_job;
+                if (successor?.job_id && successor.job_id !== jobId
+                        && ['pending', 'running', 'postponed'].includes(successor.status)) {
+                    status('Данные изменились. Расчёт продолжается по свежим входам…');
+                    return _pollEstimate(recordId, successor.job_id, stayOnCard, attempt + 1, generation);
+                }
+                const prediction = card.metadata_json?.prediction;
+                const requestedRevision = job.payload.record_revision;
+                complete = card.prediction_is_current === true
+                    && card.prediction_configuration_is_current === true
+                    && prediction?.computed_by === job.owner_node_id
+                    && Number.isInteger(requestedRevision) && requestedRevision > 0
+                    && Number.isInteger(prediction?.input_revision)
+                    && prediction.input_revision >= requestedRevision;
+            }
+        }
+        if (complete) {
             window._pendingEstimateRequests?.delete(recordId);
-            _setEstimateStatus('Расчёт готов. Результат сохранён в карточке.');
-            refresh();
+            status('Расчёт готов. Результат сохранён в карточке.');
+            if (!stayOnCard) loadArchive(_archiveSkip);
+            else if (generation === _pcLoadGeneration && !_pcLoading && _pcRecord?.record_id === recordId
+                    && document.getElementById('page-print-card').style.display !== 'none') {
+                await _refreshOpenPrintCardFromSync();
+            }
             return;
         }
         if (job.status === 'failed') {
             window._pendingEstimateRequests?.delete(recordId);
-            _setEstimateStatus(`❌ Расчёт не выполнен: ${job.error || 'неизвестная ошибка'}`);
+            status(`❌ Расчёт не выполнен: ${job.error || 'неизвестная ошибка'}`);
             return;
         }
-        _setEstimateStatus(job.status === 'running'
+        status(job.status === 'running'
             ? 'Вычисляем время печати по геометрии на этом ПК…'
             : 'Расчёт в очереди. Ожидаем освобождения вычислительного процесса.');
     } catch (e) { /* сеть моргнула — продолжаем опрос */ }
-    _pollEstimate(recordId, jobId, stayOnCard, attempt + 1);
+    _pollEstimate(recordId, jobId, stayOnCard, attempt + 1, generation);
 }
 
-function _setEstimateStatus(text) {
+function _setEstimateStatus(text, recordId, generation) {
+    if (recordId !== undefined && (generation !== _pcLoadGeneration || _pcLoading || _pcRecord?.record_id !== recordId
+            || document.getElementById('page-print-card').style.display === 'none')) return;
     const el = document.getElementById('estimate-status');
     if (el) { el.textContent = text || ''; el.hidden = !text; }
 }

@@ -59,6 +59,74 @@ def test_missing_card_and_legacy_card_have_explicit_states():
     assert result["geometry_residuals"]["status"] == "unconfirmed_context"
 
 
+@pytest.mark.parametrize("evidence", [
+    "current", "current_unresolved", "legacy", "outdated", "different_generation", "invalid_timings",
+    "missing", "invalid_totals", "missing_snapshot", "different_snapshot", "outdated_snapshot",
+])
+def test_normal_reference_preserves_only_current_same_generation_pause_accounting(evidence):
+    from analytics.prediction.timing_snapshot import MANIFEST_KEY
+    from core.versioning.constants import ANALYSIS_VERSION, LOG_INSIGHTS_VERSION
+    from core.versioning.provenance import stable_hash
+
+    seed("pause-card", "pause-session")
+    with SessionLocal() as db:
+        row = db.query(LayerSnapshot).filter_by(session_id="pause-session").one()
+        row.context = {"publication_id": "pause-publication"}
+        manifest = {
+            "schema": 1, "publication_id": "pause-publication", "status": "complete",
+            "row_count": 1, "rows_fingerprint": stable_hash([
+                {"layer": row.layer, "features": row.features},
+            ]),
+        }
+        insights = {"method_version": LOG_INSIGHTS_VERSION,
+                    "time_accounting": {"explicit_pause_seconds": 1800,
+                                        "confirmed_explicit_pause_seconds": 1800, "open_pause_count": 0}}
+        analysis = {"schema_version": 1, "analysis_id": "pause-analysis",
+                    "provenance": {"analysis_version": ANALYSIS_VERSION},
+                    "time_accounting": deepcopy(insights["time_accounting"])}
+        group = {"log_insights": insights, "timing_publication_id": "pause-publication",
+                 "analysis_snapshot": analysis}
+        if evidence == "current_unresolved":
+            insights["time_accounting"] = {"explicit_pause_seconds": None,
+                                          "confirmed_explicit_pause_seconds": 900, "open_pause_count": 1}
+            analysis["time_accounting"] = deepcopy(insights["time_accounting"])
+        elif evidence == "legacy":
+            insights.pop("method_version")
+        elif evidence == "outdated":
+            insights["method_version"] = "log-insights-obsolete"
+        elif evidence == "different_generation":
+            group["timing_publication_id"] = "earlier-publication"
+        elif evidence == "invalid_timings":
+            manifest["rows_fingerprint"] = "invalid-fingerprint"
+        elif evidence == "missing":
+            insights.pop("time_accounting")
+        elif evidence == "invalid_totals":
+            insights["time_accounting"] = {"explicit_pause_seconds": -1, "open_pause_count": True}
+            analysis["time_accounting"] = deepcopy(insights["time_accounting"])
+        elif evidence == "missing_snapshot":
+            group.pop("analysis_snapshot")
+        elif evidence == "different_snapshot":
+            analysis["time_accounting"]["explicit_pause_seconds"] = 900
+        elif evidence == "outdated_snapshot":
+            analysis["provenance"]["analysis_version"] = "old-analysis"
+        session = db.get(BuildSession, "pause-session")
+        session.context = {"runtime_payload": {"group": group}, MANIFEST_KEY: manifest}
+        db.commit()
+
+    result = client.get("/analysis/prints/pause-card/log-insights").json()
+    reference = result["normal_time_reference"]
+    assert reference["explicit_pause_seconds"] == (1800 if evidence == "current" else None)
+    assert reference["open_pause_count"] == (0 if evidence == "current" else
+                                             1 if evidence == "current_unresolved" else None)
+    assert reference["confirmed_explicit_pause_seconds"] == (1800 if evidence == "current" else
+                                                           900 if evidence == "current_unresolved" else None)
+    if "time_accounting" in result:
+        for key in ("explicit_pause_seconds", "confirmed_explicit_pause_seconds", "open_pause_count"):
+            assert result["time_accounting"][key] == reference[key]
+    if evidence != "invalid_timings":
+        assert reference["observed_attempt_cycle_seconds"] == 11.3
+
+
 def test_identity_key_does_not_accept_unconfirmed_links_or_recipe_changes():
     record = {"metadata": {"prediction": snapshot(), "session_link_confirmed": True}}
     key = context_key(record)

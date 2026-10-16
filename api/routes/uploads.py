@@ -220,45 +220,60 @@ def _ascii_stl_volume(text: str) -> float:
 
 
 def _historical_rate() -> dict:
-    """Return avg print rate: minutes per cm³, based on completed sessions."""
+    """Average elapsed print-log window (>10 min), not a volume/time rate.
+
+    This reference can include pauses and does not prove a complete normal
+    machine cycle. Read only the scalar facts, not legacy telemetry arrays.
+    """
     try:
+        import math
+
+        from sqlalchemy import case, func, select
+
+        from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS
+        from domain.models.sessions import BuildSession
         from storage.db.session import SessionLocal
-        from storage.repositories.runtime import RuntimeRepository
+
         with SessionLocal() as db:
-            repo = RuntimeRepository(db)
-            sessions = repo.list_session_payloads()
-
-        durations, total_sessions = [], 0
-        for _, payload in sessions:
-            grp = (payload or {}).get("group", {})
-            features = grp.get("features", {})
-            dur = features.get("duration_min")
-            if dur and float(dur) > 10:
-                durations.append(float(dur))
+            duration = BuildSession.context[
+                ("runtime_payload", "group", "features", "duration_min")
+            ].as_string()
+            classification = BuildSession.context[
+                ("runtime_payload", "group", "classification")
+            ].as_string()
+            if db.get_bind().dialect.name == "sqlite":
+                # Legacy SQLite JSON can contain invalid NaN/Infinity literals.
+                # PostgreSQL rejects those on write; guard extraction here so
+                # one such row cannot erase the other measured references.
+                valid_json = func.json_valid(BuildSession.context)
+                duration = case((valid_json, duration), else_=None)
+                classification = case((valid_json, classification), else_=None)
+            # Match session_classification's payload-first, scalar fallback.
+            classification = func.coalesce(func.nullif(classification, ""),
+                                            BuildSession.classification)
+            statement = select(duration.label("duration_min")).where(
+                classification.in_(PRINT_CLASSIFICATIONS)
+            ).execution_options(yield_per=500)
+            total_sessions, avg = 0, 0.0
+            for raw_duration in db.scalars(statement):
+                if raw_duration is None or isinstance(raw_duration, bool):
+                    continue
+                try:
+                    measured = float(raw_duration)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not math.isfinite(measured) or measured <= 10:
+                    continue
                 total_sessions += 1
+                # Positive finite measurements keep this mean finite even
+                # when their direct sum would overflow.
+                avg += (measured - avg) / total_sessions
 
-        if not durations:
-            return {"sessions_used": 0, "avg_duration_min": None}
-        avg = sum(durations) / len(durations)
-        return {"sessions_used": total_sessions, "avg_duration_min": round(avg, 1)}
+        return {"sessions_used": total_sessions,
+                "avg_duration_min": round(avg, 1) if total_sessions else None}
     except Exception:
-        logger.exception("historical-rate computation failed; returning empty estimate")
+        logger.exception("historical-reference computation failed; returning empty reference")
         return {"sessions_used": 0, "avg_duration_min": None}
-
-
-_PRESET_SCANNING_KEYS = (
-    "hatch_speed_mm_s", "contour_speed_mm_s", "hatch_distance_mm",
-    "layer_thickness_mm", "jump_speed_mm_s", "jump_delay_ms",
-)
-
-
-def _merge_preset(params: dict, preset: dict) -> dict:
-    """Overlay material-specific preset scanning params onto global machine_params."""
-    merged = dict(params)
-    for key in _PRESET_SCANNING_KEYS:
-        if preset.get(key) is not None:
-            merged[key] = preset[key]
-    return merged
 
 
 async def _geometry_prediction(
@@ -289,16 +304,14 @@ async def _geometry_prediction(
         logger.exception("stl_estimate: machine params unavailable")
         return {"available": False, "reason": "База параметров машины недоступна"}
 
-    # Merge material preset over global params (preset wins for scanning fields)
-    if preset and params is not None:
-        params = _merge_preset(params, preset)
-    elif preset and params is None:
-        params = preset
+    from domain.services.estimation.inputs import (
+        effective_params, missing_for_estimation, resolve_params_with_sources,
+    )
 
-    if hatch_distance_mm and hatch_distance_mm > 0 and params is not None:
-        params = {**params, "hatch_distance_mm": float(hatch_distance_mm)}
-
-    from api.routes.machine_settings import effective_params, missing_for_estimation
+    record = {"material": material}
+    if hatch_distance_mm and hatch_distance_mm > 0 and (params is not None or preset):
+        record["hatch_distance_mm"] = float(hatch_distance_mm)
+    params, _ = resolve_params_with_sources(record, params, preset)
 
     missing = missing_for_estimation(params)
     if missing:
@@ -329,7 +342,8 @@ async def _geometry_prediction(
         return {"available": False, "reason": "Не удалось нарезать модель — проверьте файл"}
 
     prediction = time_est.prediction.to_dict() if time_est.prediction else None
-    if prediction is not None and prediction["source"] in ("calculated", "calibrated"):
+    if (prediction is not None and prediction["source"] in ("calculated", "calibrated")
+            and time_est.breakdown.get("prediction_time_scope") == "burn_plus_pour"):
         try:
             from analytics.prediction.accuracy import calibration_interval_hours
             with SessionLocal() as db2:
@@ -346,7 +360,7 @@ async def _geometry_prediction(
         "available": True,
         "material": material,
         "method": time_est.method,
-        "layer_count": slices.layer_count,
+        "layer_count": time_est.breakdown.get("layer_count", slices.layer_count),
         "height_mm": round(slices.height_mm, 2),
         "build_axis": "Z",
         "scan_hours": round(time_est.scan_hours, 2),
@@ -356,7 +370,7 @@ async def _geometry_prediction(
         "raw_scan_hours": round(time_est.raw_scan_hours, 3),
         "raw_recoat_hours": round(time_est.raw_recoat_hours, 3),
         "correction_factor": round(time_est.correction_factor, 3),
-        "total_days": round(time_est.total_days, 2),
+        "total_days": round(time_est.total_days, 2) if time_est.total_days is not None else None,
         "time_breakdown": time_est.breakdown,
         "cost_total_rub": cost_est.total_rub,
         "cost_breakdown": cost_est.breakdown,
@@ -388,13 +402,13 @@ async def stl_estimate(
     data = await read_upload_capped(file, 200 * 1024 * 1024)
 
     volume_cm3 = _stl_volume_cm3(data)
-    hist = _historical_rate()
+    hist = await asyncio.to_thread(_historical_rate)
 
     # Average past session duration (hours) — shown only as a rough historical
     # reference, never as a per-part prediction. No data → no number (the old
     # 45-min fallback produced a misleading constant 0.8 h for every part).
     avg_min = hist["avg_duration_min"]
-    avg_session_hours = round(avg_min / 60, 1) if avg_min else None
+    avg_session_hours = round(avg_min / 60, 1) if avg_min is not None else None
 
     warnings = _stl_warnings(file.filename or "", volume_cm3)
     prediction = await _geometry_prediction(
@@ -408,7 +422,8 @@ async def stl_estimate(
         "warnings": warnings,
         "historical": hist,
         "estimate": {
-            "note": "Средняя длительность прошлых сессий (справочно, не прогноз по этой детали)"
+            "note": "Средняя elapsed-длительность окон логов печатей >10 мин, включая паузы "
+                    "(справочно, не нормальный машинный цикл и не прогноз по этой детали)"
                     if hist["sessions_used"] else "Нет исторических данных",
             "avg_session_hours": avg_session_hours,
             "sessions_used": hist["sessions_used"],

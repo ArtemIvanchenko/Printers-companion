@@ -136,21 +136,23 @@ class LayerGeometrySeries:
             out[name] = integral / layer_thickness_mm
         return out
 
-    def to_snapshot(self) -> dict:
-        """Compact JSON form persisted in the prediction snapshot, so later
+    def to_snapshot(self, *, compact: bool = True) -> dict:
+        """JSON form, compact by default, persisted in the prediction snapshot so later
         calibration can pair stored geometry with real per-layer burn times
-        without re-slicing the plate. Also used to persist the geometry cache
-        (analytics.prediction.plate_estimator._geometry_cache_key) — includes
-        body_boundary_mm so a cache hit still gives correct per-body display
-        shares, not just correct aggregate totals."""
+        without re-slicing the plate. Computational cache entries use
+        ``compact=False`` to preserve all prepared coordinates and features:
+        display rounding must not change layer count, totals or body shares
+        when the same geometry is reused."""
         return {
-            "zs": [round(z, 3) for z in self.zs],
-            **{name: [round(v, 1) for v in getattr(self, name)] for name in GEOMETRY_FEATURES},
-            "z_min": round(self.z_min, 3),
-            "z_max": round(self.z_max, 3),
-            "body_boundary_mm": [round(v, 1) for v in self.body_boundary_mm],
+            "zs": [round(z, 3) if compact else z for z in self.zs],
+            **{name: [round(v, 1) if compact else v for v in getattr(self, name)]
+               for name in GEOMETRY_FEATURES},
+            "z_min": round(self.z_min, 3) if compact else self.z_min,
+            "z_max": round(self.z_max, 3) if compact else self.z_max,
+            "body_boundary_mm": [round(v, 1) if compact else v for v in self.body_boundary_mm],
             "body_active_z_intervals_mm": [
-                [[round(low, 3), round(high, 3)] for low, high in intervals]
+                [[round(low, 3), round(high, 3)] if compact else [low, high]
+                 for low, high in intervals]
                 for intervals in self.body_active_z_intervals_mm
             ],
             "warnings": list(self.warnings),
@@ -214,6 +216,73 @@ def machine_mode_key(
     if not printer_id:
         return legacy
     return f"{printer_id}|{legacy}|lasers={max(int(laser_count), 1)}"
+
+
+def _validated_layer_cycle_model(candidate: dict | None) -> tuple[dict | None, str]:
+    """Validate the identified v2 cycle contract; old artifacts are diagnostic."""
+    if not isinstance(candidate, dict):
+        return None, "unavailable"
+    if candidate.get("version") == "max_base_floor_v2":
+        base = candidate.get("base_overhead_ms")
+        floor = candidate.get("minimum_cycle_ms")
+        lower = candidate.get("minimum_applicable_component_ms")
+        identified = (
+            floor is not None
+            and candidate.get("base_overhead_status") == "identified"
+            and candidate.get("minimum_cycle_status") == "identified"
+        ) or (
+            floor is None and candidate.get("base_overhead_status") == "identified_free_branch"
+            and candidate.get("minimum_cycle_status") == "unidentified"
+            and isinstance(lower, (int, float)) and not isinstance(lower, bool)
+            and math.isfinite(lower) and lower >= 0
+        )
+        if (
+            identified
+            and isinstance(base, (int, float)) and not isinstance(base, bool)
+            and math.isfinite(float(base))
+            and 0.0 <= float(base) <= 10_000.0
+            and (
+                floor is None
+                or (
+                    isinstance(floor, (int, float)) and not isinstance(floor, bool)
+                    and math.isfinite(float(floor))
+                    and 0.0 < float(floor) <= 120_000.0
+                )
+            )
+        ):
+            return {
+                **candidate,
+                "base_overhead_ms": float(base),
+                "minimum_cycle_ms": float(floor) if floor is not None else None,
+            }, "calibrated_max_base_floor"
+
+    # Old v1/additive artifacts have no identifiability evidence. Preserve them
+    # in history, but never silently apply their potentially floor-biased base.
+    return None, "unavailable"
+
+
+def _resolve_layer_cycle_model_for_mode(
+    params: dict,
+    material: str,
+    layer_thickness_mm: float,
+    legacy_scan_model: dict | None,
+) -> tuple[dict | None, str]:
+    """Independent cycle model for the same physical machine only."""
+    models = params.get("layer_cycle_model_by_mode") or {}
+    printer_id = params.get("printer_id")
+    if printer_id:
+        key = machine_mode_key(
+            str(printer_id), material, layer_thickness_mm,
+            int(params.get("laser_count") or 1),
+        )
+        resolved, source = _validated_layer_cycle_model(models.get(key))
+        if resolved is not None:
+            return resolved, source
+    # A scoped scan artifact may also carry a v2 cycle. Unscoped scan artifacts
+    # cannot reach this point through resolve_scan_model.
+    return _validated_layer_cycle_model(
+        legacy_scan_model.get("layer_cycle_model") if isinstance(legacy_scan_model, dict) else None,
+    )
 
 
 def scan_seconds_from_model(
@@ -545,26 +614,76 @@ def _section_polygons(mesh, z: float):
     merge tolerance, frame, contour repair and open/closed accounting remain
     those of the previous section_multiplane path.
     """
+    import networkx as nx
+    import numpy as np
     import shapely.geometry
+    from trimesh.path import Path2D
+    from trimesh.path.entities import Line
 
     path = _section_path(mesh, z)
     if path is None:
         return [], 0.0
-    total_len = float(path.length)
+    # Entity-level dangling is insufficient: one Line can contain both a
+    # closed ring and an attached open branch. Bridges are precisely the
+    # observed edges outside closed circuits; polygon buffering must not
+    # manufacture or subtract track lengths. Preserve native closed curves.
+    graph = path.vertex_graph.copy()
+    for entity in path.entities:
+        if isinstance(entity, Line) and entity.closed:
+            # Native vertex_graph omits whole closed entities, but a closed
+            # polyline can backtrack along a genuinely open branch too.
+            graph.add_edges_from(entity.nodes)
+    # Every finite simple-graph component with degree two at every vertex is
+    # a cycle. Its empty bridge set needs no second graph traversal.
+    bridges = (
+        set() if all(degree == 2 for _, degree in graph.degree())
+        else {tuple(sorted(edge)) for edge in nx.bridges(graph)}
+    )
+    closed_entities = []
+    open_len = 0.0
+    has_open_edges = False
+    for index, entity in enumerate(path.entities):
+        if isinstance(entity, Line):
+            if not bridges:
+                closed_entities.append(entity)
+                continue
+            nodes = entity.nodes
+            opened = np.array([tuple(sorted(edge)) in bridges for edge in nodes])
+            if opened.any():
+                has_open_edges = True
+                segments = path.vertices[nodes[opened]]
+                open_len += float(np.linalg.norm(segments[:, 1] - segments[:, 0], axis=1).sum())
+                # Split only across open edges, retaining point/entity order.
+                closed_entities.extend(
+                    Line(points) for points in np.split(entity.points, np.flatnonzero(opened) + 1)
+                    if len(points) > 1
+                )
+            else:
+                closed_entities.append(entity)
+        elif entity.closed:
+            closed_entities.append(entity)
+        elif index in path.dangling:
+            has_open_edges = True
+            open_len += float(entity.length(path.vertices))
+        else:
+            closed_entities.append(entity)
+    if not closed_entities:
+        return [], open_len
+    if has_open_edges:
+        path = Path2D(entities=closed_entities, vertices=path.vertices,
+                      metadata=path.metadata, process=False)
     polygons: list = []
-    closed_perimeter = 0.0
     try:
         to_3d = path.metadata.get("to_3D")
         for poly in path.polygons_full:
             fixed = (_to_plate_xy(poly, to_3d) if to_3d is not None else poly).buffer(_FIX_EPS)
             geoms = fixed.geoms if isinstance(fixed, shapely.geometry.MultiPolygon) else [fixed]
             for g in geoms:
-                closed_perimeter += g.exterior.length + sum(r.length for r in g.interiors)
                 polygons.append(g)
-    except Exception:
-        # Open curves only (sheet supports) — nothing closed recoverable.
-        pass
-    open_len = max(0.0, total_len - closed_perimeter)
+    except Exception as exc:
+        raise EstimationError(
+            f"Не удалось восстановить замкнутые контуры сечения Z={z:g} мм ({exc})"
+        ) from exc
     return polygons, open_len
 
 

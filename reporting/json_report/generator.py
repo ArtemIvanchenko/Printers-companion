@@ -142,16 +142,14 @@ def summarize_data_quality(files: list[IngestedFile], dedupe_diagnostics: list[d
     ]
     empty_files = [file.relative_path for file in files if file.size_bytes == 0]
     malformed_rows = sum(
-        table.malformed_rows
+        file.parse_result.malformed_row_count
         for file in files
         if file.parse_result
-        for table in file.parse_result.tables
     )
     repeated_headers = sum(
-        table.repeated_headers
+        file.parse_result.repeated_header_count
         for file in files
         if file.parse_result
-        for table in file.parse_result.tables
     )
     return {
         "file_count": len(files),

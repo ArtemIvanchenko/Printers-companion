@@ -79,6 +79,39 @@ def test_missing_geometry_is_an_explicit_normal_outcome():
     assert result["items"] == []
 
 
+@pytest.mark.parametrize("layer", [0, -1, 101, 250, True])
+def test_physical_layer_outside_plate_is_not_stretched_or_clamped(layer):
+    health = {"burn_drift": {"outlier_layers": [{"layer": layer}]}}
+    telemetry = {"layer_burn_times": [{"layer": value} for value in [101, 150, 250]]}
+
+    result = map_anomalies_to_geometry(health, _geometry(), telemetry=telemetry)
+
+    assert result["status"] == "no_mappable_anomalies"
+    assert result["items"] == []
+    # The observation still exists; inability to locate it is not a clean build.
+    assert health["burn_drift"]["outlier_layers"] == [{"layer": layer}]
+
+
+@pytest.mark.parametrize("layers", [[0, 10], [90, 110], [101, 250]])
+def test_layer_range_outside_plate_cannot_become_a_physical_height_range(layers):
+    health = {"anomalies": [{"kind": "threshold", "layer_range": layers}]}
+
+    result = map_anomalies_to_geometry(health, _geometry())
+
+    assert result["items"] == []
+
+
+def test_progress_preserves_physical_numbers_instead_of_rebasing_partial_log():
+    result = map_anomalies_to_geometry(
+        {"anomalies": [{"sample_index": 1, "sample_count": 3}]}, _geometry(),
+        telemetry={"layer_burn_times": [{"layer": value} for value in [40, 60, 80]]},
+    )
+    [item] = result["items"]
+    assert item["layer"] == 60
+    assert item["height_mm"] == pytest.approx(5.95)
+    assert item["mapping_precision"] == "approximate_progress"
+
+
 def test_timestamp_brackets_define_threshold_layer_range_without_progress_fallback():
     health = {
         "anomalies": [{
@@ -164,6 +197,79 @@ def test_progress_mapping_prepares_logged_layers_once(monkeypatch):
     ]
     assert all(item["mapping_precision"].startswith("approximate_progress")
                for item in result["items"])
+
+
+@pytest.mark.parametrize("limit", [2, 5, 17, 101])
+def test_full_source_row_mapping_is_independent_of_chart_budget(limit):
+    from analytics.process_health import detect_process_anomalies
+    from domain.services.session_telemetry import chart_telemetry
+
+    values = [0.1] * 101
+    values[50] = 3.0
+    full = {
+        "time": list(range(101)),
+        "oxygen": {"SO1": values},
+        "layer_burn_times": [{"layer": layer} for layer in range(1, 101)],
+    }
+    health = {"anomalies": detect_process_anomalies(full)}
+    chart = chart_telemetry(full, limit=limit)
+
+    result = map_anomalies_to_geometry(health, _geometry(), telemetry=chart)
+
+    assert result["items"]
+    assert all(item["layer"] == 51 for item in result["items"])
+    assert all(item["height_mm"] == pytest.approx(5.05) for item in result["items"])
+
+
+def test_legacy_source_row_without_own_count_uses_chart_source_frame():
+    result = map_anomalies_to_geometry(
+        {"anomalies": [{"sample_index": 50}]}, _geometry(),
+        telemetry={
+            "time": [0, 25, 50, 75, 100], "source_sample_count": 101,
+            "layer_burn_times": [{"layer": layer} for layer in range(1, 101)],
+        },
+    )
+    assert result["items"][0]["layer"] == 51
+
+
+@pytest.mark.parametrize("location", [
+    {"sample_index": True, "sample_count": 101},
+    {"sample_index": -1, "sample_count": 101},
+    {"sample_index": 101, "sample_count": 101},
+    {"sample_index": 50, "sample_count": 0},
+    {"sample_index": 50, "sample_count": True},
+    {"sample_index": 50, "sample_count": 102},
+    {"sample_index": 50, "sample_count": 101, "timestamp": "2026-01-01T10:00:00"},
+])
+def test_invalid_or_timestamp_unmapped_source_frame_does_not_invent_height(location):
+    result = map_anomalies_to_geometry(
+        {"anomalies": [location]}, _geometry(),
+        telemetry={
+            "time": [0, 25, 50, 75, 100], "source_sample_count": 101,
+            "layer_burn_times": [{"layer": layer} for layer in range(1, 101)],
+        },
+    )
+    assert result["status"] == "no_mappable_anomalies"
+    assert result["items"] == []
+
+
+def test_unmapped_threshold_endpoint_does_not_fall_back_to_peak_progress():
+    anomaly = {
+        "kind": "threshold", "sample_index": 50, "sample_count": 101,
+        "sample_ranges": [{
+            "start": {"sample_index": 40, "sample_count": 101,
+                      "timestamp": "2026-01-01T10:00:00"},
+            "end": {"layer": 60, "timestamp": "2026-01-01T10:01:00"},
+        }],
+    }
+    result = map_anomalies_to_geometry(
+        {"anomalies": [anomaly]}, _geometry(),
+        telemetry={
+            "time": list(range(101)),
+            "layer_burn_times": [{"layer": layer} for layer in range(1, 101)],
+        },
+    )
+    assert result["items"] == []
 
 
 @pytest.mark.parametrize("health", [{}, {"anomalies": [{"signal": "SO1"}]}])

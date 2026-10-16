@@ -17,7 +17,7 @@ router = APIRouter(prefix="/imports", tags=["imports"])
 def list_imports(
     skip: SkipParam = 0,
     limit: LimitParam = 100,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ) -> dict:
     repo = ImportJobsRepository(db)
     node_id = get_settings().compute_node_id
@@ -28,7 +28,7 @@ def list_imports(
 
 
 @router.get("/{import_job_id}")
-def get_import(import_job_id: str, db: Session = Depends(get_db)) -> dict:
+def get_import(import_job_id: str, db: Session = Depends(get_db, scope="function")) -> dict:
     try:
         return import_requests.get_import_job(db, import_job_id, settings=get_settings()).model_dump(mode="json")
     except import_requests.ImportRequestError as exc:
@@ -40,7 +40,7 @@ def confirm_import(
     import_job_id: str,
     request: Request,
     payload: dict | None = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ) -> dict:
     actor = workstation_id(request, (payload or {}).get("actor", "operator"))
     result = _apply_action(import_job_id, "confirm", db, actor=actor)
@@ -52,7 +52,7 @@ def ignore_import(
     import_job_id: str,
     request: Request,
     payload: dict | None = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ) -> dict:
     actor = workstation_id(request, (payload or {}).get("actor", "operator"))
     result = _apply_action(import_job_id, "ignore", db, actor=actor)
@@ -64,7 +64,7 @@ def postpone_import(
     import_job_id: str,
     request: Request,
     payload: dict | None = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ) -> dict:
     payload = payload or {}
     result = _apply_action(
@@ -80,7 +80,7 @@ def retry_import(
     import_job_id: str,
     request: Request,
     payload: dict | None = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ) -> dict:
     actor = workstation_id(request, (payload or {}).get("actor", "operator"))
     result = _apply_action(import_job_id, "retry", db, actor=actor)

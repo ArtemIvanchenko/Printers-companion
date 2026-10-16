@@ -6,13 +6,18 @@ timings or reject log-only recoat/controller-cycle calibration.
 from __future__ import annotations
 
 from analytics.prediction.timing_validation import finite_number
+from core.versioning.constants import ANALYSIS_VERSION
 
 CONFIRMED_BUILD_ORIGINS = {"explicit", "confirmed_magics_plate_datum"}
 INPUT_REASON_RU = {
     "incomplete_geometry": "Неполная геометрия или отсутствуют поддержки.",
     "unconfirmed_build_origin": "Не подтверждена координата начала построения.",
     "unconfirmed_session_link": "Не подтверждено соответствие модели и логов.",
-    "stale_prediction": "Прогноз не соответствует текущей версии карточки; нужен перерасчёт.",
+    "stale_prediction": "Прогноз не подтверждён для текущей версии карточки; нужен перерасчёт.",
+    "incompatible_prediction_generation": (
+        "Поколение сохранённого расчёта не подтверждено или несовместимо с текущей аналитикой; "
+        "история сохранена, для новой калибровки нужен новый расчёт."
+    ),
 }
 
 
@@ -55,6 +60,21 @@ def prediction_is_current(snapshot: dict, revision: int) -> bool:
     # Publication itself increments the optimistic-concurrency revision once.
     return (isinstance(recorded, int) and not isinstance(recorded, bool)
             and recorded > 0 and revision in {recorded, recorded + 1})
+
+
+def numerical_capture_exclusion(snapshot: dict) -> str | None:
+    """Admit current producer values to a new geometry-dependent calibration.
+
+    Generation identifies numerical semantics, separately from today's mutable
+    configuration and historical comparison. Never upgrade a legacy capture.
+    """
+    provenance = snapshot.get("provenance")
+    if (snapshot.get("analysis_version") != ANALYSIS_VERSION
+            or not isinstance(provenance, dict)
+            or provenance.get("component") != "print-estimate"
+            or provenance.get("analysis_version") != ANALYSIS_VERSION):
+        return "incompatible_prediction_generation"
+    return None
 
 
 def calibration_input_exclusion(

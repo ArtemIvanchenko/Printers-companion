@@ -78,10 +78,14 @@ def request_ingest(db, payload: dict, *, settings, actor: str = "operator") -> d
         )
         if rows:
             job = repo.get_import_job_for_update(rows[0].import_job_id)
+            job = _enqueue(db, job, actor=actor)
         else:
             result = detect_import_candidate(source, settings=settings, file_snapshot={})
-            job = result.job
-        job = _enqueue(db, job, actor=actor)
+            # This explicit request authorises work even when detection has
+            # already queued it under the installation's automatic policy.
+            # Publish the new job here; _enqueue only transitions saved jobs.
+            job = mark_import_job_confirmed(result.job, actor=actor).job
+            repo.save_import_job(job)
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()

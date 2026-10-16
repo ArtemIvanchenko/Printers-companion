@@ -23,7 +23,7 @@ class ControlledStop(Event):
 
 
 @pytest.mark.parametrize('failure', [
-    OperationalError('claim', {}, ConnectionError('NAS disconnected')),
+    OperationalError('claim', {}, ConnectionError('NAS disconnected'), connection_invalidated=True),
     SQLAlchemyTimeoutError('connection pool exhausted'),
 ])
 def test_claim_outage_does_not_kill_estimator_and_recovery_uses_same_owner(monkeypatch, failure):
@@ -51,7 +51,7 @@ def test_model_claim_failure_is_retried_without_busy_polling(monkeypatch):
 
     def model(*args):
         calls.append(args)
-        raise OperationalError('claim model', {}, ConnectionError('offline'))
+        raise OperationalError('claim model', {}, ConnectionError('offline'), connection_invalidated=True)
 
     monkeypatch.setattr('worker.model_tasks.process_next_model_task', model)
     estimate_tasks.run_worker_loop('lease-a', 'operator-a', stop)
@@ -92,7 +92,7 @@ def test_real_claim_path_is_safe_when_connection_is_unavailable(monkeypatch):
 
     @contextmanager
     def offline():
-        raise OperationalError('connect', {}, ConnectionError('offline'))
+        raise OperationalError('connect', {}, ConnectionError('offline'), connection_invalidated=True)
         yield  # pragma: no cover
 
     monkeypatch.setattr(estimate_tasks, 'session_scope', offline)
@@ -122,7 +122,7 @@ def test_calibration_claim_outage_uses_bounded_retry(monkeypatch):
     monkeypatch.setattr('worker.model_tasks.process_next_model_task', lambda *args: False)
 
     def calibration(*args):
-        raise OperationalError('claim calibration', {}, ConnectionError('offline'))
+        raise OperationalError('claim calibration', {}, ConnectionError('offline'), connection_invalidated=True)
 
     monkeypatch.setattr('worker.calibration_tasks.process_next_calibration_task', calibration)
     estimate_tasks.run_worker_loop('lease-a', 'operator-a', stop)

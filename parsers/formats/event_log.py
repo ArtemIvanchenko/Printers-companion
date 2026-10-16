@@ -104,7 +104,7 @@ def classify_event(text: str) -> tuple[str, str | None, dict]:
 
 class EventLogParser(BaseParser):
     name = "main_event_log"
-    version = "0.3.1"
+    version = "0.3.3"
     file_family = SourceFileFamily.main_event_log
     role = FileRole.primary
 
@@ -119,7 +119,7 @@ class EventLogParser(BaseParser):
             if not line.strip():
                 continue
             ts, raw_ts, uncertainty = parse_timestamp_token(line, date_hint)
-            ts = timeline.add(ts)
+            ts = timeline.add(ts, clock_only=uncertainty > 0)
 
             event_type, phase, extra = classify_event(line)
 

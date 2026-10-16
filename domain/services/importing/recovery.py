@@ -23,13 +23,14 @@ from domain.services.importing.contracts import ImportExecutionResult, ImportJob
 from domain.services.importing.uploads import _name_key, _write_receipt, publish_prepared_browser_upload
 from domain.services.print_cards.contracts import CardError
 from operator_journal.notifications import NotificationMessage, build_import_confirmation_message
-from storage.db.session import SessionLocal
+from storage.db.session import SessionLocal, is_database_unavailable
 from storage.repositories.prints_repo import PrintsRepository
 from storage.repositories.import_jobs import ImportJobsRepository
 
 logger = logging.getLogger(__name__)
 _MAX_RECEIPT_BYTES = 8 * 1024 * 1024
-_INITIAL_STATUSES = {ImportJobStatus.detected, ImportJobStatus.awaiting_operator_confirmation}
+_INITIAL_STATUSES = {ImportJobStatus.detected, ImportJobStatus.awaiting_operator_confirmation,
+                     ImportJobStatus.checking_stability}
 
 
 class RecoveryConflict(ValueError):
@@ -122,8 +123,13 @@ def _prepared_result(receipt: dict, snapshot: dict, manifest: dict) -> tuple[Imp
     if receipt["schema_version"] == 2:
         job = ImportJobRecord.model_validate(receipt.get("job"))
         if (job.import_job_id != receipt["import_job_id"] or not _matches_job(job, receipt, manifest)
-                or job.status not in _INITIAL_STATUSES or job.lease_owner or job.lease_generation):
+                or job.status not in _INITIAL_STATUSES or job.lease_owner or job.lease_generation
+                or job.last_stability_check_at or job.stability_check_attempts or job.execution_attempts):
             raise RecoveryConflict("Сохранённая регистрация не совпадает с неизменяемой квитанцией.")
+        if job.status == ImportJobStatus.checking_stability and (
+            job.confirmed_by != "automatic_policy" or job.confirmed_at is None
+        ):
+            raise RecoveryConflict("В квитанции отсутствует исходное автоматическое подтверждение.")
         notifications = [NotificationMessage.model_validate(row) for row in receipt.get("notifications", [])]
         for notice in notifications:
             if (notice.owner_node_id != receipt["owner_node_id"]
@@ -188,7 +194,15 @@ def recover_upload_receipt(path: Path, *, settings: Settings, now: float | None 
     except (RecoveryConflict, CardError, ValidationError, ValueError, TypeError) as exc:
         result = {"state": "needs_attention", "error": str(exc)}
         logger.error("Browser upload recovery needs attention at %s: %s", path, exc)
-    except (SQLAlchemyError, OSError) as exc:
+    except SQLAlchemyError as exc:
+        if is_database_unavailable(exc):
+            result = {"state": "deferred", "error": "База данных временно недоступна."}
+            logger.warning("Browser upload recovery deferred at %s: %s", path, type(exc).__name__)
+        else:
+            result = {"state": "needs_attention",
+                      "error": "Ошибка регистрации в базе данных; требуется проверка оператора."}
+            logger.error("Browser upload recovery SQL failure at %s: %s", path, type(exc).__name__)
+    except OSError as exc:
         result = {"state": "deferred", "error": "NAS или локальная файловая система временно недоступны."}
         logger.warning("Browser upload recovery deferred at %s: %s", path, type(exc).__name__)
     if receipt is not None:

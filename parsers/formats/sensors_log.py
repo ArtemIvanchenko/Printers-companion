@@ -9,7 +9,7 @@ from parsers.formats._tables import parse_table_stream
 
 class SensorsLogParser(BaseParser):
     name = "sensors_log"
-    version = "0.2.0"
+    version = "0.2.2"
     file_family = SourceFileFamily.sensors_log
     role = FileRole.secondary
 

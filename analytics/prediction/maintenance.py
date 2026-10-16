@@ -12,6 +12,7 @@ raw-log access.
 from __future__ import annotations
 
 from datetime import datetime
+import math
 from statistics import median
 from typing import Any
 
@@ -28,15 +29,18 @@ MAX_HORIZON_SESSIONS = 200
 MAX_TREND_HISTORY = 30
 
 
-def _signal_series(sessions: list[dict[str, Any]], signal: str) -> list[float]:
+def _signal_series(sessions: list[dict[str, Any]], signal: str) -> list[float | None]:
     """Per-session means for one signal, in the given (chronological) order."""
-    series: list[float] = []
+    series: list[float | None] = []
     for s in sessions:
         st = (s.get("signal_stats") or {}).get(signal) or {}
         mean = st.get("mean")
-        if isinstance(mean, (int, float)) and not isinstance(mean, bool):
-            series.append(float(mean))
-    return series[-MAX_TREND_HISTORY:]
+        series.append(
+            float(mean) if isinstance(mean, (int, float)) and not isinstance(mean, bool)
+            and math.isfinite(mean) else None
+        )
+    observed_positions = [index for index, value in enumerate(series) if value is not None]
+    return series[observed_positions[-MAX_TREND_HISTORY]:] if len(observed_positions) > MAX_TREND_HISTORY else series
 
 
 def _session_cadence_days(sessions: list[dict[str, Any]]) -> float | None:
@@ -66,7 +70,7 @@ def _group_for(sessions: list[dict[str, Any]], signal: str) -> str:
 
 
 def _sessions_to_for_slope(
-    current: float, threshold: float, slope: float, *, increasing: bool,
+    current: float, threshold: float, slope: float | None, *, increasing: bool,
 ) -> float | None:
     """Sessions to threshold for one candidate slope value.
 
@@ -84,13 +88,17 @@ def _sessions_to_for_slope(
     the wrong way relative to ``increasing``) — the caller must not treat
     that as "far away", it means "this bound of the interval is open-ended".
     """
+    if not (math.isfinite(current) and math.isfinite(threshold)):
+        return None
     remaining = threshold - current
     if remaining <= 0 if increasing else remaining >= 0:
         return 0.0
+    if slope is None or not math.isfinite(slope):
+        return None
     if slope == 0 or ((slope <= 0) if increasing else (slope >= 0)):
         return None
     sessions = remaining / slope
-    return sessions if sessions > 0 else None
+    return sessions if math.isfinite(sessions) and sessions > 0 else None
 
 
 def forecast_maintenance(
@@ -130,12 +138,16 @@ def forecast_maintenance(
         if not thr:
             continue
         series = _signal_series(sessions, signal)
-        if len(series) < MIN_SESSIONS:
+        observed = [value for value in series if value is not None]
+        n_sessions = len(observed)
+        if n_sessions < MIN_SESSIONS or series[-1] is None:
             continue
 
         slope, low_slope, high_slope = theil_sen_slope_ci(series)
+        if slope is None:
+            continue
         current = series[-1]
-        mean_abs = abs(sum(series) / len(series)) or 1.0
+        mean_abs = abs(sum(observed) / n_sessions) or 1.0
         if abs(slope) < MIN_REL_SLOPE * mean_abs:
             continue  # essentially flat
 
@@ -146,6 +158,9 @@ def forecast_maintenance(
             threshold, kind = thr["alarm_low"], "alarm_low"
         else:
             continue  # drifting away from the only available limit
+        if (not isinstance(threshold, (int, float)) or isinstance(threshold, bool)
+                or not math.isfinite(threshold)):
+            continue
 
         remaining = threshold - current
         # If already past the threshold, it's urgent now (0 sessions).
@@ -219,27 +234,27 @@ def forecast_maintenance(
                 ),
                 "average_days_between_prints": round(cadence_days, 2) if cadence_days is not None else None,
                 "reliability": (
-                    "high" if len(series) >= 10 and not interval_warnings
-                    else "medium" if len(series) >= 6 and interval is not None
+                    "high" if n_sessions >= 10 and not interval_warnings
+                    else "medium" if n_sessions >= 6 and interval is not None
                     else "low"
                 ),
                 "assumption_ru": "Текущий тренд сохраняется, а режим эксплуатации не меняется",
             },
-            "n_sessions": len(series),
+            "n_sessions": n_sessions,
             "recommendation": rec,
             "prediction": PredictionResult(
                 value=sessions_to,
                 unit="печатей",
                 source=PredictionSource.MODEL,
                 interval=interval,
-                sample_size=len(series),
+                sample_size=n_sessions,
                 warnings=(
                     ([f"Прогноз построен на минимально допустимом числе сессий ({MIN_SESSIONS})."]
-                     if len(series) == MIN_SESSIONS else [])
+                     if n_sessions == MIN_SESSIONS else [])
                     + interval_warnings
                 ),
                 explanation=(
-                    f"Робастный тренд (Тейл-Сен) по {len(series)} последним значениям сигнала "
+                    f"Робастный тренд (Тейл-Сен) по {n_sessions} последним значениям сигнала "
                     f"{signal}, спроецированный до порога {kind} ({threshold:g})."
                 ),
             ).to_dict(),

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from analytics.prediction.contract import PredictionResult, PredictionSource
 from analytics.prediction.print_time import PrintTimeEstimate
 from analytics.prediction.stl_slicer import SliceResult
+from analytics.prediction.timing_validation import machine_cycle_prediction_hours
 
 
 @dataclass
@@ -53,7 +54,11 @@ def estimate_cost(
 
     filter_cost, filter_life = params.get("filter_cost_rub"), params.get("filter_lifetime_hours")
     if filter_cost and filter_life:
-        breakdown["фильтр"] = round(time_estimate.print_hours / float(filter_life) * float(filter_cost), 2)
+        machine_hours = machine_cycle_prediction_hours(time_estimate.breakdown)
+        if machine_hours is not None:
+            breakdown["фильтр"] = round(machine_hours / float(filter_life) * float(filter_cost), 2)
+        else:
+            warnings.append("Неизвестен полный цикл печати — стоимость фильтра по часам не учтена.")
     else:
         warnings.append("Не заданы цена/ресурс фильтра — статья не учтена.")
 
@@ -66,7 +71,7 @@ def estimate_cost(
     total_rub = round(sum(breakdown.values()), 2)
     cost_warnings = list(warnings)
     time_source = (time_estimate.prediction.source if time_estimate.prediction else None)
-    if time_source == PredictionSource.CALCULATED:
+    if time_source == PredictionSource.CALCULATED and "фильтр" in breakdown:
         cost_warnings.append(
             "Стоимость машинного времени посчитана по некалиброванному прогнозу времени "
             "печати — точность ограничена."
@@ -84,7 +89,8 @@ def estimate_cost(
             warnings=cost_warnings,
             explanation=(
                 "Сумма по статьям (порошок, газ, фильтр, платформа) из ставок, заданных "
-                "оператором в параметрах машины; отсутствующая ставка исключает свою статью, "
+                "оператором в параметрах машины; неизвестное время полного цикла исключает "
+                "почасовую стоимость фильтра, отсутствующая ставка исключает свою статью, "
                 "а не подставляет значение по умолчанию."
             ),
         ),

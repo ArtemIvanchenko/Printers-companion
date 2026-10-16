@@ -105,7 +105,7 @@ class Commands:
         for key in ("DOCKER_HOST", "DOCKER_CONTEXT", "COMPOSE_FILE", "COMPOSE_PROJECT_NAME"):
             environment.pop(key, None)
         try:
-            result = subprocess.run(args, cwd=self.root, env=environment, text=True,
+            result = subprocess.run(args, cwd=self.root, env=environment, text=True, encoding='utf-8',
                                     capture_output=True, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired):
             raise UpdateError(f"Не удалось выполнить {args[0]}: программа недоступна или истёк таймаут.") from None
@@ -507,20 +507,26 @@ class Updater:
             if result.get('owned') is not True and action == 'claim':
                 self._save(state, 'prepared', maintenance_token=None)
                 raise UpdateError('Режим обслуживания уже занят другим обновлением.')
+            if result.get('owned') is not True and action == 'release':
+                raise UpdateError('Не подтверждён владелец режима обновления; журнал сохранён.')
         except (ValueError, AttributeError):
             raise UpdateError('Не подтверждён владелец режима обновления; журнал сохранён.') from None
         if action == "release":
             self._save(state, state["phase"], maintenance_token=None)
 
-    def _abort_quiesce(self, state: dict, *, error: str | None = None) -> None:
+    def _abort_quiesce(self, state: dict, *, error: str | None = None,
+                       options: dict | None = None, timeout: int = 180) -> None:
         """Undo a rejected pre-switch operation, preserving failed cleanup.
 
-        Do not mark the operation blocked or discard its candidate until every
-        frozen consumer and our admission barrier have been released. If either
-        cleanup fails, the previous journal phase remains recoverable.
+        After quiescing, confirm the selected runtime through normal recovery
+        before releasing admission or marking the operation blocked. Failed
+        recovery keeps the journal/token; preparation-only cleanup stays local.
         """
-        self._unfreeze(state)
-        self._gate(state, "release")
+        if state.get("phase") in {"quiescing", "restart_ready"}:
+            self._recover(state, options if options is not None else self._options(), timeout)
+        else:
+            self._unfreeze(state)
+            self._gate(state, "release")
         self._save(state, "blocked", candidate=None, error=error)
 
     def _quiesce(self, state: dict, old: dict, running: dict) -> None:
@@ -632,6 +638,10 @@ class Updater:
         while True:
             containers = self._running(snapshot["project_name"])
             expected = read_json(Path(snapshot["compose_path"]))["services"]
+            required = {name for name in REQUIRED & expected.keys()
+                        if expected[name].get('deploy', {}).get('replicas') != 0}
+            if not required.issubset(snapshot['services']):
+                raise UpdateError('Не подтверждён полный состав обязательных сервисов. Требуется проверка установки.')
             healthy = True
             for name in snapshot["services"]:
                 container = containers.get(name, {})
@@ -680,6 +690,8 @@ class Updater:
         if state.get("phase") in {"quiescing", "restart_ready"}:
             self._same_host(state["current"])
             self._unfreeze(state)
+            self._resume_containers(state["current"])
+            self._verify(state["current"], options, timeout)
             self._gate(state, "release")
             self._save(state, "interrupted", candidate=None)
         elif state.get("phase") in {"switching", "verifying", "rolling_back", "needs_recovery"}:
@@ -724,7 +736,7 @@ class Updater:
                     self.progress("Запуск не подтверждён. Возвращаю прежнюю версию…")
                     self._restore(state, options, timeout)
                 else:
-                    self._abort_quiesce(state,
+                    self._abort_quiesce(state, options=options, timeout=timeout,
                                        error=str(exc) if isinstance(exc, UpdateError) else "Обновление прервано; текущая версия сохранена.")
                 raise
 
@@ -758,7 +770,7 @@ class Updater:
                 if state.get("phase") in {"switching", "verifying"}:
                     self._restore(state, options, timeout)
                 else:
-                    self._abort_quiesce(state)
+                    self._abort_quiesce(state, options=options, timeout=timeout)
                 raise
             self._save(state, "committed", current=old, previous=current, candidate=None, error=None)
             self._gate(state, "release")

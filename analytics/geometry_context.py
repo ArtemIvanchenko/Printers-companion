@@ -47,34 +47,37 @@ def _layer_from_sample(
     anomaly: dict[str, Any], telemetry: dict[str, Any], layers: list[int],
 ) -> int | None:
     sample = anomaly.get("sample_index")
-    if not isinstance(sample, int) or not layers:
+    if (not isinstance(sample, int) or isinstance(sample, bool) or not layers
+            or anomaly.get("timestamp")):
         return None
-    point_count = len(telemetry.get("time") or [])
-    if point_count < 2:
+    # Health locations refer to the full analysis frame, not its bounded chart
+    # projection. A chart budget change cannot move a risk to another height.
+    source_count = telemetry.get("source_sample_count")
+    point_count = anomaly.get("sample_count", source_count)
+    if "sample_count" in anomaly or "source_sample_count" in telemetry:
+        if (not isinstance(point_count, int) or isinstance(point_count, bool)
+                or point_count < 2):
+            return None
+        if (source_count is not None and source_count != point_count):
+            return None
+    else:
+        point_count = len(telemetry.get("time") or [])
+    if point_count < 2 and "sample_count" not in anomaly and "source_sample_count" not in telemetry:
         # Legacy payloads can omit time labels while signal arrays stay aligned.
         point_count = max(
             (len(values) for group in telemetry.values() if isinstance(group, dict)
              for values in group.values() if isinstance(values, list)),
             default=0,
         )
-    if point_count < 2:
+    if point_count < 2 or not 0 <= sample < point_count:
         return None
-    progress = min(max(sample / (point_count - 1), 0.0), 1.0)
+    progress = sample / (point_count - 1)
     return layers[round(progress * (len(layers) - 1))]
 
 
-def _layer_ordinal(layer: int, layer_count: int, logged_layers: list[int]) -> int:
-    """Convert printer layer numbering to a zero-based geometry ordinal."""
-    if 1 <= layer <= layer_count:
-        return layer - 1
-    if 0 <= layer < layer_count:
-        return layer
-    # Restarted/partial logs may use a continued counter outside this plate's
-    # nominal range. Preserve relative order, but label it approximate upstream.
-    if layer in logged_layers and len(logged_layers) > 1:
-        rank = logged_layers.index(layer)
-        return round(rank / (len(logged_layers) - 1) * (layer_count - 1))
-    return min(max(layer - 1, 0), max(layer_count - 1, 0))
+def _layer_ordinal(layer: int, layer_count: int) -> int | None:
+    """Preserve physical 1-based layer numbers; no rank stretching or clamping."""
+    return layer - 1 if type(layer) is int and 1 <= layer <= layer_count else None
 
 
 def _typical_geometry_load(series: LayerGeometrySeries) -> float:
@@ -232,8 +235,9 @@ def map_anomalies_to_geometry(
 
             start_layer = endpoint_layer(start, is_start=True)
             end_layer = endpoint_layer(end, is_start=False)
-            if isinstance(start_layer, int) and isinstance(end_layer, int):
-                mapped_range = [min(start_layer, end_layer), max(start_layer, end_layer)]
+            if not isinstance(start_layer, int) or not isinstance(end_layer, int):
+                continue
+            mapped_range = [min(start_layer, end_layer), max(start_layer, end_layer)]
         if (
             isinstance(mapped_range, (list, tuple)) and len(mapped_range) == 2
             and all(isinstance(value, int) for value in mapped_range)
@@ -257,16 +261,19 @@ def map_anomalies_to_geometry(
             )
         if not isinstance(layer, int):
             continue
-        ordinal = _layer_ordinal(layer, layer_count, logged_layers)
-        if exact and not (0 <= layer <= layer_count):
-            exact = False
+        ordinal = _layer_ordinal(layer, layer_count)
+        if ordinal is None:
+            continue
+        if layer_range:
+            low_ordinal = _layer_ordinal(layer_range[0], layer_count)
+            high_ordinal = _layer_ordinal(layer_range[1], layer_count)
+            if low_ordinal is None or high_ordinal is None:
+                continue
         z_mm = min(series.z_max, max(series.z_min, series.z_min + (ordinal + 0.5) * thickness))
         if typical_load is None:
             typical_load = _typical_geometry_load(series)
         components, dominant, relative_load = _geometry_load(series, z_mm, typical_load)
         if layer_range:
-            low_ordinal = _layer_ordinal(layer_range[0], layer_count, logged_layers)
-            high_ordinal = _layer_ordinal(layer_range[1], layer_count, logged_layers)
             z_low = min(series.z_max, max(series.z_min, series.z_min + low_ordinal * thickness))
             z_high = min(
                 series.z_max,
@@ -307,7 +314,7 @@ def map_anomalies_to_geometry(
                 if exact else
                 "Диапазон привязан по времени начала/конца отклонения"
                 if layer_range else
-                "Слой сопоставлен с ближайшей меткой burn.log"
+                "Слой сопоставлен с ближайшей меткой прожига в журнале"
                 if precision == "nearest_logged_layer" else
                 "Слой грубо оценён по доле пройденной печати"
             ),

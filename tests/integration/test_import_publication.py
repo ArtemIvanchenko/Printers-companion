@@ -2,9 +2,11 @@
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from analytics.prediction.calibration_inputs import load_calibration_inputs
 from analytics.prediction.layer_timings import (
@@ -19,9 +21,9 @@ from analytics.prediction.timing_snapshot import (
 )
 from core.config.settings import get_settings
 from domain.enums.common import ImportJobStatus
-from domain.models.events import LayerSnapshot
+from domain.models.events import CanonicalEvent, LayerSnapshot
 from domain.models.prints import PrintRecord
-from domain.models.sessions import BuildSession, ImportJob, ReportArtifact
+from domain.models.sessions import BuildSession, ImportJob, ReportArtifact, SourceFile
 from domain.schemas.parsing import CanonicalEventDraft, FileClassification, ParseResult
 from domain.services.importing.contracts import (
     ImportExecutionResult,
@@ -404,6 +406,58 @@ def test_source_event_batch_checks_authoritative_fence_even_with_true_cached_gua
         db.commit()
     with pytest.raises(StaleImportLeaseError):
         persist_parse_results_to_db("pub-session", [_file()], fence=fence, lease_guard=lambda: True)
+    _assert_old()
+
+
+@pytest.mark.parametrize("failed_check", [1, 2])
+@pytest.mark.parametrize("stale", [False, True])
+def test_initial_persistence_fence_failure_rolls_back_and_preserves_retry_category(
+    attempt, monkeypatch, failed_check, stale
+):
+    from domain.services.importing.persistence import (
+        is_retryable_import_failure,
+        persist_parse_results_to_db,
+    )
+
+    _, fence = attempt
+    original_verify = ImportFence.verify
+    checks = 0
+    error = (
+        StaleImportLeaseError("simulated replacement lease")
+        if stale
+        else OperationalError(
+            "lease SELECT", None, RuntimeError("simulated NAS read outage"),
+            connection_invalidated=True,
+        )
+    )
+
+    def unavailable(self, db):
+        nonlocal checks
+        checks += 1
+        if checks == failed_check:
+            raise error
+        return original_verify(self, db)
+
+    db = SessionLocal()
+    rollback = Mock(wraps=db.rollback)
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "rollback", rollback)
+        patch.setattr("domain.services.importing.persistence.SessionLocal", lambda: db)
+        patch.setattr(ImportFence, "verify", unavailable)
+        expected = StaleImportLeaseError if stale else ImportPersistenceError
+        with pytest.raises(expected) as caught:
+            persist_parse_results_to_db("pub-session", [_file()], fence=fence)
+        if not stale:
+            assert caught.value.__cause__ is error
+            assert is_retryable_import_failure(caught.value)
+        assert rollback.call_count == 1
+    with SessionLocal() as db:
+        assert db.scalar(select(SourceFile).where(SourceFile.session_id == "pub-session")) is None
+        assert db.scalar(select(CanonicalEvent).where(CanonicalEvent.session_id == "pub-session")) is None
+    _assert_old()
+
+    # A valid later attempt still writes the same deterministic source/events.
+    assert persist_parse_results_to_db("pub-session", [_file()], fence=fence) == (1, 1)
     _assert_old()
 
 

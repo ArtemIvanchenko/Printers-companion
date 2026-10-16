@@ -58,7 +58,13 @@ _GOOD_RESULTS = {"accepted", "good", "ok", "pass", "passed", "годная", "г
 
 
 def _num(value: Any) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except OverflowError:
+        return None
+    return result if math.isfinite(result) else None
 
 
 def build_feature_row(group: dict[str, Any]) -> dict[str, float | None]:
@@ -71,16 +77,20 @@ def build_feature_row(group: dict[str, Any]) -> dict[str, float | None]:
     burn = (health.get("burn_drift") or {})
     o2 = signal_stats.get("SO1") or signal_stats.get("SO2") or {}
 
-    return {
+    row = {
         "readiness":     _num(features.get("atmosphere_readiness")),
-        "anomaly_count": _num(features.get("process_anomaly_count")) or 0.0,
-        "burn_slope":    _num(burn.get("slope_sec_per_layer")) or 0.0,
+        "anomaly_count": _num(features.get("process_anomaly_count")),
+        "burn_slope":    _num(burn.get("slope_sec_per_layer")),
         "data_quality":  _num(features.get("data_quality_score")),
         "o2_mean":       _num(o2.get("mean")),
         "o2_std":        _num(o2.get("std")),
-        "duration_min":  _num(features.get("duration_min")) or 0.0,
-        "layers":        _num(features.get("layers")) or 0.0,
+        "duration_min":  _num(features.get("duration_min")),
+        "layers":        _num(features.get("layers")),
     }
+    if (group.get("telemetry_evidence") or {}).get("sample_count") == 0:
+        for key in ("readiness", "anomaly_count", "o2_mean", "o2_std"):
+            row[key] = None
+    return row
 
 
 def outcome_to_label(result: str | None) -> int | None:
@@ -103,39 +113,43 @@ def _heuristic_risk(row: dict[str, float | None]) -> dict[str, Any]:
 
     readiness = row.get("readiness")
     if readiness is not None:
-        contributions.append(("Низкая готовность атмосферы", max(0.0, (100 - readiness) / 100), 0.35))
+        contributions.append(("Низкая готовность атмосферы", min(1.0, max(0.0, (100 - readiness) / 100)), 0.35))
 
     dq = row.get("data_quality")
     if dq is not None:
-        contributions.append(("Низкое качество данных", max(0.0, (100 - dq) / 100), 0.15))
+        contributions.append(("Низкое качество данных", min(1.0, max(0.0, (100 - dq) / 100)), 0.15))
 
-    anomalies = row.get("anomaly_count") or 0.0
-    contributions.append(("Аномалии процесса", min(1.0, anomalies / 5.0), 0.25))
+    anomalies = row.get("anomaly_count")
+    if anomalies is not None:
+        contributions.append(("Аномалии процесса", min(1.0, max(0.0, anomalies / 5.0)), 0.25))
 
-    burn_slope = row.get("burn_slope") or 0.0
+    burn_slope = row.get("burn_slope")
     # Rising burn time (>0) is the degradation direction; scale ~0.5 s/layer → 1.0.
-    contributions.append(("Рост времени прожига", min(1.0, max(0.0, burn_slope) / 0.5), 0.25))
+    if burn_slope is not None:
+        contributions.append(("Рост времени прожига", min(1.0, max(0.0, burn_slope) / 0.5), 0.25))
 
-    total_w = sum(w for _, _, w in contributions) or 1.0
-    risk = sum(r * w for _, r, w in contributions) / total_w
+    observed = sum(value is not None for value in (readiness, anomalies, burn_slope))
+    # Data reliability alone cannot establish anything about a physical defect.
+    total_w = sum(w for _, _, w in contributions)
+    risk = round(sum(r * w for _, r, w in contributions) / total_w, 4) if observed else None
     top = sorted(
         ({"factor": n, "contribution": round(r * w / total_w, 4)} for n, r, w in contributions),
         key=lambda d: -d["contribution"],
     )
-    risk = round(risk, 4)
     return {
         "risk": risk,
-        "grade": _grade(risk),
+        "grade": _grade(risk) if risk is not None else "unknown",
         "method": "heuristic",
-        "top_factors": [t for t in top if t["contribution"] > 0][:4],
+        "top_factors": [t for t in top if t["contribution"] > 0][:4] if observed else [],
         "prediction": PredictionResult(
             value=risk,
             unit="0..1",
             source=PredictionSource.HEURISTIC,
             sample_size=None,
+            warnings=["Недостаточно измерений процесса."] if observed < 3 else [],
             explanation=(
-                "Прозрачная взвешенная эвристика по известным факторам риска — "
-                "обученной модели пока нет или она не прошла кросс-валидацию."
+                "Индекс известных факторов риска, не вероятность брака. "
+                "Обученной модели нет или она не прошла временную проверку."
             ),
         ).to_dict(),
     }

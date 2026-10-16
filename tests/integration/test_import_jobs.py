@@ -19,9 +19,12 @@ from domain.schemas.parsing import (
 from domain.services.import_jobs import (
     confirm_import_job,
     detect_import_candidate,
+    mark_import_job_confirmed,
     persist_parse_results_to_db,
 )
 from profiles.m350.profile import build_registry, get_profile
+from storage.db.session import SessionLocal
+from storage.repositories.import_jobs import ImportJobsRepository
 
 
 def test_detected_import_waits_for_operator_confirmation(tmp_path: Path) -> None:
@@ -73,6 +76,16 @@ def test_confirm_runs_import_analysis_and_report_after_stability(tmp_path: Path)
     os.utime(log, (old, old))
     settings = Settings(file_stability_seconds=0, file_stability_retry_seconds=30)
     job = detect_import_candidate(folder, settings=settings).job
+    mark_import_job_confirmed(job)
+    with SessionLocal() as db:
+        repo = ImportJobsRepository(db)
+        repo.save_import_job(job)
+        db.flush()
+        job = repo.claim_next_import_job(
+            owner_node_id=job.owner_node_id, lease_owner="analysis-test-worker", lease_seconds=3600,
+        )
+        db.commit()
+    assert job is not None
 
     result = confirm_import_job(job, registry=build_registry(), profile=get_profile(), settings=settings)
 

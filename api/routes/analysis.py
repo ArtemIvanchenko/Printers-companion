@@ -217,27 +217,45 @@ def _load_quality_labels(db, *, session_id: str | None = None) -> dict[str, int]
     from analytics.prediction.defect_risk import outcome_to_label
     from domain.models.quality import QualityOutcome
     from domain.models.prints import PrintRecord
+    from domain.services.quality import final_outcome_heads
     labels: dict[str, int] = {}
     statement = (
         select(QualityOutcome, PrintRecord.session_id)
         .outerjoin(PrintRecord, PrintRecord.record_id == QualityOutcome.print_record_id)
-        .order_by(QualityOutcome.timestamp, QualityOutcome.outcome_id)
     )
     if session_id is not None:
-        from sqlalchemy import or_, and_
-        statement = statement.where(or_(QualityOutcome.session_id == session_id,
-                                         and_(QualityOutcome.session_id.is_(None), PrintRecord.session_id == session_id)))
+        from sqlalchemy import or_
+
+        # Bound a single-session read to related full card lineages, including
+        # the existing current-card fallback for pre-link null associations.
+        linked_cards = select(PrintRecord.record_id).where(
+            PrintRecord.session_id == session_id,
+        ).correlate(None)
+        historical_cards = select(QualityOutcome.print_record_id).where(
+            QualityOutcome.session_id == session_id,
+            QualityOutcome.print_record_id.is_not(None),
+        ).correlate(None)
+        statement = statement.where(or_(
+            QualityOutcome.session_id == session_id,
+            QualityOutcome.print_record_id.in_(linked_cards),
+            QualityOutcome.print_record_id.in_(historical_cards),
+        ))
     rows = db.execute(statement).all()
-    for row, card_session_id in rows:
-        if not row.is_final:
+    card_links = {row.outcome_id: card_session_id for row, card_session_id in rows}
+    card_sessions = {row.print_record_id: card_session_id for row, card_session_id in rows
+                     if row.print_record_id}
+    heads = final_outcome_heads([{
+        key: getattr(row, key) for key in ("outcome_id", "print_record_id", "session_id",
+            "is_final", "supersedes_outcome_id", "result")
+    } for row, _ in rows], card_sessions=card_sessions)
+    for row in heads:
+        sid = row.get("session_id") or card_links[row["outcome_id"]]
+        if not sid:
             continue
-        session_id = row.session_id or card_session_id
-        if not session_id:
-            continue
-        lbl = outcome_to_label(row.result)
+        lbl = outcome_to_label(row["result"])
         if lbl is not None:
-            labels[session_id] = lbl  # deterministic latest timestamp wins
-    return labels
+            labels[sid] = lbl
+    return {sid: label for sid, label in labels.items() if session_id is None or sid == session_id}
 
 
 def _training_fingerprint(labelled: list[tuple[dict[str, Any], int]]) -> str:

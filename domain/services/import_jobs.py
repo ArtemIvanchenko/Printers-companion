@@ -1,4 +1,7 @@
+import hashlib
 import logging
+import os
+import shutil
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -11,7 +14,7 @@ from pydantic import BaseModel
 from core.config.settings import Settings, get_settings
 from core.utils.files import iter_source_files, sha256_file
 from domain.enums.common import ImportJobStatus
-from domain.services.ingestion import IngestionService
+from domain.services.ingestion import IngestionService, source_exclusion_reason
 from domain.services.importing.fence import ImportFence, StaleImportLeaseError
 from analytics.prediction.timing_snapshot import PreparedLayerTimings
 from domain.services.session_grouping import SessionGroup, group_files_into_sessions
@@ -36,6 +39,7 @@ from domain.services.importing.contracts import (
     RetryableImportError as RetryableImportError,
 )
 from domain.services.importing.persistence import (
+    checkpoint_import_sources,
     persist_parse_results_to_db as persist_parse_results_to_db,
     _ensure_session_record,
     _flush_event_batch as _flush_event_batch,
@@ -82,6 +86,10 @@ def detect_import_candidate(
             )
         )
         job.audit_trail.append(_audit("await_operator_confirmation", actor="watcher", at=now))
+    else:
+        # Apply the installation's approval policy at registration, not through
+        # a second watcher-only HTTP request. All intake paths share this queue.
+        return mark_import_job_confirmed(job, actor="automatic_policy", now=now)
     return _result(job, notifications)
 
 
@@ -134,7 +142,10 @@ def confirm_import_job(
     job.audit_trail.append(_audit("confirm_requested", actor=actor, at=now))
 
     source_path = Path(job.source_path)
-    stability = check_source_stability(job, source_path, settings=settings, now=now)
+    source_files = sorted(iter_source_files(source_path))
+    stability = check_source_stability(
+        job, source_path, settings=settings, now=now, profile=profile, source_files=source_files,
+    )
     
     if not stability.stable:
         # Check if we've exceeded max retries
@@ -185,19 +196,20 @@ def confirm_import_job(
             settings=settings,
             now=now,
             lease_guard=lease_guard,
+            source_files=source_files,
         )
     except RawArchiveUnavailableError as exc:
-        job.stability_check_attempts += 1
         job.error = str(exc)
         job.updated_at = now
         # A NAS outage is infrastructure downtime, not invalid input.  Keep the
         # owner-affine job and its local source retryable indefinitely; otherwise
         # a weekend outage would silently turn a perfectly valid log batch into
-        # a terminal manual-recovery incident.
+        # a terminal manual-recovery incident. Use the monotonic claim generation
+        # for backoff without spending the separate local-file stability budget.
         retry = min(
             settings.nas_sync_retry_max_seconds,
             settings.nas_sync_retry_min_seconds
-            * (2 ** min(job.stability_check_attempts - 1, 16)),
+            * (2 ** min(max(0, job.lease_generation - 1), 16)),
         )
         job.status = ImportJobStatus.postponed
         job.postponed_until = now + timedelta(seconds=retry)
@@ -209,7 +221,7 @@ def confirm_import_job(
                 details={
                     "error": str(exc),
                     "retry_seconds": retry,
-                    "attempt": job.stability_check_attempts,
+                    "attempt": max(1, job.lease_generation),
                 },
             )
         )
@@ -236,7 +248,7 @@ def mark_import_job_confirmed(
     actor: str = "operator",
     now: datetime | None = None,
 ) -> ImportExecutionResult:
-    """Record operator confirmation without reading raw files.
+    """Record operator or configured automatic approval without reading raw files.
 
     API and agent endpoints use this to preserve the security boundary: only the
     worker has the read-only raw-log mount and performs stability/import work.
@@ -277,6 +289,7 @@ def queue_import_job_retry(
     job.lease_owner = None
     job.lease_until = None
     job.stability_check_attempts = 0
+    job.execution_attempts = 0
     job.session_ids = []
     job.report_ids = []
     job.missing_context_questions = []
@@ -297,15 +310,29 @@ def check_source_stability(
     source_path: Path,
     settings: Settings | None = None,
     now: datetime | None = None,
+    profile: PrinterProfilePlugin | None = None,
+    *,
+    source_files: list[Path] | None = None,
 ) -> StabilityResult:
     settings = settings or get_settings()
     now = now or datetime.now(timezone.utc)
-    snapshot = snapshot_source(source_path)
+    snapshot = snapshot_source(source_path, source_files=source_files)
     job.last_stability_check_at = now
     previous = job.file_snapshot
-    job.file_snapshot = snapshot
+    missing = {
+        name: item for name, item in previous.items()
+        if name not in snapshot and source_exclusion_reason(
+            Path(name).name, size_bytes=item.get("size"), profile=profile,
+        ) is None
+    }
+    # Retain missing accepted inputs across retries, but not intentional policy
+    # exclusions. Present files still get their current size/mtime: additions
+    # and ordinary log appends must be allowed to become stable.
+    job.file_snapshot = {**missing, **snapshot}
     if not snapshot:
         return StabilityResult(stable=False, reason="source_missing_or_empty", snapshot=snapshot)
+    if missing:
+        return StabilityResult(stable=False, reason="source_files_missing", snapshot=snapshot)
     youngest_age = min(now.timestamp() - item["mtime"] for item in snapshot.values())
     if youngest_age < settings.file_stability_seconds:
         return StabilityResult(stable=False, reason="files_too_recent", snapshot=snapshot)
@@ -314,10 +341,14 @@ def check_source_stability(
     return StabilityResult(stable=True, reason="stable", snapshot=snapshot)
 
 
-def snapshot_source(source_path: Path) -> dict[str, dict[str, Any]]:
+def snapshot_source(
+    source_path: Path, *, source_files: list[Path] | None = None,
+) -> dict[str, dict[str, Any]]:
     if not source_path.exists():
         return {}
-    paths = [path for path in iter_source_files(source_path) if path.is_file()]
+    paths = [path for path in (
+        source_files if source_files is not None else iter_source_files(source_path)
+    ) if path.is_file()]
     snapshot: dict[str, dict[str, Any]] = {}
     for path in sorted(paths):
         try:
@@ -331,6 +362,42 @@ def snapshot_source(source_path: Path) -> dict[str, dict[str, Any]]:
     return snapshot
 
 
+def _capture_import_sources(
+    relative_root: Path,
+    target: Path,
+    source_files: list[Path],
+    lease_check: Callable[[], None],
+) -> dict[str, str]:
+    """Copy and hash one owned byte view for raw upload and local computation."""
+    checksums = {}
+    target.mkdir()
+    for path in source_files:
+        lease_check()
+        if path.is_symlink():
+            raise ValueError("Символические ссылки в наборе импорта не разрешены")
+        relative = path.relative_to(relative_root)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        written = 0
+        with path.open("rb") as source, destination.open("xb") as output:
+            captured_stat = os.fstat(source.fileno())
+            if shutil.disk_usage(target).free < captured_stat.st_size + 256 * 1024**2:
+                raise ValueError("Недостаточно места для локальной подготовки исходников")
+            while block := source.read(1024 * 1024):
+                lease_check()
+                written += len(block)
+                if written > captured_stat.st_size:
+                    raise RetryableImportError("Исходный файл вырос во время копирования; импорт будет повторён.")
+                output.write(block)
+                digest.update(block)
+        if written != captured_stat.st_size:
+            raise RetryableImportError("Исходный файл изменился во время копирования; импорт будет повторён.")
+        os.utime(destination, ns=(captured_stat.st_atime_ns, captured_stat.st_mtime_ns))
+        checksums[relative.as_posix()] = digest.hexdigest()
+    return checksums
+
+
 @contextmanager
 def _prepared_import_sources(
     job: ImportJobRecord,
@@ -338,65 +405,97 @@ def _prepared_import_sources(
     settings: Settings,
     now: datetime,
     lease_guard: Callable[[], bool] | None,
-) -> Iterator[tuple[Path, dict[str, str]]]:
-    """Archive before parsing; keep extracted files alive until analysis ends."""
+    fence: ImportFence,
+    profile: PrinterProfilePlugin | None = None,
+    source_files: list[Path] | None = None,
+) -> Iterator[tuple[Path, dict[str, str], dict[str, str]]]:
+    """Archive and analyze the same owned bytes; keep them until analysis ends."""
     source_path = Path(job.source_path)
-    work_root = source_path
     cleanup: tempfile.TemporaryDirectory[str] | None = None
     try:
-        _require_current_lease(lease_guard)
-        # NAS is the durable source of truth, but never the compute node.  The
-        # local worker streams the immutable ZIP before even extracting it. A
-        # folder/file batch is likewise archived before its parser is called.
-        if job.source_kind == "zip":
-            job.source_objects = archive_raw_import(
-                job,
-                source_path,
-                source_path,
-                required=settings.app_env != "test",
-            )
-        else:
-            job.checksum_manifest = calculate_checksum_manifest(work_root)
-            job.source_objects = archive_raw_import(
-                job,
-                work_root,
-                source_path,
-                checksum_manifest=job.checksum_manifest,
-                required=settings.app_env != "test",
-            )
-        archive_members = {}
-        if job.source_kind == "zip" or any(
-            path.suffix.lower() == '.zip'
-            for path in iter_source_files(work_root) if path.is_file()
-        ):
-            from domain.services.log_archives import expand_log_inputs
-
+        try:
+            _require_current_lease(lease_guard)
+            checkpoint_import_sources(fence, job.file_snapshot)
+            single_file = source_path.is_file() or source_files == [source_path]
+            relative_root = source_path.parent if single_file else source_path
+            paths = source_files if source_files is not None else [
+                relative_root / name for name in job.file_snapshot
+            ]
+            selected_paths = [
+                path for path in paths
+                if str(path.relative_to(relative_root)) in job.file_snapshot
+            ]
+            if not selected_paths:
+                raise RetryableImportError("Не зафиксирован доступный набор исходных файлов для импорта.")
+            if source_path.is_symlink() or any(path.is_symlink() for path in paths):
+                raise ValueError("Символические ссылки в наборе импорта не разрешены")
+            selected_paths = [
+                path for path in selected_paths
+                if path.is_file() or source_exclusion_reason(
+                    path.name,
+                    size_bytes=job.file_snapshot[str(path.relative_to(relative_root))].get("size"),
+                    profile=profile,
+                ) is None
+            ]
+            # A checksum of a mutable path does not bind a later ZIP expansion
+            # or parser read to the uploaded object. Capture once, then use only
+            # this private tree for hashing, archive, expansion and analysis.
             cleanup = tempfile.TemporaryDirectory(prefix="printer-log-import-")
-            work_root = Path(cleanup.name)
-            expanded_objects, archive_members, job.checksum_manifest = expand_log_inputs(
-                source_path, work_root, job.source_objects,
-                lease_check=lambda: _require_current_lease(lease_guard),
+            captured_root = Path(cleanup.name) / "source"
+            job.checksum_manifest = _capture_import_sources(
+                relative_root, captured_root, selected_paths,
+                lambda: _require_current_lease(lease_guard),
             )
-            job.source_objects.update(expanded_objects)
-        job.audit_trail.append(
-            _audit(
-                "raw_logs_archived_to_nas",
-                actor="system",
-                at=now,
-                details={"object_count": len(job.source_objects)},
+            captured_paths = [captured_root / name for name in job.checksum_manifest]
+            if not captured_paths:
+                raise RetryableImportError("Зафиксированный набор исходников больше недоступен для импорта.")
+            work_root = captured_paths[0] if single_file else captured_root
+            job.source_objects = archive_raw_import(
+                job, work_root,
+                checksum_manifest=job.checksum_manifest,
+                source_files=captured_paths,
+                required=settings.app_env != "test",
             )
-        )
+            archive_members = {}
+            # The durable job identifies physical intake bytes (also used by
+            # receipts/deduplication). Expansion owns a separate parse manifest;
+            # archive members must not overwrite the batch's upload identity.
+            parse_manifest = job.checksum_manifest
+            if job.source_kind == "zip" or any(
+                path.suffix.lower() == '.zip'
+                for path in selected_paths
+            ):
+                from domain.services.log_archives import expand_log_inputs
 
-        job.audit_trail.append(
-            _audit(
-                "checksums_calculated",
-                actor="system",
-                at=now,
-                details={"file_count": len(job.checksum_manifest)},
+                expanded_root = Path(cleanup.name) / "expanded"
+                expanded_objects, archive_members, parse_manifest = expand_log_inputs(
+                    work_root, expanded_root, job.source_objects,
+                    lease_check=lambda: _require_current_lease(lease_guard),
+                    source_files=captured_paths,
+                )
+                work_root = expanded_root
+                job.source_objects.update(expanded_objects)
+            job.audit_trail.append(
+                _audit(
+                    "raw_logs_archived_to_nas",
+                    actor="system",
+                    at=now,
+                    details={"object_count": len(job.source_objects)},
+                )
             )
-        )
 
-        yield work_root, archive_members
+            job.audit_trail.append(
+                _audit(
+                    "checksums_calculated",
+                    actor="system",
+                    at=now,
+                    details={"file_count": len(parse_manifest)},
+                )
+            )
+
+        except (FileNotFoundError, PermissionError) as exc:
+            raise RetryableImportError(f"Исходный набор недоступен во время подготовки: {exc}") from None
+        yield work_root, archive_members, parse_manifest
     finally:
         if cleanup is not None:
             cleanup.cleanup()
@@ -419,8 +518,16 @@ def _prepare_group_artifacts(
         analysis=analysis,
     )
     overview["timing_publication_id"] = timing_manifest["publication_id"]
+    files = []
+    for file in group.files:
+        saved = file.model_dump(mode="json", exclude={"parse_result"})
+        original_path = file.metadata.get("original_path")
+        if original_path:
+            saved["path"] = original_path
+            saved["classification"]["path"] = original_path
+        files.append(saved)
     payload = {
-        "files": [file.model_dump(mode="json", exclude={"parse_result"}) for file in group.files],
+        "files": files,
         "group": overview,
     }
     report = generate_session_json_report(
@@ -438,27 +545,73 @@ def execute_confirmed_import(
     settings: Settings | None = None,
     now: datetime | None = None,
     lease_guard: Callable[[], bool] | None = None,
+    *,
+    source_files: list[Path] | None = None,
 ) -> ImportExecutionResult:
     settings = settings or get_settings()
     now = now or datetime.now(timezone.utc)
     fence = (ImportFence(job.import_job_id, job.owner_node_id, job.lease_owner, job.lease_generation)
              if job.lease_owner and job.lease_generation > 0 else None)
-    if fence is None and settings.app_env != "test":
+    if fence is None:
         raise StaleImportLeaseError("Импорт должен выполняться через очередь с действующим правом на задание.")
 
     job.status = ImportJobStatus.importing
     job.updated_at = now
+    source_path = Path(job.source_path)
+    original_root = source_path.parent if source_path.is_file() or source_files == [source_path] else source_path
+    has_archive = job.source_kind == "zip" or any(
+        Path(name).suffix.lower() == ".zip" for name in job.file_snapshot
+    )
     with _prepared_import_sources(
         job, settings=settings, now=now, lease_guard=lease_guard,
-    ) as (work_root, archive_members):
-        ingest_result = IngestionService(registry, profile).parse(work_root)
+        fence=fence, profile=profile, source_files=source_files,
+    ) as (work_root, archive_members, parse_manifest):
+        ingestion = IngestionService(registry, profile)
+        ingest_result = ingestion.parse(work_root)
+        relative_root = work_root if work_root.is_dir() else work_root.parent
+        intentional_skips: set[str] = set()
+        for skipped in ingest_result.skipped:
+            if skipped.get("code") == "source_inspection_error":
+                raise RetryableImportError(
+                    "Архивированный набор неполон: исходный лог недоступен при чтении; импорт будет повторён."
+                )
+            if skipped.get("code") == "source_policy_excluded":
+                intentional_skips.add(str(Path(skipped["path"]).relative_to(relative_root)))
+        missing = set(parse_manifest) - {item.relative_path for item in ingest_result.files} - intentional_skips
+        # Name-based exclusions remain intentional even if OS metadata or an
+        # excluded native source disappears before the walker sees it. Size
+        # exclusions require the same verifiable profile policy as normal scan.
+        for relative in sorted(missing):
+            path = relative_root / relative
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            if source_exclusion_reason(path.name, size_bytes=size, profile=profile):
+                intentional_skips.add(relative)
+        missing -= intentional_skips
+        if missing:
+            raise RetryableImportError(
+                "Архивированный набор неполон: исходные логи отсутствуют или недоступны "
+                f"({', '.join(sorted(missing)[:5])}); импорт будет повторён."
+            )
+        if any(item.get("code") == "parse_failed" for item in ingest_result.diagnostics):
+            raise RuntimeError("Parser processing failed; no partial import result was prepared.")
         for item in ingest_result.files:
-            if item.checksum != job.checksum_manifest.get(item.relative_path):
+            if item.checksum != parse_manifest.get(item.relative_path):
                 raise RetryableImportError(
                     "Исходный лог изменился между архивированием и разбором; импорт будет повторён."
                 )
+            if item.parse_result is not None and any(
+                diagnostic.code == "parser_exception" for diagnostic in item.parse_result.diagnostics
+            ):
+                raise RuntimeError(f"Parser processing failed for {item.relative_path}; no partial import result was prepared.")
             if item.relative_path in archive_members:
                 item.metadata['archive_member_path'] = archive_members[item.relative_path]
+            elif not has_archive:
+                # Computation/mirror reads keep the owned path alive. Durable
+                # source and runtime projections retain the original location.
+                item.metadata["original_path"] = str(original_root / item.relative_path)
         _require_current_lease(lease_guard)
         groups = group_files_into_sessions(ingest_result.files)
         sessions: dict[str, dict[str, Any]] = {}
@@ -550,10 +703,13 @@ def execute_confirmed_import(
                        layer_timings=layer_timings, previous_session_tokens=previous_session_tokens)
 
 
-def calculate_checksum_manifest(root: Path) -> dict[str, str]:
+def calculate_checksum_manifest(
+    root: Path, *, source_files: list[Path] | None = None,
+) -> dict[str, str]:
     manifest: dict[str, str] = {}
-    for path in sorted(iter_source_files(root)):
-        if path.is_file():
+    paths = sorted(iter_source_files(root)) if source_files is None else source_files
+    for path in paths:
+        if source_files is not None or path.is_file():
             relative = path.name if root.is_file() else str(path.relative_to(root))
             manifest[relative] = sha256_file(path)
     return manifest
@@ -566,13 +722,15 @@ def archive_raw_import(
     *,
     checksum_manifest: dict[str, str] | None = None,
     required: bool = True,
+    source_files: list[Path] | None = None,
 ) -> dict[str, str]:
-    """Stream a complete immutable raw-log batch to NAS object storage.
+    """Stream an owned raw-log byte view to NAS object storage.
 
     Direct files/folders are stored file-by-file so their ``SourceFile`` rows
     can point to exact objects. A ZIP remains one immutable original archive;
     extracted members are only a local working copy and are not duplicated on
-    the NAS.
+    the NAS. The coordinator captures inputs before calling this IO primitive;
+    its paths must remain unchanged throughout checksum validation and upload.
     """
     from storage.object_store.minio_client import ObjectStore
 
@@ -591,7 +749,8 @@ def archive_raw_import(
         if not archive.is_file():
             raise RuntimeError(f"Raw ZIP source is missing: {archive}")
         try:
-            checksum = sha256_file(archive)
+            checksum = (checksum_manifest[archive.name] if checksum_manifest is not None
+                        else sha256_file(archive))
             return {
                 "__source_archive__": store.put_file_verified(
                     bucket,
@@ -606,7 +765,8 @@ def archive_raw_import(
                 f"NAS rejected raw archive {archive.name}: {exc}"
             ) from exc
 
-    paths = [path for path in sorted(iter_source_files(work_root)) if path.is_file()]
+    paths = (source_files if source_files is not None else
+             [path for path in sorted(iter_source_files(work_root)) if path.is_file()])
     if not paths:
         raise RuntimeError(f"Raw log source is empty: {work_root}")
 

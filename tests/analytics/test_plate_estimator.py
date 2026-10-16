@@ -544,7 +544,8 @@ class TestFittedModelApplication:
         # the separate scoped scan model is usable.
         assert fitted.layer_overhead_ms is None
         assert fitted.layer_overhead_source == "unavailable"
-        assert fitted.machine_cycle_hours == pytest.approx(fitted.print_hours)
+        assert fitted.machine_cycle_hours is None
+        assert fitted.prediction_time_scope == "burn_plus_pour"
         assert any("паспортным скоростям" in w for w in base.warnings)
         assert not any("паспортным скоростям" in w for w in fitted.warnings)
 
@@ -669,13 +670,10 @@ class TestGeometryCache:
         assert len(calls) == 1, "compute_layer_series ran again on an identical cache hit"
         assert cache.saves == 1, "an existing entry must not be rewritten"
 
-        # Snapshot rounding makes a hit non-bit-exact. This tolerance checks
-        # only this box fixture, not a universal sampling or prediction bound.
-        assert second.print_hours == pytest.approx(first.print_hours, rel=1e-3)
+        # The computational cache is exact; only published display snapshots round.
+        assert second.print_hours == first.print_hours
         assert second.layer_count == first.layer_count
-        assert [b.scan_share for b in second.bodies] == pytest.approx(
-            [b.scan_share for b in first.bodies], rel=1e-3,
-        )
+        assert [b.scan_share for b in second.bodies] == [b.scan_share for b in first.bodies]
 
     def test_material_change_alone_still_hits(self, monkeypatch):
         """Material never enters compute_layer_series — a cache hit across a

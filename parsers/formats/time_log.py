@@ -48,7 +48,7 @@ _KEY_TO_EVENT: dict[str, str] = {
 
 class TimeLogParser(BaseParser):
     name = "time_log"
-    version = "0.5.0"
+    version = "0.5.1"
     file_family = SourceFileFamily.time_log
     role = FileRole.secondary
 
@@ -308,6 +308,7 @@ class TimeLogParser(BaseParser):
             else ["ok"],
             metadata={
                 "encoding": encoding,
+                "malformed_rows": malformed,
                 "event_count": len(events),
                 "summary_count": sum(len(rows) for rows in summaries.values()),
                 "detailed_count": sum(len(rows) for rows in details.values()),

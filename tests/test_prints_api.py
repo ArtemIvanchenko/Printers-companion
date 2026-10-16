@@ -566,9 +566,11 @@ class TestPrintFiles:
         assert response.status_code == 200
         body = response.json()
         assert body["file_type"] == "stl"
-        # Object key carries a unique file id and full checksum.
+        # Physical key carries the logical file id, checksum and fresh claim token.
         assert body["object_uri"].startswith(f"s3://stls/{record['record_id']}/")
-        assert body["object_uri"].endswith(body["checksum"])
+        _, checksum, claim_token = body["object_uri"].rsplit("_", 2)
+        assert checksum == body["checksum"]
+        assert len(claim_token) == 32
         assert body["size_bytes"] == 7
 
     def test_upload_support_stl_autoclassified(self, memory_store):
@@ -613,7 +615,7 @@ class TestPrintFiles:
         assert response.status_code == 422
         assert _MemoryObjectStore.storage == {}
 
-    def test_upload_removes_its_object_when_database_publication_fails(
+    def test_upload_retains_its_object_when_database_publication_fails(
         self,
         memory_store,
         monkeypatch,
@@ -630,7 +632,7 @@ class TestPrintFiles:
                 files={"file": ("a.stl", io.BytesIO(b"solid"), "model/stl")},
                 data={"file_type": "stl"},
             )
-        assert _MemoryObjectStore.storage == {}
+        assert list(_MemoryObjectStore.storage.values()) == [b"solid"]
 
     def test_transient_database_failure_keeps_remote_and_local_retry_copy(
         self,
@@ -646,7 +648,10 @@ class TestPrintFiles:
         monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
 
         def fail_insert(self, values):
-            raise OperationalError("INSERT print_record_files", {}, ConnectionError("NAS down"))
+            raise OperationalError(
+                "INSERT print_record_files", {}, ConnectionError("NAS down"),
+                connection_invalidated=True,
+            )
 
         monkeypatch.setattr(PrintsRepository, "add_print_file", fail_insert)
         response = client.post(
@@ -689,7 +694,10 @@ class TestPrintFiles:
         monkeypatch.setattr("api.routes.prints.get_settings", lambda: settings)
 
         def database_down(self, record_id):
-            raise OperationalError("SELECT print_records", {}, ConnectionError("NAS down"))
+            raise OperationalError(
+                "SELECT print_records", {}, ConnectionError("NAS down"),
+                connection_invalidated=True,
+            )
 
         monkeypatch.setattr(PrintsRepository, "get_print_record", database_down)
         response = client.post(

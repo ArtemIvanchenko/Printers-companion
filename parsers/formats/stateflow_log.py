@@ -5,8 +5,9 @@ from domain.enums.common import FileRole, SourceFileFamily
 from domain.schemas.parsing import ParseDiagnosticRecord, ParseResult, StateTransitionDraft
 from parsers.base.base import BaseParser, ParserContext
 from parsers.common.encoding import estimate_encoding, iter_text_lines
+from parsers.common.timeline import TimestampQualityTracker
 from parsers.common.timestamps import date_hint_from_filename, parse_timestamp_token
-from parsers.formats._tables import build_header, coerce_value, reconcile_row_width, split_row
+from parsers.formats._tables import build_header, coerce_value, reconcile_row_width, split_row, table_delimiter
 
 
 SUBSYSTEM_HINTS = {
@@ -23,6 +24,8 @@ SUBSYSTEM_HINTS = {
     "ChamberDoor": "door",
 }
 
+TIMESTAMP_COLUMNS = {"time", "date", "timestamp", "datetime"}
+
 
 def infer_subsystem(changed_columns: list[str]) -> str | None:
     for column in changed_columns:
@@ -34,7 +37,7 @@ def infer_subsystem(changed_columns: list[str]) -> str | None:
 
 class StateFlowLogParser(BaseParser):
     name = "stateflow_log"
-    version = "0.2.0"
+    version = "0.2.3"
     file_family = SourceFileFamily.stateflow_log
     role = FileRole.primary
 
@@ -51,6 +54,8 @@ class StateFlowLogParser(BaseParser):
 
     def parse(self, path: Path, context: ParserContext) -> ParseResult:
         file_size = path.stat().st_size
+        if file_size == 0:
+            return self.empty_result(path, context)
         if file_size > self.MAX_FILE_SIZE_BYTES:
             return ParseResult(
                 parser_name=self.name,
@@ -79,7 +84,17 @@ class StateFlowLogParser(BaseParser):
         encoding = estimate_encoding(path)
         date_hint = date_hint_from_filename(path)
         header: list[str] | None = None
+        delimiter: str | None = None
+        header_signature: list[str] | None = None
+        header_rows = 0
+        date_columns: list[int] = []
+        time_columns: list[int] = []
+        timestamp_columns: list[int] = []
+        timestamp_column_names: set[str] = set()
+        timeline = TimestampQualityTracker()
         previous_state: dict[str, Any] | None = None
+        previous_state_values: list[str] | None = None
+        reusable_state = False
         previous_ts = None
         previous_offset: int | None = None
         raw_sample: str | None = None
@@ -92,7 +107,9 @@ class StateFlowLogParser(BaseParser):
         for line_no, offset, line in iter_text_lines(path, encoding):
             if not line.strip():
                 continue
-            values = split_row(line)
+            if delimiter is None:
+                delimiter = table_delimiter(line)
+            values = split_row(line, delimiter)
             # Stop early: the rest of the file is almost certainly identical rows.
             if row_count >= self.MAX_ROWS:
                 diagnostics.append(
@@ -111,39 +128,79 @@ class StateFlowLogParser(BaseParser):
                 truncated = True
                 break
             if header is None:
-                has_timestamp_column = any(
-                    "time" in value.lower() or "date" in value.lower() for value in values
-                )
+                normalized_columns = [value.strip().lower() for value in values]
+                has_timestamp_column = any(value in TIMESTAMP_COLUMNS for value in normalized_columns)
                 if has_timestamp_column:
                     # Named header row with timestamp column — skip it, use as column names.
                     header = build_header(values)
+                    header_signature = [value.strip() for value in values]
+                    header_rows += 1
+                    date_columns = [i for i, value in enumerate(normalized_columns) if value == "date"]
+                    time_columns = [
+                        i for i, value in enumerate(normalized_columns)
+                        if value in TIMESTAMP_COLUMNS and value != "date"
+                    ]
+                    timestamp_columns = date_columns + time_columns
+                    timestamp_column_names = {header[index] for index in timestamp_columns}
                     continue
                 else:
                     # Headerless file — auto-generate column names and fall through to
                     # treat this line as the first data row.
                     header = [f"col_{index}" for index in range(len(values))]
+            if header_signature is not None and [value.strip() for value in values] == header_signature:
+                header_rows += 1
+                continue
             original_width = len(values)
             values, is_malformed = reconcile_row_width(values, len(header))
             if is_malformed:
                 malformed += 1
-                diagnostics.append(
-                    ParseDiagnosticRecord(
-                        severity="warning",
-                        code="malformed_stateflow_row",
-                        message=f"Expected {len(header)} stateFlow columns, found {original_width}.",
-                        source_line=line_no,
-                        source_offset=offset,
-                        context={"raw": line[:300]},
+                if malformed <= 20:
+                    diagnostics.append(
+                        ParseDiagnosticRecord(
+                            severity="warning",
+                            code="malformed_stateflow_row",
+                            message=f"Expected {len(header)} stateFlow columns, found {original_width}.",
+                            source_line=line_no,
+                            source_offset=offset,
+                            context={"raw": line[:300]},
+                        )
                     )
-                )
             row_count += 1
-            ts, _raw_ts, _uncertainty = parse_timestamp_token(line, date_hint)
+            timestamp_text = (
+                " ".join(values[index].strip() for index in timestamp_columns)
+                if timestamp_columns else line
+            )
+            # A named Date column is explicit input even when empty or corrupt.
+            # Its absence cannot be repaired by the filename's calendar hint.
+            ts, _raw_ts, uncertainty = parse_timestamp_token(
+                timestamp_text, None if date_columns else date_hint,
+            )
+            ts = timeline.add(ts, clock_only=uncertainty > 0)
+            if ts is None and timeline.missing_count <= 20:
+                diagnostics.append(ParseDiagnosticRecord(
+                    severity="warning", code="stateflow_missing_timestamp",
+                    message="stateFlow row has no valid timestamp; retained as state evidence.",
+                    source_line=line_no, source_offset=offset,
+                    context={"raw": line[:500], "raw_timestamp": _raw_ts},
+                ))
+            state_values = [
+                value for column, value in zip(header, values, strict=True)
+                if column not in timestamp_column_names
+            ]
+            if reusable_state and state_values == previous_state_values:
+                # Row/time diagnostics above still cover every observation.
+                # RLE anchors stay at the first row of the unchanged state.
+                continue
             row = {column: coerce_value(value) for column, value in zip(header, values, strict=True)}
             state = {
                 column: value
                 for column, value in row.items()
-                if "time" not in column.lower() and "date" not in column.lower()
+                if column not in timestamp_column_names
             }
+            previous_state_values = state_values
+            # NaN is not equal to itself: repeated raw cells must retain the
+            # existing non-reflexive transition comparison in that case.
+            reusable_state = all(value == value for value in state.values())
             if previous_state is None:
                 previous_state = state
                 previous_ts = ts
@@ -156,7 +213,8 @@ class StateFlowLogParser(BaseParser):
             if changed:
                 duration = None
                 if previous_ts is not None and ts is not None:
-                    duration = max((ts - previous_ts).total_seconds(), 0.0)
+                    delta = (ts - previous_ts).total_seconds()
+                    duration = delta if delta >= 0 else None
                 if not truncated:
                     transitions.append(
                         StateTransitionDraft(
@@ -196,7 +254,24 @@ class StateFlowLogParser(BaseParser):
                 previous_offset = offset
                 raw_sample = line[:500]
 
+        if malformed > 20:
+            diagnostics.append(ParseDiagnosticRecord(
+                severity="warning", code="malformed_stateflow_rows_aggregated",
+                message=f"Suppressed {malformed - 20} additional malformed stateFlow row diagnostics.",
+                context={"total": malformed, "examples_retained": 20},
+            ))
         compression_ratio = (len(transitions) / row_count) if row_count else 0.0
+        if not row_count:
+            diagnostics.append(ParseDiagnosticRecord(
+                severity="info", code="stateflow_no_data_rows",
+                message="stateFlow contains no data rows; preserved as empty evidence.",
+            ))
+        if timeline.missing_count > 20:
+            diagnostics.append(ParseDiagnosticRecord(
+                severity="warning", code="stateflow_missing_timestamps_aggregated",
+                message="Additional stateFlow rows have no valid timestamp.",
+                context={"missing_timestamps": timeline.missing_count, "examples_retained": 20},
+            ))
         if row_count and not transitions:
             diagnostics.append(
                 ParseDiagnosticRecord(
@@ -215,16 +290,22 @@ class StateFlowLogParser(BaseParser):
             transitions=transitions,
             diagnostics=diagnostics,
             data_quality=(
-                (["partial_recovery"] if malformed else [])
+                (["empty"] if not row_count else [])
+                + (["partial_recovery"] if (
+                    malformed or timeline.missing_count or timeline.out_of_order_count
+                ) else [])
                 + (["truncated"] if truncated else [])
             ) or ["ok"],
             metadata={
                 "encoding": encoding,
                 "row_count": row_count,
+                "header_rows": header_rows,
+                "repeated_headers": max(0, header_rows - 1),
                 "transition_count": len(transitions),
                 "compression_ratio": compression_ratio,
                 "streaming": True,
                 "malformed_rows": malformed,
                 "truncated": truncated,
+                **timeline.metadata(),
             },
         )

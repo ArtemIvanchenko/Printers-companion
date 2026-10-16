@@ -15,6 +15,7 @@ const _stlFileBuffers = {}; // session memory: filename → ArrayBuffer
 })();
 let _viewerRenderer = null, _viewerScene = null, _viewerCamera = null;
 let _viewerControls = null, _viewerAnimId = null;
+let _viewerGeneration = 0;
 
 function _getModels() {
     try { return JSON.parse(localStorage.getItem(_MODEL_KEY) || '[]'); } catch { return []; }
@@ -28,6 +29,7 @@ function _saveModelEntry(name, volume_cm3, est_hours, height_mm) {
     if (idx >= 0) models[idx] = entry;
     else models.unshift(entry);
     _setModels(models);
+    return idx >= 0 ? idx : 0;
 }
 
 function loadModelHistory() {
@@ -46,11 +48,11 @@ function loadModelHistory() {
         return `<div class="model-card" onclick="openViewer(${i})">
             <div class="model-thumb">${inMem ? '🔵' : '🧊'}</div>
             <div class="model-info">
-                <div class="model-name" title="${m.name}">${m.name}</div>
+                <div class="model-name" title="${_esc(m.name)}">${_esc(m.name)}</div>
                 <div class="model-meta">
-                    <span>📦 ${m.volume_cm3} см³</span>
-                    ${m.height_mm != null ? `<span>↕ ${m.height_mm} мм</span>` : ''}
-                    <span>⏱️ ~${m.est_hours} ч</span>
+                    <span>📦 ${_esc(m.volume_cm3)} см³</span>
+                    ${m.height_mm != null ? `<span>↕ ${_esc(m.height_mm)} мм</span>` : ''}
+                    <span>⏱️ ~${_esc(typeof m.est_hours === 'number' ? Number(m.est_hours.toFixed(3)) : m.est_hours)} ч</span>
                     <span>${date}</span>
                 </div>
             </div>
@@ -60,25 +62,34 @@ function loadModelHistory() {
 
 async function addModelFromFile(file) {
     if (!file) return;
-    const buf = await file.arrayBuffer();
+    const generation = ++_viewerGeneration;
+    let buf;
+    try { buf = await file.arrayBuffer(); }
+    catch (error) {
+        if (generation === _viewerGeneration) {
+            _beginViewer(file.name);
+            _viewerError(error);
+        }
+        return;
+    }
     _stlFileBuffers[file.name] = buf;
     const fd = new FormData();
     fd.append('file', file);
+    let index;
     try {
         const url = new URL('/upload/stl-estimate', location.origin);
         const r = await fetch(url, { method: 'POST', body: fd });
+        if (!r.ok) throw new Error(r.status);
         const d = await r.json();
         const _estH = (d.prediction?.available && d.prediction?.print_hours != null)
             ? d.prediction.print_hours
-            : d.estimate?.avg_session_hours;
-        _saveModelEntry(file.name, d.volume_cm3, _estH, d.prediction?.height_mm ?? null);
-        loadModelHistory();
-        openViewer(0);
+            : null;
+        index = _saveModelEntry(file.name, d.volume_cm3, _estH, d.prediction?.height_mm ?? null);
     } catch(e) {
-        _saveModelEntry(file.name, '?', '?');
-        loadModelHistory();
-        openViewer(0);
+        index = _saveModelEntry(file.name, '?', '?');
     }
+    loadModelHistory();
+    if (generation === _viewerGeneration) openViewer(index);
 }
 
 function clearModelHistory() {
@@ -92,21 +103,16 @@ function openViewer(idx) {
     const m = models[idx];
     if (!m) return;
 
-    document.getElementById('viewer-title').textContent = m.name;
+    _beginViewer(m.name);
     document.getElementById('viewer-meta').innerHTML =
-        `<span>📦 ${m.volume_cm3} см³</span>` +
-        `<span>⏱️ ~${m.est_hours} ч</span>` +
+        `<span>📦 ${_esc(m.volume_cm3)} см³</span>` +
+        `<span>⏱️ ~${_esc(typeof m.est_hours === 'number' ? Number(m.est_hours.toFixed(3)) : m.est_hours)} ч</span>` +
         `<span style="color:#4a5568;">${new Date(m.added_at).toLocaleString('ru')}</span>`;
-
-    _lastDialogTrigger = document.activeElement;
-    document.getElementById('viewer-overlay').classList.add('open');
-    document.querySelector('#viewer-overlay .icon-btn')?.focus();
 
     const buf = _stlFileBuffers[m.name];
     const wrap = document.getElementById('viewer-canvas-wrap');
     if (buf) {
-        wrap.innerHTML = '<canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>';
-        _initThreeViewer(buf);
+        _showViewerBuffer(buf);
     } else {
         wrap.innerHTML = `
             <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;color:#6b7280;">
@@ -123,18 +129,62 @@ function openViewer(idx) {
 
 async function _reloadForViewer(file) {
     if (!file) return;
-    const buf = await file.arrayBuffer();
-    _stlFileBuffers[file.name] = buf;
-    const wrap = document.getElementById('viewer-canvas-wrap');
-    wrap.innerHTML = '<canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>';
-    _initThreeViewer(buf);
+    const generation = _beginViewer(file.name);
+    try {
+        const buf = await file.arrayBuffer();
+        _stlFileBuffers[file.name] = buf;
+        if (generation === _viewerGeneration) _showViewerBuffer(buf);
+    } catch (error) {
+        if (generation === _viewerGeneration) _viewerError(error);
+    }
+}
+
+function _beginViewer(name) {
+    ++_viewerGeneration;
+    _disposeViewer();
+    const overlay = document.getElementById('viewer-overlay');
+    if (!overlay.classList.contains('open')) _lastDialogTrigger = document.activeElement;
+    document.getElementById('viewer-title').textContent = name;
+    document.getElementById('viewer-meta').innerHTML = '';
+    document.getElementById('viewer-canvas-wrap').innerHTML = '<div class="pc-empty">Загрузка…</div>';
+    overlay.classList.add('open');
+    document.querySelector('#viewer-overlay .icon-btn')?.focus();
+    return _viewerGeneration;
+}
+
+function _disposeViewer() {
+    if (_viewerAnimId != null) cancelAnimationFrame(_viewerAnimId);
+    _viewerAnimId = null;
+    _viewerControls?.dispose();
+    _viewerControls = null;
+    _viewerScene?.traverse(object => {
+        object.geometry?.dispose();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        materials.forEach(material => material?.dispose());
+    });
+    _viewerScene = null;
+    _viewerCamera = null;
+    _viewerRenderer?.dispose();
+    _viewerRenderer = null;
+}
+
+function _viewerError(error) {
+    _disposeViewer();
+    document.getElementById('viewer-canvas-wrap').innerHTML =
+        `<div class="pc-empty">Не удалось открыть модель: ${_esc(error.message)}</div>`;
+}
+
+function _showViewerBuffer(buf) {
+    document.getElementById('viewer-canvas-wrap').innerHTML = '<canvas id="viewer-canvas" style="width:100%;height:100%;display:block;"></canvas>';
+    try { _initThreeViewer(buf); }
+    catch (error) { _viewerError(error); }
 }
 
 function closeViewer(e) {
     if (e && e.target !== document.getElementById('viewer-overlay')) return;
+    ++_viewerGeneration;
     document.getElementById('viewer-overlay').classList.remove('open');
-    if (_viewerAnimId) { cancelAnimationFrame(_viewerAnimId); _viewerAnimId = null; }
-    if (_viewerRenderer) { _viewerRenderer.dispose(); _viewerRenderer = null; }
+    _disposeViewer();
     _lastDialogTrigger?.focus?.();
     _lastDialogTrigger = null;
 }
@@ -152,6 +202,7 @@ function _initThreeViewer(buf) {
 
     // Scene + lighting
     const scene = new THREE.Scene();
+    _viewerScene = scene;
     scene.background = new THREE.Color(0x0f1419);
     scene.add(new THREE.AmbientLight(0xffffff, 0.45));
     const sun = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -163,6 +214,7 @@ function _initThreeViewer(buf) {
 
     // Camera
     const camera = new THREE.PerspectiveCamera(45, W / H, 0.001, 100000);
+    _viewerCamera = camera;
 
     // Renderer
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });

@@ -8,7 +8,7 @@ breaks on a real upgrade. Run this against a database already migrated to head.
 
 Usage:
     DATABASE_URL=postgresql+psycopg://... alembic upgrade head
-    DATABASE_URL=postgresql+psycopg://... python scripts/check_migration_drift.py
+    DATABASE_URL=postgresql+psycopg://... python -m scripts.check_migration_drift
 """
 from __future__ import annotations
 

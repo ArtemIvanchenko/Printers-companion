@@ -9,6 +9,12 @@ Each operation lives in one directory and moves atomically between ``pending``,
 the directory becomes visible to a consumer.  A deterministic operation id
 makes retrying the same record/content pair idempotent on one workstation; the
 database's unique ``(record_id, checksum)`` index is the cross-workstation fence.
+Each new immutable manifest gets an opaque attachment lifetime id; retries keep
+the persisted id, and an explicitly reopened completed operation gets a new id.
+An opaque local claim token fences queue mutations and short SQL publication.
+Each claim gets a fresh physical object key: an old exact-URI deletion cannot
+delete a later transfer of the same logical operation. Physical transfer may
+finish after a lost claim; implicit orphan/duplicate objects are retained.
 """
 
 from __future__ import annotations
@@ -48,6 +54,10 @@ class OutboxFullError(RuntimeError):
 
 class OutboxIntegrityError(RuntimeError):
     """A queued payload does not match the immutable manifest."""
+
+
+class StaleOutboxClaimError(RuntimeError):
+    """This local operation has been reclaimed or completed by another process."""
 
 
 def _utc_now() -> str:
@@ -127,25 +137,28 @@ class LocalNasOutbox:
 
     def _cleanup_completed_payloads_locked(self) -> None:
         """Finish payload reclamation if power failed after receipt creation."""
-        for receipt in (self.root / "completed").glob("*.json"):
-            operation_id = receipt.stem
-            if not _OPERATION_ID.fullmatch(operation_id):
-                continue
-            try:
-                manifest = self._read_json(receipt)
-            except (OSError, ValueError, json.JSONDecodeError):
-                continue
-            if (
-                manifest.get("operation_id") != operation_id
-                or not manifest.get("completed_at")
-                or not isinstance(manifest.get("result"), dict)
-            ):
-                continue
-            for state in _STATES:
-                leftover = self.root / state / operation_id
-                if leftover.is_dir():
-                    shutil.rmtree(leftover)
-                    self._fsync_directory(leftover.parent)
+        # Most receipts have no remaining payload. Never re-read the whole
+        # workstation's completed history on every queue lock/heartbeat.
+        for state in _STATES:
+            for leftover in (self.root / state).iterdir():
+                operation_id = leftover.name
+                if not leftover.is_dir() or not _OPERATION_ID.fullmatch(operation_id):
+                    continue
+                receipt = self.root / "completed" / f"{operation_id}.json"
+                if not receipt.is_file():
+                    continue
+                try:
+                    manifest = self._read_json(receipt)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+                if (
+                    manifest.get("operation_id") != operation_id
+                    or not manifest.get("completed_at")
+                    or not isinstance(manifest.get("result"), dict)
+                ):
+                    continue
+                shutil.rmtree(leftover)
+                self._fsync_directory(leftover.parent)
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -304,9 +317,12 @@ class LocalNasOutbox:
                 state, path = located
                 if state == "completed" and reopen_completed:
                     # PostgreSQL is authoritative. A receipt without the row can
-                    # happen after a database restore; rebuild the transport
-                    # operation from the caller's still-available source.
+                    # happen after deletion or a database restore; admit a new
+                    # attachment lifetime from the caller's available source.
                     path.unlink(missing_ok=True)
+                    # Otherwise a crash can resurrect the old receipt beside
+                    # the newly accepted payload, and recovery would reclaim it.
+                    self._fsync_directory(path.parent)
                     located = None
                 else:
                     manifest_path = path if state == "completed" else path / "manifest.json"
@@ -330,7 +346,7 @@ class LocalNasOutbox:
                     raise OutboxIntegrityError(
                         "Staged attachment changed while entering the NAS outbox"
                     )
-                file_id = f"prf_sync_{operation_id[:48]}"
+                file_id = f"prf_sync_{uuid.uuid4().hex}"
                 now = _utc_now()
                 manifest = {
                     "schema_version": 1,
@@ -373,6 +389,7 @@ class LocalNasOutbox:
             if claimed_at and now - claimed_at < self.claim_seconds:
                 continue
             manifest["claimed_at"] = None
+            manifest["claim_token"] = None
             manifest["updated_at"] = _utc_now()
             manifest["last_error"] = "Local sync process stopped before completion"
             self._write_json(item / "manifest.json", manifest)
@@ -431,35 +448,86 @@ class LocalNasOutbox:
                 target = self.root / "processing" / item.name
                 self._replace(item, target)
                 manifest["claimed_at"] = _utc_now()
+                manifest["claim_token"] = uuid.uuid4().hex
+                if manifest.get("kind") == "print_attachment":
+                    try:
+                        manifest["object_name"] = (
+                            f"{manifest['record_id']}/{manifest['file_id']}_"
+                            f"{manifest['checksum']}_{manifest['claim_token']}"
+                        )
+                    except KeyError as exc:
+                        self._quarantine_corrupt_locked(target, exc)
+                        continue
                 manifest["updated_at"] = manifest["claimed_at"]
                 self._write_json(target / "manifest.json", manifest)
                 return {**manifest, "payload_path": str(target / "payload")}
         return None
 
+    def _current_claim_locked(
+        self, operation_id: str, claim_token: str | None,
+    ) -> tuple[Path, dict[str, Any]]:
+        if not _OPERATION_ID.fullmatch(operation_id):
+            raise ValueError("Invalid NAS outbox operation id")
+        item = self.root / "processing" / operation_id
+        if not claim_token or not item.is_dir():
+            raise StaleOutboxClaimError("NAS outbox claim is no longer current")
+        manifest = self._read_json(item / "manifest.json")
+        if manifest.get("claim_token") != claim_token:
+            raise StaleOutboxClaimError("NAS outbox claim was replaced")
+        return item, manifest
+
+    @contextmanager
+    def publication_guard(self, item: dict[str, Any]) -> Iterator[None]:
+        """Pin the current claim across short SQL publication/commit, never transfer.
+
+        claimed_at is crash-recovery TTL, not a hard upload deadline. Recovery
+        invalidates the token under this same lock, so it cannot replace a
+        publisher during its short transaction. Receipt CAS may follow outside
+        this guard: if reclaimed in that gap, the next claimant confirms SQL.
+        """
+        with self._locked():
+            self._current_claim_locked(str(item["operation_id"]), item.get("claim_token"))
+            yield
+
     def verify_claimed(self, item: dict[str, Any]) -> Path:
-        payload = Path(str(item["payload_path"]))
+        operation_id = str(item["operation_id"])
+        claim_token = item.get("claim_token")
+        with self._locked():
+            directory, _ = self._current_claim_locked(operation_id, claim_token)
+            payload = directory / "payload"
+            try:
+                # Open the current inode while fenced, not a cached path that
+                # might now point at a replacement claim or reopened intent.
+                stream = payload.open("rb")
+            except OSError as exc:
+                raise OutboxIntegrityError(f"Queued payload is unreadable: {exc}") from exc
         digest = hashlib.sha256()
         size = 0
+        read_error = None
         try:
-            with payload.open("rb") as stream:
+            with stream:
                 while chunk := stream.read(1024 * 1024):
                     digest.update(chunk)
                     size += len(chunk)
         except OSError as exc:
-            raise OutboxIntegrityError(f"Queued payload is unreadable: {exc}") from exc
+            read_error = exc
+        with self._locked():
+            self._current_claim_locked(operation_id, claim_token)
+        if read_error is not None:
+            raise OutboxIntegrityError(f"Queued payload is unreadable: {read_error}") from read_error
         if size != int(item["size_bytes"]) or digest.hexdigest() != item["checksum"]:
             raise OutboxIntegrityError("Queued payload checksum/size mismatch")
         return payload
 
-    def release(self, operation_id: str, error: str) -> None:
-        """Return a claimed item to pending with bounded exponential backoff."""
+    def release(self, operation_id: str, error: str, *, claim_token: str) -> bool:
+        """Back off the current claim; a replaced token is an unchanged False."""
         if not _OPERATION_ID.fullmatch(operation_id):
             raise ValueError("Invalid NAS outbox operation id")
         with self._locked():
-            item = self.root / "processing" / operation_id
-            if not item.is_dir():
-                return
-            manifest = self._read_json(item / "manifest.json")
+            try:
+                item, manifest = self._current_claim_locked(operation_id, claim_token)
+            except StaleOutboxClaimError:
+                return False
             attempts = int(manifest.get("attempts") or 0) + 1
             delay = min(
                 self.retry_max_seconds,
@@ -468,6 +536,7 @@ class LocalNasOutbox:
             manifest.update({
                 "attempts": attempts,
                 "claimed_at": None,
+                "claim_token": None,
                 "updated_at": _utc_now(),
                 "next_attempt_at": datetime.fromtimestamp(
                     time.time() + delay, timezone.utc
@@ -476,35 +545,39 @@ class LocalNasOutbox:
             })
             self._write_json(item / "manifest.json", manifest)
             self._replace(item, self.root / "pending" / operation_id)
+            return True
 
-    def fail(self, operation_id: str, error: str) -> None:
-        """Quarantine a permanent conflict/corrupt payload for operator review."""
+    def fail(self, operation_id: str, error: str, *, claim_token: str) -> bool:
+        """Quarantine the current claim, preserving bytes; stale tokens return False."""
         if not _OPERATION_ID.fullmatch(operation_id):
             raise ValueError("Invalid NAS outbox operation id")
         with self._locked():
-            item = self.root / "processing" / operation_id
-            if not item.is_dir():
-                return
-            manifest = self._read_json(item / "manifest.json")
+            try:
+                item, manifest = self._current_claim_locked(operation_id, claim_token)
+            except StaleOutboxClaimError:
+                return False
             manifest.update({
                 "claimed_at": None,
+                "claim_token": None,
                 "updated_at": _utc_now(),
                 "last_error": str(error)[:1000],
             })
             self._write_json(item / "manifest.json", manifest)
             self._replace(item, self.root / "failed" / operation_id)
+            return True
 
-    def complete(self, operation_id: str, result: dict[str, Any]) -> None:
-        """Write a small durable receipt, then reclaim the large local payload."""
+    def complete(self, operation_id: str, result: dict[str, Any], *, claim_token: str) -> bool:
+        """Receipt then reclaim current bytes; a stale token never confirms success."""
         if not _OPERATION_ID.fullmatch(operation_id):
             raise ValueError("Invalid NAS outbox operation id")
         with self._locked():
-            item = self.root / "processing" / operation_id
-            if not item.is_dir():
-                return
-            manifest = self._read_json(item / "manifest.json")
+            try:
+                item, manifest = self._current_claim_locked(operation_id, claim_token)
+            except StaleOutboxClaimError:
+                return False
             manifest.update({
                 "claimed_at": None,
+                "claim_token": None,
                 "updated_at": _utc_now(),
                 "completed_at": _utc_now(),
                 "last_error": None,
@@ -516,6 +589,7 @@ class LocalNasOutbox:
             )
             shutil.rmtree(item)
             self._fsync_directory(item.parent)
+            return True
 
     def retry_failed(self, operation_id: str) -> bool:
         if not _OPERATION_ID.fullmatch(operation_id):

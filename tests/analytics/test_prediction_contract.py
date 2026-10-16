@@ -12,7 +12,7 @@ from analytics.prediction.contract import PredictionResult, PredictionSource
 from analytics.prediction.cost_estimator import estimate_cost
 from analytics.prediction.defect_risk import predict_defect_risk, train_defect_model
 from analytics.prediction.maintenance import MIN_SESSIONS, forecast_maintenance
-from analytics.prediction.print_time import estimate_print_time
+from analytics.prediction.print_time import build_time_prediction, estimate_print_time
 from analytics.prediction.stl_slicer import slice_stl
 
 CUBE_STL = trimesh.creation.box(extents=[10, 10, 10]).export(file_type="stl")
@@ -46,6 +46,18 @@ class TestPredictionResultContract:
 
 
 class TestPrintTimePrediction:
+    @pytest.mark.parametrize("factor", [1.0, 1.2])
+    def test_plain_settings_do_not_claim_a_training_history_or_passport(self, factor):
+        result = build_time_prediction(
+            print_hours=2, correction_factor=factor, scan_source="physics",
+            recoat_source="manual", fitted_model=None, warnings=[],
+        )
+        assert result.sample_size is None
+        assert "заданным скоростям" in result.explanation
+        assert "выученным" not in result.explanation
+        assert "нет истории" not in result.explanation
+        assert "паспортным" not in result.explanation
+
     def test_uncalibrated_physics_is_calculated(self):
         slices = slice_stl(CUBE_STL, 0.05)
         est = estimate_print_time(slices, BASE_PARAMS, "steel", stl_bytes=CUBE_STL)
@@ -100,12 +112,13 @@ class TestCostPrediction:
         assert cost.prediction.source == PredictionSource.CALCULATED
         assert cost.prediction.value == pytest.approx(cost.total_rub)
 
-    def test_cost_prediction_warns_on_uncalibrated_time(self):
+    def test_cost_prediction_warns_when_full_cycle_is_unknown(self):
         params = self._params()  # без time_correction_by_mat → физика без калибровки
         slices = slice_stl(CUBE_STL, 0.05)
         time_est = estimate_print_time(slices, params, "steel", stl_bytes=CUBE_STL)
         cost = estimate_cost(slices, params, "steel", time_est)
-        assert any("некалиброванному" in w for w in cost.prediction.warnings)
+        assert "фильтр" not in cost.breakdown
+        assert any("полный цикл" in w for w in cost.prediction.warnings)
 
     def test_cost_prediction_no_warning_when_time_calibrated(self):
         params = self._params(time_correction_by_mat={"steel": 1.1})

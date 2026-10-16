@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from core.config.settings import get_settings
+from domain.models.jobs import BackgroundJob
 from domain.models.prints import PrintRecordFile
 from domain.services.estimation.inputs import require_local_print
 from domain.services.estimation.requests import enqueue_estimate
@@ -28,10 +29,10 @@ from domain.services.print_cards.contracts import (
     DownloadResult,
 )
 from parsers.common.timestamps import date_hint_datetime
-from storage.db.session import session_scope
+from storage.db.session import is_database_unavailable, session_scope
 from storage.object_store.minio_client import ObjectStore
-from storage.repositories.prints_repo import PrintsRepository
-from storage.sync.local_outbox import LocalNasOutbox, OutboxFullError
+from storage.repositories.prints_repo import PrintsRepository, lock_estimation_configuration
+from storage.sync.local_outbox import LocalNasOutbox, OutboxFullError, StaleOutboxClaimError
 
 logger = logging.getLogger(__name__)
 FILE_TYPES = {"stl", "stl_supports", "magics", "photo", "doc"}
@@ -97,6 +98,10 @@ def publish_object(store, item: dict, payload: Path) -> str:
 
 def publish_attachment(repo: PrintsRepository, item: dict, object_uri: str) -> dict:
     """Fresh parent state + attachment + optional estimate in one transaction."""
+    # Use the shared configuration -> card order before reading queue inputs.
+    # On SQLite this also starts the physical outer transaction, so releasing
+    # add_print_file's savepoint cannot commit the file ahead of its request.
+    lock_estimation_configuration(repo.db)
     record = validate_attachment_record(item, repo, for_update=True)
     saved = repo.add_print_file(
         {
@@ -117,9 +122,22 @@ def publish_attachment(repo: PrintsRepository, item: dict, object_uri: str) -> d
         hint = date_hint_datetime(str(item["file_name"]))
         if hint:
             repo.update_print_record(item["record_id"], {"printed_at": hint})
-    if item["file_type"] in GEOMETRY_TYPES:
+    # Every new attachment advances the card revision. Keep an already
+    # accepted estimate alive at that fresh revision even when the next file
+    # is a photo/document; its older request remains fenced against publication.
+    # A foreign PC may attach these files, but computation stays with the card.
+    estimate_requested = item["file_type"] in GEOMETRY_TYPES or repo.db.scalar(
+        select(BackgroundJob.job_id).where(
+            BackgroundJob.job_type == "print_estimate",
+            BackgroundJob.entity_type == "print_record",
+            BackgroundJob.entity_id == item["record_id"],
+            BackgroundJob.owner_node_id == record["origin_compute_node_id"],
+            BackgroundJob.status.in_(("pending", "running")),
+        ).limit(1)
+    ) is not None
+    if estimate_requested:
         current = repo.get_print_record(item["record_id"])
-        enqueue_estimate(repo, current, compute_node_id=str(item["owner_node_id"]))
+        enqueue_estimate(repo, current, compute_node_id=str(current["origin_compute_node_id"]))
     return saved
 
 
@@ -168,6 +186,8 @@ def upload_attachment(
             )
             existing = repo.find_file_by_checksum(record_id, checksum)
         except SQLAlchemyError as exc:
+            if not is_database_unavailable(exc):
+                raise
             # A card may already be open when the NAS goes offline. Keep a
             # durable local copy; publication revalidates existence/ownership.
             logger.warning("PostgreSQL unavailable during upload pre-check: %s", exc)
@@ -223,40 +243,53 @@ def upload_attachment(
     claimed = outbox.claim(operation_id)
     if claimed is None:
         return postponed("Файл уже находится в локальной очереди синхронизации")
+    claim_token = claimed["claim_token"]
     try:
         queued_path = outbox.verify_claimed(claimed)
         store = store_factory()
         if not store.is_available():
-            outbox.release(operation_id, "Хранилище файлов MinIO недоступно")
+            outbox.release(operation_id, "Хранилище файлов MinIO недоступно", claim_token=claim_token)
             return postponed(
                 "NAS недоступен: файл сохранён на этом ПК и будет отправлен автоматически"
             )
         object_uri = publish_object(store, claimed, queued_path)
+    except StaleOutboxClaimError:
+        return postponed("Синхронизацию файла уже продолжает другой локальный процесс")
     except Exception as exc:
-        outbox.release(operation_id, str(exc))
+        outbox.release(operation_id, str(exc), claim_token=claim_token)
         logger.warning("upload queued after MinIO failure: %s", exc)
         return postponed(
             "Передача на NAS прервалась: локальная копия сохранена и будет отправлена повторно"
         )
 
     try:
-        saved = publish_attachment(repo, claimed, object_uri)
-        repo.db.commit()
+        with outbox.publication_guard(claimed):
+            saved = publish_attachment(repo, claimed, object_uri)
+            repo.db.commit()
+    except StaleOutboxClaimError:
+        repo.db.rollback()
+        return postponed("Синхронизацию файла уже продолжает другой локальный процесс")
     except SQLAlchemyError as exc:
         repo.db.rollback()
-        outbox.release(operation_id, str(exc))
+        if not is_database_unavailable(exc):
+            # Preserve both copies for operator review; SQL bugs must not be
+            # acknowledged as successful admission to an automatic NAS retry.
+            outbox.fail(operation_id, str(exc), claim_token=claim_token)
+            raise
+        outbox.release(operation_id, str(exc), claim_token=claim_token)
         logger.warning("database publication postponed: %s", exc)
         return postponed(
             "База NAS временно недоступна: файл сохранён локально и будет опубликован автоматически"
         )
     except Exception as exc:
         repo.db.rollback()
-        outbox.fail(operation_id, str(exc))
-        remove_unreferenced_objects([object_uri], store_factory=lambda: store)
+        outbox.fail(operation_id, str(exc), claim_token=claim_token)
         raise
-    if saved.get("duplicate") and saved["object_uri"] != object_uri:
-        remove_unreferenced_objects([object_uri], store_factory=lambda: store)
-    outbox.complete(operation_id, saved)
+    # Each claim uses a fresh physical URI, but may finish transfer after losing
+    # ownership. Retain implicit failed/duplicate objects; only explicit
+    # attachment/card deletion uses the separate reference-checked cleanup.
+    if not outbox.complete(operation_id, saved, claim_token=claim_token):
+        return postponed("Публикацию файла подтверждает другой локальный процесс")
     logger.info("attached %s (%s, %d bytes) to %s", file_name, file_type, size_bytes, record_id)
     return AttachmentResult(saved)
 

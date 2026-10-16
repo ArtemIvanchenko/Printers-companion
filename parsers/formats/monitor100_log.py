@@ -183,7 +183,7 @@ def _classify_entry_legacy(entry: str, raw_ts: str) -> tuple[str, dict]:
 
 class Monitor100LogParser(BaseParser):
     name = "monitor100_log"
-    version = "0.4.0"
+    version = "0.4.4"
     file_family = SourceFileFamily.monitor100_log
     role = FileRole.primary
 
@@ -208,7 +208,7 @@ class Monitor100LogParser(BaseParser):
 
             for entry in entries:
                 ts, raw_ts, uncertainty = parse_timestamp_token(entry, date_hint)
-                ts = timeline.add(ts)
+                ts = timeline.add(ts, clock_only=uncertainty > 0)
                 # Try firmware record and marker formats first, then legacy CODE=value.
                 event_type, payload = _classify_entry(entry, raw_ts or "")
                 if event_type == "monitor_transition":
@@ -317,7 +317,8 @@ class Monitor100LogParser(BaseParser):
             events=events,
             diagnostics=diagnostics,
             data_quality=["partial_recovery"] if (
-                glued_count or timeline.missing_count or unstructured_count or truncated_count
+                glued_count or timeline.missing_count or timeline.out_of_order_count
+                or unstructured_count or truncated_count or recovered_prefix_count
             ) else ["ok"],
             metadata={
                 "encoding": encoding,

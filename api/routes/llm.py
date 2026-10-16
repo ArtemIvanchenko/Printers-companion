@@ -60,7 +60,7 @@ def llm_providers() -> list[dict]:
 
 
 @reports_router.get("/{report_id}")
-def get_report(report_id: str, db: Session = Depends(get_db)) -> dict:
+def get_report(report_id: str, db: Session = Depends(get_db, scope="function")) -> dict:
     try:
         return session_reports.read_report_by_id(db, report_id)
     except session_reports.SessionReportError as exc:
@@ -76,7 +76,7 @@ def _report_error(exc: session_reports.SessionReportError) -> HTTPException:
 @reports_router.post("/{report_id}/llm-enhance")
 async def llm_enhance_report(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ) -> dict:
     try:
         return await session_reports.enhance_report(db, report_id,

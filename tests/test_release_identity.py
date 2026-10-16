@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tomllib
 
 import pytest
 import yaml
@@ -27,6 +28,11 @@ def release_repo(tmp_path):
     shutil.copy2(ROOT / "release.sh", repo / "release.sh")
     (repo / "VERSION").write_text("1.0.0\n")
     (repo / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n')
+    (repo / "desktop").mkdir()
+    (repo / "desktop/package.json").write_text('{"version": "1.0.0"}\n')
+    (repo / "desktop/package-lock.json").write_text(
+        '{"version": "1.0.0", "packages": {"": {"version": "1.0.0"}}}\n',
+    )
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "test@example.invalid")
     git(repo, "config", "user.name", "Release test")
@@ -198,8 +204,10 @@ def test_operator_installers_are_bound_to_images_and_release_waits_for_native_ch
     assert '--images' in resources['run'] and '--development' in resources['run']
 
 
-def test_desktop_package_metadata_matches_application_version():
+def test_package_metadata_matches_application_version():
     version = (ROOT / 'VERSION').read_text().strip()
+    project = tomllib.loads((ROOT / 'pyproject.toml').read_text())
     package = json.loads((ROOT / 'desktop/package.json').read_text())
     lock = json.loads((ROOT / 'desktop/package-lock.json').read_text())
-    assert package['version'] == lock['version'] == lock['packages']['']['version'] == version
+    assert (project['project']['version'] == package['version'] == lock['version']
+            == lock['packages']['']['version'] == version)

@@ -80,19 +80,15 @@ def publish_estimate(
         lease_owner=lease_owner,
         lease_generation=lease_generation,
     )
-    claimed = _require_lease(db, **fence)
-    if (claimed.payload_json or {}).get("record_revision") != prepared["record"]["revision"]:
-        raise EstimateError("stale_inputs", "Задание относится к другой версии карточки.")
     # Configuration -> linked session -> card is the common publication order.
     # The configuration guard also fences default-preset insertion/deletion.
     lock_estimation_configuration(db)
     sid = prepared["record"].get("session_id")
     if sid:
         db.execute(
-            select(BuildSession)
+            select(BuildSession.session_id)
             .where(BuildSession.session_id == sid)
             .with_for_update()
-            .execution_options(populate_existing=True)
         ).all()
     db.execute(
         select(PrintRecord)
@@ -100,6 +96,11 @@ def publish_estimate(
         .with_for_update()
         .execution_options(populate_existing=True)
     ).all()
+    # Take the job lock last too. Locking it before the configuration row
+    # reverses the order used by other accepted-request transitions.
+    claimed = _require_lease(db, **fence)
+    if (claimed.payload_json or {}).get("record_revision") != prepared["record"]["revision"]:
+        raise EstimateError("stale_inputs", "Задание относится к другой версии карточки.")
     repo = PrintsRepository(db)
     current = prepare_prediction_inputs(repo, record_id, compute_node_id=owner_node_id)
     expected_hash = prediction_input_hash(prepared)

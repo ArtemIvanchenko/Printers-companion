@@ -85,7 +85,7 @@ def test_spans_share_one_raw_pass_but_keep_distinct_print_and_burn_windows():
     spans = compute_session_spans([monitor, source])
     assert spans == (
         (datetime(2026, 3, 23, 22), datetime(2026, 3, 24, 1)),
-        (datetime(2026, 3, 23, 23), datetime(2026, 3, 24, 0)),
+        (datetime(2026, 3, 23, 23, 30), datetime(2026, 3, 24, 0)),
     )
     assert source == original
 
@@ -100,6 +100,45 @@ def test_burn_span_needs_distinct_timestamped_events(copies):
     print_span, burn_span = compute_session_spans([source])
     assert print_span == ((timestamp, timestamp) if copies else (None, None))
     assert burn_span == (None, None)
+
+
+@pytest.mark.parametrize("waiting_layer,waiting_phase", [(None, None), (1, "burn")])
+def test_waiting_and_layer_references_do_not_extend_actual_burn_window(waiting_layer, waiting_phase):
+    source = _event_file()
+    source.parse_result.events = [
+        CanonicalEventDraft(event_type="wait_for_burn", ts=datetime(2026, 3, 23, 10),
+                            layer=waiting_layer, phase=waiting_phase),
+        CanonicalEventDraft(event_type="layer_pour", ts=datetime(2026, 3, 23, 11),
+                            layer=1, phase="pour"),
+        CanonicalEventDraft(event_type="burn_start", ts=datetime(2026, 3, 23, 12),
+                            layer=1, phase="burn"),
+        CanonicalEventDraft(event_type="burn_end", ts=datetime(2026, 3, 23, 13),
+                            layer=1, phase="burn"),
+        CanonicalEventDraft(event_type="note", ts=datetime(2026, 3, 23, 14), layer=2),
+    ]
+    assert compute_session_spans([source]) == (
+        (datetime(2026, 3, 23, 10), datetime(2026, 3, 23, 14)),
+        (datetime(2026, 3, 23, 12), datetime(2026, 3, 23, 13)),
+    )
+    overview = build_group_overview("g_actual_burn", [source])
+    assert overview["features"]["burn_events"] == 2
+
+
+def test_unknown_session_duration_is_not_a_measured_zero():
+    source = _event_file()
+    for event in source.parse_result.events:
+        event.ts = None
+    overview = build_group_overview("g_undated", [source])
+    assert overview["features"]["duration_sec"] is None
+    assert overview["features"]["duration_min"] is None
+    assert overview["features"]["unattributed_elapsed_seconds"] is None
+
+
+def test_unknown_duration_with_measured_phases_does_not_fabricate_elapsed_time():
+    overview = build_group_overview("g_measured_only", [_time_log_file({1: (20_000, 10_000)})])
+    assert overview["features"]["machine_seconds"] == 30
+    assert overview["features"]["duration_sec"] is None
+    assert overview["features"]["unattributed_elapsed_seconds"] is None
 
 
 def test_overview_has_classification_and_dashboard_features():
@@ -132,9 +171,8 @@ def test_overview_telemetry_decodes_signals():
     assert "temperatures" in tel and "ST5" in tel["temperatures"]
     assert "pressure" in tel and "SP4" in tel["pressure"]
     assert tel["oxygen"]["SO1"] == [9.0, 8.5, 7.0]
-    # per-layer burn durations derived from N + Time
-    burns = {b["layer"]: b["duration_sec"] for b in tel["layer_burn_times"]}
-    assert burns[1] == 5.0  # 13:00:00 -> 13:00:05
+    # Multiple observations for N do not measure its laser duration.
+    assert tel["layer_burn_times"] == []
 
 
 def test_overview_handles_files_without_tables():
@@ -186,7 +224,7 @@ def test_overview_does_not_mislabel_unmeasured_residual_as_idle():
     assert feats["unattributed_elapsed_seconds"] == 5340.0
     assert feats["idle_seconds"] is None
     assert feats["idle_pct"] is None
-    assert feats["explicit_pause_seconds"] == 0.0
+    assert feats["explicit_pause_seconds"] is None
     assert feats["open_pause_count"] == 1
 
 

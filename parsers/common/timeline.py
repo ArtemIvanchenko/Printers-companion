@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 
@@ -14,15 +14,24 @@ class TimestampQualityTracker:
     out_of_order_count: int = 0
     max_gap_seconds: float = 0.0
     previous: datetime | None = None
+    _calendar_anchor: datetime | None = field(default=None, init=False, repr=False)
 
-    def add(self, timestamp: datetime | None) -> datetime | None:
+    def add(self, timestamp: datetime | None, *, clock_only: bool = False) -> datetime | None:
         if timestamp is None:
             self.missing_count += 1
             return None
-        candidate = timestamp + timedelta(days=self.rollover_days)
-        if self.previous is not None and candidate + timedelta(hours=12) < self.previous:
-            self.rollover_days += 1
-            candidate = timestamp + timedelta(days=self.rollover_days)
+        candidate = timestamp
+        if clock_only and self._calendar_anchor is not None:
+            candidate = timestamp.replace(
+                year=self._calendar_anchor.year,
+                month=self._calendar_anchor.month,
+                day=self._calendar_anchor.day,
+            )
+            if candidate + timedelta(hours=12) < self._calendar_anchor:
+                candidate += timedelta(days=1)
+                self.rollover_days += 1
+        if self._calendar_anchor is None or candidate > self._calendar_anchor:
+            self._calendar_anchor = candidate
         if self.previous is not None:
             delta = (candidate - self.previous).total_seconds()
             if delta < 0:

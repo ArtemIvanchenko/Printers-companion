@@ -7,7 +7,8 @@ const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const desktop = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
-if (args.some(arg => arg.startsWith('--publish'))) throw new Error('Test package command never publishes externally.');
+if (args.some(arg => arg.startsWith('--publish'))) throw new Error('Package command never publishes externally.');
+const signed = JSON.parse(fs.readFileSync(path.join(desktop, 'runtime-resources/runtime-manifest.json'), 'utf8')).desktop_updates_enabled === true;
 const destination = path.join(desktop, 'dist');
 const safeOutput = process.platform === 'darwin' && /[\0\r\n"'`$;&|<>]/.test(destination)
   ? fs.mkdtempSync(path.join(os.tmpdir(), 'pc-desktop-build-')) : destination;
@@ -17,7 +18,7 @@ execFileSync(process.execPath, [path.join(desktop, 'node_modules/electron-builde
 if (safeOutput !== destination) {
   fs.mkdirSync(destination, { recursive: true });
   for (const name of fs.readdirSync(safeOutput)) {
-    if (/\.(dmg|zip|exe|blockmap)$/.test(name)) fs.copyFileSync(path.join(safeOutput, name), path.join(destination, name));
+    if (/\.(dmg|zip|exe|blockmap)$/.test(name) || signed && /^latest.*\.yml$/.test(name)) fs.copyFileSync(path.join(safeOutput, name), path.join(destination, name));
   }
   console.log('Installers exported to desktop/dist. Packaged app for smoke: ' + safeOutput);
 }

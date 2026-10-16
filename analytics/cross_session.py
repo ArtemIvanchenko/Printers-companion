@@ -81,21 +81,29 @@ def detect_signal_trends(
         if col not in df.columns:
             continue
 
-        vals = df[col].drop_nulls().to_numpy()
+        try:
+            raw_values = np.asarray(df[col].to_numpy(), dtype=float)
+        except (TypeError, ValueError):
+            continue
+        finite = np.isfinite(raw_values)
+        xs = np.flatnonzero(finite)
+        vals = raw_values[finite]
         n = len(vals)
         if n < MIN_SESSIONS_FOR_TREND:
             continue
 
-        slope = theil_sen_slope(vals)
+        slope = theil_sen_slope(vals, xs)
+        if slope is None:
+            continue
 
         overall_mean = float(np.mean(vals))
         # Guard the division: a mean within rounding distance of zero makes
         # "% of mean" meaningless and would manufacture huge phantom trends.
-        if abs(overall_mean) < 1e-9:
+        if not np.isfinite(overall_mean) or abs(overall_mean) < 1e-9:
             continue
 
         slope_pct = abs(slope / overall_mean * 100)
-        if slope_pct < slope_threshold_pct:
+        if not np.isfinite(slope_pct) or slope_pct < slope_threshold_pct:
             continue
 
         findings.append({

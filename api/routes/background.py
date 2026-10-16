@@ -14,7 +14,7 @@ router = APIRouter(prefix="/background-analysis", tags=["background-analysis"])
 
 
 @router.post("/shadow/{session_id}", status_code=202)
-def request_shadow(session_id: str, db: Session = Depends(get_db)) -> dict:
+def request_shadow(session_id: str, db: Session = Depends(get_db, scope="function")) -> dict:
     from domain.services.shadow_analysis import request_shadow_analysis, ShadowAnalysisError
     from domain.services.compute_affinity import ComputeAffinityError
     try:
@@ -28,7 +28,7 @@ def request_shadow(session_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+def get_job(job_id: str, db: Session = Depends(get_db, scope="function")) -> dict:
     job = JobsRepository(db).get(job_id)
     if not job or job["owner_node_id"] != get_settings().compute_node_id:
         raise HTTPException(status_code=404, detail="Background job not found")

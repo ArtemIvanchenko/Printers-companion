@@ -96,10 +96,11 @@ from typing import Any
 from analytics.prediction.layer_engine import (
     DEFAULT_HATCH_ANGLE_DEG,
     LayerGeometrySeries,
+    _resolve_layer_cycle_model_for_mode,
+    _validated_layer_cycle_model as _validated_layer_cycle_model,
     compute_layer_series,
     physics_scan_seconds_by_layer,
     machine_cycle_from_layers,
-    machine_mode_key,
     resolve_scan_model,
     scan_model_key,
     scan_seconds_by_layer_from_model,
@@ -146,7 +147,7 @@ class PlateEstimate:
     scan_hours: float           # after calibration (physics path) / absolute (fitted)
     recoat_hours: float
     print_hours: float
-    total_days: float
+    total_days: float | None
     raw_scan_hours: float
     raw_recoat_hours: float
     raw_print_hours: float
@@ -171,7 +172,7 @@ class PlateEstimate:
     minimum_cycle_active_layers: int = 0
     minimum_cycle_training_active_layers: int = 0
     minimum_cycle_training_active_prints: int = 0
-    machine_cycle_hours: float = 0.0
+    machine_cycle_hours: float | None = None
     build_origin_z_mm: float = 0.0
     build_origin_source: str = "unknown"
     parts_volume_mm3: float = 0.0
@@ -181,19 +182,28 @@ class PlateEstimate:
     warnings: list[str] = field(default_factory=list)
     prediction: PredictionResult | None = None
 
+    @property
+    def prediction_time_scope(self) -> str:
+        return "machine_cycle" if self.machine_cycle_hours is not None else "burn_plus_pour"
+
     def as_print_time_estimate(self) -> PrintTimeEstimate:
         """Adapter for consumers of the single-part result (cost estimator)."""
         return PrintTimeEstimate(
             scan_hours=self.scan_hours,
             recoat_hours=self.recoat_hours,
-            print_hours=self.machine_cycle_hours or self.print_hours,
-            total_days=(self.machine_cycle_hours or self.print_hours) / 24.0,
+            print_hours=self.print_hours,
+            total_days=self.total_days,
             method=self.method,
             raw_scan_hours=self.raw_scan_hours,
             raw_recoat_hours=self.raw_recoat_hours,
-            raw_print_hours=self.raw_print_hours + self.layer_overhead_hours,
+            raw_print_hours=self.raw_print_hours,
             correction_factor=self.correction_factor,
-            breakdown={"recoat_time_ms": round(self.recoat_time_ms, 1),
+            breakdown={"print_hours": self.print_hours,
+                      "machine_cycle_hours": self.machine_cycle_hours,
+                      "prediction_time_scope": self.prediction_time_scope,
+                      "layer_cycle_model_version": self.layer_cycle_model_version,
+                      "minimum_layer_cycle_status": self.minimum_layer_cycle_status,
+                      "recoat_time_ms": round(self.recoat_time_ms, 1),
                       "recoat_time_source": self.recoat_time_source,
                       "layer_overhead_ms": (
                           round(self.layer_overhead_ms, 1)
@@ -233,76 +243,9 @@ def _source_sha256(source: MeshSource) -> str:
     return digest.hexdigest()
 
 
-def _validated_layer_cycle_model(candidate: dict | None) -> tuple[dict | None, str]:
-    """Validate the identified v2 cycle contract; old artifacts are diagnostic."""
-    if not isinstance(candidate, dict):
-        return None, "unavailable"
-    if candidate.get("version") == "max_base_floor_v2":
-        base = candidate.get("base_overhead_ms")
-        floor = candidate.get("minimum_cycle_ms")
-        lower = candidate.get("minimum_applicable_component_ms")
-        identified = (
-            floor is not None
-            and candidate.get("base_overhead_status") == "identified"
-            and candidate.get("minimum_cycle_status") == "identified"
-        ) or (
-            floor is None and candidate.get("base_overhead_status") == "identified_free_branch"
-            and candidate.get("minimum_cycle_status") == "unidentified"
-            and isinstance(lower, (int, float)) and not isinstance(lower, bool)
-            and math.isfinite(lower) and lower >= 0
-        )
-        if (
-            identified
-            and isinstance(base, (int, float)) and not isinstance(base, bool)
-            and math.isfinite(float(base))
-            and 0.0 <= float(base) <= 10_000.0
-            and (
-                floor is None
-                or (
-                    isinstance(floor, (int, float)) and not isinstance(floor, bool)
-                    and math.isfinite(float(floor))
-                    and 0.0 < float(floor) <= 120_000.0
-                )
-            )
-        ):
-            return {
-                **candidate,
-                "base_overhead_ms": float(base),
-                "minimum_cycle_ms": float(floor) if floor is not None else None,
-            }, "calibrated_max_base_floor"
-
-    # Old v1/additive artifacts have no identifiability evidence. Preserve them
-    # in history, but never silently apply their potentially floor-biased base.
-    return None, "unavailable"
-
-
-def _resolve_layer_cycle_model_for_mode(
-    params: dict,
-    material: str,
-    layer_thickness_mm: float,
-    legacy_scan_model: dict | None,
-) -> tuple[dict | None, str]:
-    """Independent cycle model for the same physical machine only."""
-    models = params.get("layer_cycle_model_by_mode") or {}
-    printer_id = params.get("printer_id")
-    if printer_id:
-        key = machine_mode_key(
-            str(printer_id), material, layer_thickness_mm,
-            int(params.get("laser_count") or 1),
-        )
-        resolved, source = _validated_layer_cycle_model(models.get(key))
-        if resolved is not None:
-            return resolved, source
-    # A scoped scan artifact may also carry a v2 cycle. Unscoped scan artifacts
-    # cannot reach this point through resolve_scan_model.
-    return _validated_layer_cycle_model(
-        legacy_scan_model.get("layer_cycle_model") if isinstance(legacy_scan_model, dict) else None,
-    )
-
-
-# Bump when geometry semantics or key encoding changes; old rows remain history
-# but cannot authorise reuse under the new contract.
-_GEOMETRY_CACHE_VERSION = 5
+# Bump when geometry semantics, snapshot precision or key encoding changes;
+# old rows remain history but cannot authorise reuse under the new contract.
+_GEOMETRY_CACHE_VERSION = 7
 
 
 def _geometry_cache_key(
@@ -389,12 +332,10 @@ def estimate_plate(
     2.2. Meshes still have to be loaded either way (volume/bounds for
     BodyEstimate), which is cheap next to compute_layer_series.
 
-    A cache hit is not bit-exact versus a fresh computation: the cached form is
-    LayerGeometrySeries.to_snapshot(), which rounds to 1 decimal place for
-    compact storage (that trade-off predates this cache — it was chosen for the
-    calibration snapshot). This rounding and the sampled slicing grid are
-    approximations; a cache hit is not proof of a universal error bound or
-    held-out prediction accuracy for an unseen geometry.
+    Cache entries preserve the prepared geometry without display rounding;
+    the published prediction snapshot remains compact. The sampled slicing
+    grid is still an approximation: reuse is not proof of a universal error
+    bound or held-out prediction accuracy for an unseen geometry.
     """
     if not parts and not supports:
         raise EstimationError("Не передано ни одной детали и ни одной поддержки")
@@ -463,7 +404,9 @@ def estimate_plate(
             **geometry_options,
         )
         if cache_key is not None:
-            geometry_cache.save_geometry_cache(cache_key, series.to_snapshot(), len(meshes))
+            geometry_cache.save_geometry_cache(
+                cache_key, series.to_snapshot(compact=False), len(meshes),
+            )
     warnings.extend(series.warnings)
     totals = series.totals(thickness)
     plate_layers = series.layer_count(thickness)
@@ -555,18 +498,33 @@ def estimate_plate(
     if cycle_model is None:
         warnings.append(
             "Нормальный полный цикл слоя пока не откалиброван по make_layer_ms; "
-            "межфазная задержка контроллера не добавлена."
+            "прогноз содержит только прожиг и нанесение, полный цикл неизвестен."
         )
 
     raw_total = raw_scan_hours + raw_recoat_hours
+    phase_hours = raw_scan_hours * factor + raw_recoat_hours
+    machine_cycle_hours = machine_cycle_seconds / 3600.0 if cycle_model is not None else None
+    prediction = build_time_prediction(
+        print_hours=machine_cycle_hours if machine_cycle_hours is not None else phase_hours,
+        correction_factor=factor,
+        scan_source=scan_source,
+        recoat_source=recoat_source,
+        fitted_model=model if scan_source == "fitted" else None,
+        warnings=warnings,
+    )
+    prediction.explanation += (
+        " Полный нормальный цикл учитывает откалиброванную модель контроллера в её проверенной области."
+        if machine_cycle_hours is not None else
+        " Оценена сумма прожига и нанесения; полный нормальный цикл неизвестен."
+    )
 
     bodies = _body_estimates(metas, series, thickness)
 
     return PlateEstimate(
         scan_hours=raw_scan_hours * factor,
         recoat_hours=raw_recoat_hours,
-        print_hours=raw_scan_hours * factor + raw_recoat_hours,
-        total_days=machine_cycle_seconds / 3600.0 / 24.0,
+        print_hours=phase_hours,
+        total_days=machine_cycle_hours / 24.0 if machine_cycle_hours is not None else None,
         raw_scan_hours=raw_scan_hours,
         raw_recoat_hours=raw_recoat_hours,
         raw_print_hours=raw_total,
@@ -603,7 +561,7 @@ def estimate_plate(
         minimum_cycle_training_active_prints=int(
             (cycle_model or {}).get("floor_n_prints") or 0,
         ),
-        machine_cycle_hours=machine_cycle_seconds / 3600.0,
+        machine_cycle_hours=machine_cycle_hours,
         build_origin_z_mm=build_origin_z,
         build_origin_source=build_origin_source,
         parts_volume_mm3=parts_volume_mm3,
@@ -611,14 +569,7 @@ def estimate_plate(
         geometry_series=series,
         geometry_totals=totals,
         warnings=warnings,
-        prediction=build_time_prediction(
-            print_hours=machine_cycle_seconds / 3600.0,
-            correction_factor=factor,
-            scan_source=scan_source,
-            recoat_source=recoat_source,
-            fitted_model=model if scan_source == "fitted" else None,
-            warnings=warnings,
-        ),
+        prediction=prediction,
     )
 
 

@@ -19,6 +19,7 @@ from analytics.prediction.pair_matching import PairMatchScore, score_print_sessi
 from core.config.settings import get_settings
 from domain.models.prints import PrintRecord
 from domain.models.sessions import BuildSession, ImportJob
+from storage.repositories.prints_repo import card_link_fingerprint, captured_card_link_intent
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +45,20 @@ def _link(
     evidence: PairMatchScore | None = None,
     method: str = "automatic_evidence",
     import_job_id: str | None = None,
+    expected_link_fingerprint: str | None = None,
 ) -> bool:
     from storage.repositories.prints_repo import PrintsRepository
 
+    if expected_link_fingerprint is None:
+        if (record.metadata_json or {}).get("session_link_confirmed") is False:
+            return False  # A generic sweep cannot undo an explicit unlink.
+        expected_link_fingerprint = card_link_fingerprint(record.session_id, record.metadata_json or {})
     linked = PrintsRepository(db).link_session(
         record.record_id,
         session.session_id,
         _as_utc(session.start_ts),
         compute_node_id=origin_compute_node_id,
+        expected_link_fingerprint=expected_link_fingerprint,
         link_evidence={
             "method": method, **evidence.as_dict(),
             **({"import_job_id": import_job_id} if import_job_id else {}),
@@ -139,18 +146,38 @@ def _resolve_import_hints(
     )).all()
     by_session = {s.session_id: s for s in sessions}
     for record in hinted:
-        lineage = {sid: job.import_job_id for job in jobs
-                   if job.print_record_id == record.record_id for sid in (job.session_ids or [])}
+        card_jobs = [job for job in jobs if job.print_record_id == record.record_id]
+        lineage = {sid for job in card_jobs for sid in (job.session_ids or [])}
         # Count every returned session, not only those currently available for
         # linking; otherwise an incomplete/partly claimed batch looks unique.
         if len(lineage) == 1:
-            sid, job_id = next(iter(lineage.items()))
+            sid = next(iter(lineage))
             session = by_session.get(sid)
             if session is None:
                 continue
             evidence = _score(record, session, explicit_hint=True)
             linked = False
             if evidence.eligible:
+                current_fingerprint = card_link_fingerprint(record.session_id, record.metadata_json or {})
+                matching, legacy = [], []
+                for job in card_jobs:
+                    if sid not in (job.session_ids or []):
+                        continue
+                    intent = captured_card_link_intent(job.audit_trail or [], record.record_id)
+                    if intent is None:
+                        legacy.append(job)
+                    elif intent["expected_link_fingerprint"] == current_fingerprint:
+                        matching.append((job, intent))
+                if matching:
+                    # Equivalent authority for the same SID: use a stable tie,
+                    # not database scan order or copy-completion timestamps.
+                    job, intent = min(matching, key=lambda candidate: candidate[0].import_job_id)
+                elif legacy and (record.metadata_json or {}).get("session_link_confirmed") is not False:
+                    job, intent = min(legacy, key=lambda candidate: candidate.import_job_id), None
+                else:
+                    continue
+                # Exactly one CAS against this pre-read identity. A failed
+                # attempt must not recapture authority or try another job.
                 linked = _link(
                     db,
                     record,
@@ -159,7 +186,8 @@ def _resolve_import_hints(
                     origin_compute_node_id=origin_compute_node_id,
                     evidence=evidence,
                     method="operator_card_upload",
-                    import_job_id=job_id,
+                    import_job_id=job.import_job_id,
+                    expected_link_fingerprint=intent["expected_link_fingerprint"] if intent else current_fingerprint,
                 )
             if linked:
                 meta = dict(record.metadata_json or {})

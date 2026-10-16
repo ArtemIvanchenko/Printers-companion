@@ -165,13 +165,29 @@ class TestCost:
         return s, estimate_print_time(s, params, "steel", stl_bytes=CUBE_STL)
 
     def test_all_items_present(self):
-        s, t = self._time()
-        c = estimate_cost(s, PARAMS, "steel", t)
+        params = {
+            **PARAMS,
+            "printer_id": "cost-test",
+            "layer_cycle_model_by_mode": {
+                "cost-test|steel@0.050|lasers=2": {
+                    "version": "max_base_floor_v2",
+                    "base_overhead_ms": 250,
+                    "base_overhead_status": "identified",
+                    "minimum_cycle_ms": 12_000,
+                    "minimum_cycle_status": "identified",
+                },
+            },
+        }
+        s, t = self._time(params)
+        c = estimate_cost(s, params, "steel", t)
         # порошок: 1 см³ × 7.9 г/см³ = 0.0079 кг × 7000 ≈ 55.3 ₽
         assert c.powder_kg == pytest.approx(0.008, abs=0.001)
         assert c.breakdown["порошок"] == pytest.approx(55.3, abs=0.5)
         assert c.breakdown["газ"] == 500.0
         assert c.breakdown["платформа"] == 2000.0
+        assert c.breakdown["фильтр"] == pytest.approx(
+            t.breakdown["machine_cycle_hours"] * 15000.0 / 500.0,
+        )
         assert c.total_rub == pytest.approx(sum(c.breakdown.values()), abs=0.01)
         assert not c.warnings
 

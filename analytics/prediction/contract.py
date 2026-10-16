@@ -42,7 +42,7 @@ class PredictionSource(str, Enum):
 
 @dataclass
 class PredictionResult:
-    value: float
+    value: float | None
     unit: str
     source: PredictionSource
     # (low, high) — None when not enough predicted-vs-actual history exists to

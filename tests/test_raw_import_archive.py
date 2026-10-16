@@ -10,7 +10,14 @@ from domain.services.import_jobs import (
     RawArchiveUnavailableError,
     archive_raw_import,
     confirm_import_job,
+    mark_import_job_confirmed,
+    snapshot_source,
 )
+from domain.services.importing.fence import ImportFence
+from domain.services.importing.publication import publish_import
+from profiles.m350.profile import build_registry, get_profile
+from storage.db.session import SessionLocal
+from storage.repositories.import_jobs import ImportJobsRepository
 
 
 class _Store:
@@ -99,6 +106,7 @@ def test_nas_archive_outage_is_retried_without_terminal_limit(tmp_path, monkeypa
     now = datetime.now(timezone.utc)
     job = _job(batch)
     job.stability_check_attempts = 50
+    job.lease_generation = 51
 
     def _unavailable(*args, **kwargs):
         raise RawArchiveUnavailableError("NAS unavailable")
@@ -121,7 +129,77 @@ def test_nas_archive_outage_is_retried_without_terminal_limit(tmp_path, monkeypa
     )
 
     assert result.job.status == ImportJobStatus.postponed
-    assert result.job.stability_check_attempts == 51
+    assert result.job.stability_check_attempts == 50
     assert result.job.postponed_until is not None
     assert (result.job.postponed_until - now).total_seconds() == 300
     assert result.job.audit_trail[-1]["action"] == "raw_archive_deferred"
+    assert result.job.audit_trail[-1]["details"]["attempt"] == 51
+
+
+def test_repeated_nas_outage_does_not_exhaust_changed_file_stability_budget(
+    tmp_path, monkeypatch
+):
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    log = batch / "job.log"
+    log.write_text("2026-04-27 10:00:00 Старт печати\n", encoding="utf-8")
+    job = _job(batch)
+    settings = Settings(
+        file_stability_seconds=0,
+        file_stability_max_retries=2,
+        nas_sync_retry_min_seconds=5,
+        nas_sync_retry_max_seconds=20,
+    )
+    registry, profile = build_registry(), get_profile()
+    now = datetime.now(timezone.utc)
+    job.file_snapshot = snapshot_source(batch)
+    mark_import_job_confirmed(job, now=now)
+    with SessionLocal() as db:
+        ImportJobsRepository(db).save_import_job(job)
+        db.commit()
+
+    def run_claimed_attempt(at):
+        with SessionLocal() as db:
+            claimed = ImportJobsRepository(db).claim_next_import_job(
+                owner_node_id=job.owner_node_id, lease_owner="raw-archive-test-worker",
+                now=at, lease_seconds=3600,
+            )
+            db.commit()
+        assert claimed is not None
+        fence = ImportFence(claimed.import_job_id, claimed.owner_node_id,
+                            claimed.lease_owner, claimed.lease_generation)
+        result = confirm_import_job(
+            claimed, registry=registry, profile=profile, settings=settings, now=at,
+        )
+        if result.job.status != ImportJobStatus.done:
+            with SessionLocal() as db:
+                publish_import(db, result, fence=fence, prepared_reports={})
+                db.commit()
+        return result
+
+    def unavailable(*args, **kwargs):
+        raise RawArchiveUnavailableError("NAS unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("domain.services.import_jobs.archive_raw_import", unavailable)
+        for generation in range(1, 5):
+            result = run_claimed_attempt(now)
+            job = result.job
+            assert job.lease_generation == generation
+            assert result.job.status == ImportJobStatus.postponed
+            assert result.job.stability_check_attempts == 0
+            assert result.job.postponed_until > now
+            now = result.job.postponed_until
+
+    # A real source change after the outage gets its own bounded stability retry.
+    log.write_text(
+        "2026-04-27 10:00:00 Старт печати\n2026-04-27 10:01:00 слой 1\n", encoding="utf-8"
+    )
+    result = run_claimed_attempt(now)
+    assert result.job.status == ImportJobStatus.postponed
+    assert result.job.stability_check_attempts == 1
+
+    result = run_claimed_attempt(result.job.postponed_until)
+    assert result.job.status == ImportJobStatus.done
+    assert result.job.session_ids
+    assert result.job.report_ids

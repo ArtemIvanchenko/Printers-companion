@@ -31,7 +31,9 @@ from domain.models.prints import MachineParams, PrintRecord
 from domain.models.sessions import BuildSession
 from analytics.prediction.layer_engine import scan_model_key
 from analytics.prediction.calibration_inputs import CalibrationInputs
-from analytics.prediction.input_quality import INPUT_REASON_RU, calibration_input_exclusion
+from analytics.prediction.input_quality import (
+    INPUT_REASON_RU, calibration_input_exclusion, numerical_capture_exclusion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -347,6 +349,8 @@ def prediction_accuracy(db: Session | None = None, *, inputs: CalibrationInputs 
                 record.metadata_json or {}, snapshot, record.revision,
                 session_id=record.session_id,
             )
+        if skip_reason is None:
+            skip_reason = numerical_capture_exclusion(snapshot)
 
         # Order pairs by when the print happened, so "most recent N" is real.
         when = printed_at(record, session)
@@ -487,8 +491,8 @@ def calibration_interval_hours(
         return None
     low, high = info["ratio_interval"]
     return (
-        round(low * raw_scan_hours + raw_recoat_hours, 3),
-        round(high * raw_scan_hours + raw_recoat_hours, 3),
+        low * raw_scan_hours + raw_recoat_hours,
+        high * raw_scan_hours + raw_recoat_hours,
     )
 
 

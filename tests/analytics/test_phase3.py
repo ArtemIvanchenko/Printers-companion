@@ -8,6 +8,7 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from api.main import app
+from core.versioning.constants import ANALYSIS_VERSION
 from domain.models.events import LayerSnapshot
 from domain.models.jobs import BackgroundJob
 from domain.models.prints import PrintRecord
@@ -82,6 +83,8 @@ class TestAccuracyReport:
         db.add(PrintRecord(
             record_id=f"pr_acc_{idx}", name=f"acc{idx}", session_id=sid, material=material,
             metadata_json={"session_link_confirmed": True, "prediction": {
+                "analysis_version": ANALYSIS_VERSION,
+                "provenance": {"component": "print-estimate", "analysis_version": ANALYSIS_VERSION},
                 "input_revision": 1,
                 "build_origin_source": "explicit", "build_origin_z_mm": 0.0,
                 "estimated_at": start.isoformat(),

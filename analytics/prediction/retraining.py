@@ -10,7 +10,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from analytics.prediction.accuracy import PRINT_CLASSIFICATIONS, session_classification
@@ -25,6 +25,7 @@ from core.versioning.constants import ANALYSIS_VERSION, APP_VERSION
 from core.versioning.provenance import git_sha, stable_hash
 from domain.models.quality import QualityOutcome
 from domain.models.sessions import BuildSession
+from domain.services.quality import final_outcome_heads
 from storage.repositories.jobs_repo import JobsRepository
 from storage.repositories.model_registry import ModelRegistryRepository
 
@@ -39,22 +40,33 @@ MIN_BRIER_IMPROVEMENT = 0.01
 MIN_AUC_IMPROVEMENT = 0.01
 
 
+class RetrainingInputsChanged(RuntimeError):
+    """Expected concurrent input change: discard and retry, never publish."""
+
+
+class StaleModelLease(RuntimeError):
+    """Publication lost its fencing token; the entire transaction must roll back."""
+
+
 def _latest_label_evidence(db: Session) -> dict[str, dict[str, Any]]:
     labels: dict[str, dict[str, Any]] = {}
     rows = db.scalars(
-        select(QualityOutcome).order_by(QualityOutcome.timestamp, QualityOutcome.outcome_id)
+        select(QualityOutcome)
     ).all()
-    for row in rows:
-        if not row.session_id or not row.is_final:
+    heads = final_outcome_heads([{
+        key: getattr(row, key) for key in ("outcome_id", "print_record_id", "session_id",
+            "is_final", "supersedes_outcome_id", "result", "timestamp")
+    } for row in rows])
+    for row in heads:
+        sid = row.get("session_id")
+        if not sid:
             continue
-        label = outcome_to_label(row.result)
-        if label is None:
-            labels.pop(row.session_id, None)
-        else:
-            observed_at = _utc_timestamp(row.timestamp)
-            labels[row.session_id] = {
+        label = outcome_to_label(row["result"])
+        if label is not None:
+            observed_at = _utc_timestamp(row["timestamp"])
+            labels[sid] = {
                 "label": label,
-                "label_outcome_id": row.outcome_id,
+                "label_outcome_id": row["outcome_id"],
                 "label_observed_at": observed_at.isoformat() if observed_at else None,
             }
     return labels
@@ -103,6 +115,26 @@ def training_fingerprint(rows: list[dict[str, Any]]) -> str:
     ])
 
 
+def _shadow_training_is_current(
+    rows: list[dict[str, Any]], shadow: dict[str, Any],
+) -> bool:
+    """Compare original training rows, without resetting on new future labels.
+
+    Saved IDs preserve the fingerprint's original row order. A corrected label,
+    removed row or changed feature invalidates this shadow, not its historical
+    artifact. This copied-input check is not prepare/publish concurrency fencing.
+    """
+    ids = shadow.get("training_session_ids")
+    if (not isinstance(ids, list) or not ids
+            or any(not isinstance(sid, str) or not sid for sid in ids)
+            or len(set(ids)) != len(ids)):
+        return False
+    current = {row["session_id"]: row for row in rows}
+    if any(sid not in current for sid in ids):
+        return False
+    return training_fingerprint([current[sid] for sid in ids]) == shadow.get("training_fingerprint")
+
+
 def feature_schema_hash(model: dict[str, Any]) -> str:
     return stable_hash({"features": model.get("features", []), "schema": "defect-risk-v2",
                         "analysis_version": ANALYSIS_VERSION})
@@ -145,24 +177,15 @@ def enqueue_retraining(
 
 def enqueue_retraining_for_session(db: Session, session_id: str) -> dict[str, Any] | None:
     """Enqueue from the latest strict label after a card/session link appears."""
-    outcome = db.scalar(
-        select(QualityOutcome)
-        .where(
-            QualityOutcome.session_id == session_id,
-            QualityOutcome.is_final.is_(True),
-        )
-        .order_by(QualityOutcome.timestamp.desc(), QualityOutcome.outcome_id.desc())
-        .limit(1)
-    )
-    if outcome is None:
+    evidence = _latest_label_evidence(db).get(session_id)
+    if evidence is None:
         return None
-    timestamp = outcome.timestamp.isoformat() if outcome.timestamp else ""
     return enqueue_retraining(
         db,
         session_id=session_id,
-        outcome_id=outcome.outcome_id,
-        result=outcome.result,
-        timestamp=timestamp,
+        outcome_id=evidence["label_outcome_id"],
+        result="rejected" if evidence["label"] else "accepted",
+        timestamp=evidence["label_observed_at"] or "",
     )
 
 
@@ -192,6 +215,47 @@ def prepare_retraining(db: Session) -> dict[str, Any]:
     }
 
 
+def retraining_input_identity(prepared: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    """Capture raw registry identities, even for an outdated active artifact."""
+    return (
+        training_fingerprint(prepared["rows"]),
+        (prepared.get("active") or {}).get("model_version_id"),
+        (prepared.get("shadow") or {}).get("model_version_id"),
+    )
+
+
+def publish_retraining(
+    db: Session, result: dict[str, Any], *,
+    expected_inputs: tuple[str, str | None, str | None],
+    job_id: str, lease_owner: str, lease_generation: int,
+) -> dict[str, Any]:
+    """Fresh dataset/registry check and final lease fence in one short UoW.
+
+    SHARE protects updates and first inserts, including QC cascades and raw
+    writers. NOWAIT avoids waiting in existing writers' different row order.
+    SQLite's lifecycle guard already reserved its single writer. No fitting,
+    raw-source access or NAS object transfer takes place under these locks.
+    """
+    registry = ModelRegistryRepository(db)
+    registry.lock_lifecycle(MODEL_NAME)
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("LOCK TABLE sessions, quality_outcomes IN SHARE MODE NOWAIT"))
+    current = prepare_retraining(db)
+    if retraining_input_identity(current) != expected_inputs:
+        raise RetrainingInputsChanged("Разметка, признаки или модели изменились; нужен новый расчёт")
+    if result["training_fingerprint"] != expected_inputs[0]:
+        raise ValueError("Результат обучения не соответствует принятому снимку входов")
+    published = persist_retraining(db, result)
+    db.flush()
+    # Registry locks/flush can outlast the original lease. Complete last and
+    # raise on refusal so neither a candidate nor a promotion survives rollback.
+    if JobsRepository(db).complete(
+        job_id, published, lease_owner=lease_owner, lease_generation=lease_generation,
+    ) is None:
+        raise StaleModelLease("Lease модели истекла или её generation больше не принадлежит worker")
+    return published
+
+
 def _binary_metrics(observed: list[int], predicted: list[float]) -> dict[str, Any]:
     from sklearn.metrics import brier_score_loss, roc_auc_score
 
@@ -215,6 +279,16 @@ def _utc_timestamp(value: Any) -> datetime | None:
         return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _prediction_score(result: dict[str, Any], *, require_model: bool) -> float | None:
+    if require_model and result.get("method") not in {"model", "lightgbm"}:
+        return None
+    score = result.get("risk")
+    if (not isinstance(score, (int, float)) or isinstance(score, bool)
+            or not 0 <= score <= 1):
+        return None
+    return float(score)
 
 
 def _shadow_evaluation(
@@ -257,13 +331,18 @@ def _shadow_evaluation(
     evaluated_ids: list[str] = []
     for row in future:
         candidate_result = predict_defect_risk(row["group"], candidate)
-        if candidate_result.get("method") == "heuristic":
-            # Missing a feature required by the fitted candidate.
+        candidate_score = _prediction_score(candidate_result, require_model=True)
+        if candidate_score is None:
+            exclusions["candidate_prediction_unavailable"] += 1
             continue
         baseline_result = predict_defect_risk(row["group"], comparator)
+        baseline_score = _prediction_score(baseline_result, require_model=active is not None)
+        if baseline_score is None:
+            exclusions["comparator_prediction_unavailable"] += 1
+            continue
         observed.append(int(row["label"]))
-        candidate_scores.append(float(candidate_result["risk"]))
-        comparator_scores.append(float(baseline_result["risk"]))
+        candidate_scores.append(candidate_score)
+        comparator_scores.append(baseline_score)
         evaluated_ids.append(str(row["session_id"]))
 
     candidate_metrics = _binary_metrics(observed, candidate_scores) if observed else {
@@ -336,11 +415,17 @@ def calculate_retraining(prepared: dict[str, Any], *, owner_node_id: str) -> dic
     if shadow and shadow.get("analysis_version", ANALYSIS_VERSION) != ANALYSIS_VERSION:
         evaluation = {"decision": "reject", "reason": "Версия аналитических признаков изменилась",
                       "metrics": {"feature_version_compatible": False}}
+    elif shadow and not _shadow_training_is_current(rows, shadow):
+        evaluation = {
+            "decision": "reject",
+            "reason": "Исходная обучающая выборка теневого кандидата изменилась",
+            "metrics": {},
+        }
     else:
         evaluation = _shadow_evaluation(rows, shadow, active) if shadow else None
 
-    # Keep the current candidate until future validation decides it. Once it is
-    # promoted/rejected, train the next candidate on all currently known labels.
+    # Keep a candidate with unchanged training evidence until future validation
+    # decides it. After promotion/rejection, train on all currently known labels.
     should_train = shadow is None or (evaluation or {}).get("decision") in {"promote", "reject"}
     candidate = None
     rejection_reason = None
@@ -427,5 +512,6 @@ __all__ = [
     "MODEL_NAME", "JOB_TYPE", "enqueue_retraining", "enqueue_retraining_for_session",
     "active_model",
     "prepare_retraining", "calculate_retraining", "persist_retraining",
+    "retraining_input_identity", "publish_retraining",
     "training_fingerprint", "feature_schema_hash",
 ]

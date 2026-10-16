@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from psycopg.errors import ConnectionFailure
 from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -316,7 +317,7 @@ def test_commit_failure_keeps_private_recoverable_copy_without_publishing(
     url, record_id = endpoint(card_specific)
 
     def unavailable_commit(self):
-        raise OperationalError("COMMIT", {}, RuntimeError("NAS unavailable"))
+        raise OperationalError("COMMIT", {}, ConnectionFailure("NAS unavailable"))
 
     with monkeypatch.context() as patch:
         patch.setattr(Session, "commit", unavailable_commit)
@@ -431,7 +432,7 @@ def test_uncertain_commit_preserves_committed_job_inputs_and_receipt(upload_root
         original_commit(self)
         commit_calls.append(True)
         if len(commit_calls) == 1:
-            raise OperationalError("COMMIT", {}, RuntimeError("commit acknowledgement lost"))
+            raise OperationalError("COMMIT", {}, ConnectionFailure("commit acknowledgement lost"))
 
     with monkeypatch.context() as patch:
         patch.setattr(Session, "commit", committed_but_acknowledgement_lost)

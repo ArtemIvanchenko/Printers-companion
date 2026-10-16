@@ -69,7 +69,11 @@ def _count_timing_admissions(action):
 def test_card_comparison_uses_one_timing_admission():
     from domain.services.print_cards.comparison import comparison_summary
 
-    record = {"metadata_json": {"prediction": {"print_hours": 1, "layer_count": 1}}}
+    record = {"session_id": "measured-session", "revision": 1, "metadata_json": {
+        "session_link_confirmed": True,
+        "prediction": {"print_hours": 1, "layer_count": 1, "input_revision": 1,
+                       "build_origin_source": "explicit", "build_origin_z_mm": 0},
+    }}
     session = {"classification": "REAL_PRINT"}
     rows = [(1, {"burn_ms": 30_000, "pour_ms": 9_000, "make_layer_ms": 39_300}, None)]
     result, calls = _count_timing_admissions(lambda: comparison_summary(record, session, rows))

@@ -120,9 +120,9 @@
                 <div class="home-toolbar-title" id="home-prints-title">ПЕЧАТИ · —</div>
                 <div class="home-filter" role="group" aria-label="Фильтр печатей">
                     <button type="button" class="active" data-home-filter="all">Все</button>
-                    <button type="button" data-home-filter="with-logs">С анализом</button>
+                    <button type="button" data-home-filter="with-logs">С логами</button>
                     <button type="button" data-home-filter="without-logs">Без логов</button>
-                    <button type="button" data-home-filter="without-quality">Без оценки</button>
+                    <button type="button" data-home-filter="without-quality">Без контроля</button>
                     <button type="button" data-home-filter="with-anomalies">С аномалиями</button>
                 </div>
                 <div class="home-toolbar-actions"><button class="home-btn" type="button" onclick="showPrintsPage('archive',null)">Список</button><button class="home-btn primary" type="button" onclick="openNewPrintRecord()">Добавить печать</button></div>
@@ -212,11 +212,11 @@
                 <div style="margin-bottom:12px;">
                     <h2 style="margin:0 0 14px;">🌡️ Телеметрия</h2>
                     <div id="tel-session-cards" class="tel-cards">
-                        <div class="tel-card" id="tel-card-alltime" onclick="loadAllTimeTelemetry()">
-                            <div class="tel-card-icon">📊</div>
-                            <div class="tel-card-date">Сводка</div>
-                            <div class="tel-card-time">последние 100 сессий</div>
-                        </div>
+                        <button type="button" class="tel-card" id="tel-card-alltime" onclick="loadAllTimeTelemetry()">
+                            <span class="tel-card-icon">📊</span>
+                            <span class="tel-card-date">Сводка</span>
+                            <span class="tel-card-time">последние 100 сессий</span>
+                        </button>
                     </div>
                     <span id="tel-subtitle" style="color:#60a5fa;font-size:13px;display:block;margin-top:8px;">Выберите сессию</span>
                 </div>
@@ -580,16 +580,15 @@
             <div class="pc-detail-header">
                 <span class="pc-detail-crumb">ПЕЧАТИ /</span><span class="pc-detail-id" id="pc-title">—</span><span class="pc-detail-name" id="pc-subtitle"></span><span class="pc-detail-status" id="pc-header-status">ЗАГРУЗКА</span><div id="pc-actions"></div>
             </div>
-            <div id="pcpane-what" class="pc-pane"></div>
             <div class="section" style="margin-top:20px;">
                 <div class="tabs" id="pc-tabs" role="tablist" aria-label="Подробности карточки печати">
-                    <a id="pctab-what"    onclick="showPrintCardTab('what')">Что печатали</a>
-                    <a id="pctab-plan"    onclick="showPrintCardTab('plan')">Прогноз</a>
-                    <a id="pctab-outcome" onclick="showPrintCardTab('outcome')">Как прошло</a>
-                    <a id="pctab-process" onclick="showPrintCardTab('process')">Процесс</a>
+                    <a id="pctab-outcome" onclick="showPrintCardTab('outcome')">Контроль качества</a>
+                    <a id="pctab-process" onclick="showPrintCardTab('process')">Графики</a>
+                    <a id="pctab-what"    onclick="showPrintCardTab('what')">Модель и параметры</a>
+                    <a id="pctab-plan"    onclick="showPrintCardTab('plan')">Оценка времени</a>
                     <a id="pctab-files"   onclick="showPrintCardTab('files')">Файлы</a>
                 </div>
-
+                <div id="pcpane-what" class="pc-pane" style="display:none;"></div>
                 <div id="pcpane-plan"    class="pc-pane" style="display:none;"></div>
                 <div id="pcpane-outcome" class="pc-pane" style="display:none;"></div>
                 <div id="pcpane-process" class="pc-pane" style="display:none;"></div>

@@ -52,7 +52,9 @@ from analytics.prediction.layer_engine import (
     LayerGeometrySeries,
     machine_mode_key,
 )
-from analytics.prediction.input_quality import INPUT_REASON_RU, calibration_input_exclusion
+from analytics.prediction.input_quality import (
+    INPUT_REASON_RU, calibration_input_exclusion, numerical_capture_exclusion,
+)
 from analytics.prediction.scan_scope import scan_scope_key, snapshot_scan_scope
 from analytics.prediction.timing_validation import (
     MAX_BURN_MS, MIN_BURN_MS, calibration_burn_ms, calibration_cycles_ms, calibration_timing_payloads,
@@ -293,7 +295,7 @@ def scan_calibration_report(db: Session | None = None, *, inputs: CalibrationInp
         exclusion = calibration_input_exclusion(
             record.metadata_json or {}, snapshot, record.revision,
             session_id=record.session_id,
-        )
+        ) or numerical_capture_exclusion(snapshot)
         if exclusion:
             rows.append({
                 "record_id": record.record_id, "session_id": record.session_id,

@@ -164,6 +164,7 @@ class TestImportHint:
         """Only a completed card-specific import proves explicit intent."""
         from core.config.settings import get_settings
         from domain.models.sessions import ImportJob
+        from storage.repositories.prints_repo import card_link_fingerprint
 
         ts = datetime(2027, 7, 10, 9, 0, tzinfo=timezone.utc)
         _make_session(db, "s_hint", ts)
@@ -175,6 +176,10 @@ class TestImportHint:
             import_job_id="job_hint", owner_node_id=get_settings().compute_node_id,
             print_record_id="pr_hinted", source_path="/local/explicit-batch",
             source_name="explicit-batch", status="done", session_ids=["s_hint"],
+            audit_trail=[{"action": "card_link_intent_captured", "details": {
+                "record_id": "pr_hinted", "expected_session_id": None,
+                "expected_link_fingerprint": card_link_fingerprint(None, {"session_link_confirmed": False}),
+            }}],
         ))
         db.flush()
 

@@ -361,7 +361,7 @@ async function loadDesignQuality() {
     try {
         const [outcomes,model,risk,prints]=await Promise.all([_designFetch('/quality-outcomes'),_designFetch('/models/defect-risk'),_designFetch('/analysis/defect-risk'),_designFetch('/prints?limit=100')]);
         const latestByPrint=new Map();
-        outcomes.filter(x=>x.is_final&&x.print_record_id).sort((a,b)=>String(a.timestamp||'').localeCompare(String(b.timestamp||''))).forEach(x=>latestByPrint.set(x.print_record_id,x));
+        _finalQualityOutcomes(outcomes).filter(x=>x.print_record_id).forEach(x=>latestByPrint.set(x.print_record_id,x));
         const latest=[...latestByPrint.values()], accepted=latest.filter(x=>x.result==='accepted').length, rejected=latest.filter(x=>x.result==='rejected').length, total=prints.total??prints.items.length, unknown=Math.max(0,total-latest.length);
         progress.textContent=`размечено ${latest.length} из ${total} печатей`;
         document.getElementById('design-quality-counts').innerHTML=[['ПРИНЯТО',accepted,'#aebf92'],['БРАК',rejected,'#f6a06b'],['БЕЗ ОЦЕНКИ',unknown,'#f3ece0']].map(x=>`<div class="design-count"><div class="design-section-title">${x[0]}</div><b style="color:${x[2]}">${x[1]}</b></div>`).join('');

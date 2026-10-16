@@ -9,8 +9,8 @@ import sys
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.updating.packaged import PackagedUpdater, configure_nas, finish_setup, public_status
-from core.updating.releases import UpdateBusy, UpdateError
+from core.updating.packaged import PackagedUpdater, configure_nas, finish_setup, load_bundle, public_status
+from core.updating.releases import UpdateBusy, UpdateError, compatible_installer, stable_release, update_comparison
 from core.updating.state import read_json
 
 
@@ -25,11 +25,25 @@ def main() -> int:
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['configure', 'finish-setup', 'adopt', 'launch', 'resume', 'stop', 'status', 'rollback', 'prepare-restart', 'cancel-restart'])
+    parser.add_argument('action', choices=['configure', 'finish-setup', 'adopt', 'launch', 'resume', 'stop', 'status', 'rollback', 'prepare-restart', 'cancel-restart', 'check-release'])
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--bundle', type=Path, required=True)
+    parser.add_argument('--platform', choices=['darwin', 'win32'])
+    parser.add_argument('--arch', choices=['arm64', 'x64'])
     args = parser.parse_args()
+    if args.action == 'check-release' and (args.platform is None or args.arch is None):
+        parser.error('check-release requires --platform and --arch')
     try:
+        if args.action == 'check-release':
+            manifest = load_bundle(args.bundle)
+            release = stable_release()
+            comparison = update_comparison(manifest['version'], manifest['sha'], release)
+            emit('result', state={
+                'phase': 'release_checked', **comparison,
+                'source_state': manifest.get('source_state', 'unknown'),
+                'installer': compatible_installer(release, platform=args.platform, arch=args.arch),
+            })
+            return 0
         if args.action == 'configure':
             # bounded stdin; secrets are not visible in process listings
             raw = sys.stdin.read(16385)

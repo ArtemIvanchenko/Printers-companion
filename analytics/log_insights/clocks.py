@@ -29,18 +29,28 @@ def iso(value):
 
 
 def pause_intervals(events, clock_timezone="Europe/Moscow"):
+    """Keep exact resume markers separate from a bound supplied by activity.
+
+    A restart request or finish marker does not establish when a pause ended.
+    A later burn proves activity by that timestamp, but cannot locate the
+    resume inside the intervening gap or supply an exact pause duration.
+    """
     points = sorted({
         (ts, field(e, "event_type")) for e in events
-        if field(e, "event_type") in {"pause", "resume", "restart_attempt", "finish"}
+        if field(e, "event_type") in {"pause", "resume", "burn_start", "burn_end", "burn_event", "finish"}
         and (ts := seconds(field(e, "ts"), clock_timezone)) is not None
     })
     result, started = [], None
     for ts, kind in points:
         if kind == "pause" and started is None:
             started = ts
-        elif kind in {"resume", "restart_attempt", "finish"} and started is not None:
+        elif kind == "resume" and started is not None:
             if ts > started:
-                result.append({"start": started, "end": ts, "resumed": kind != "finish"})
+                result.append({"start": started, "end": ts, "resumed": True})
+            started = None
+        elif kind in {"burn_start", "burn_end", "burn_event", "finish"} and started is not None:
+            result.append({"start": started, "end": None, "resumed": False,
+                           "end_upper_bound": ts})
             started = None
     if started is not None:
         result.append({"start": started, "end": None, "resumed": False})
@@ -74,7 +84,9 @@ def burn_windows(events, pauses=(), clock_timezone="Europe/Moscow"):
         end = start + burn / 1000
         # A pause inside a phase means the duration cannot locate its two
         # active portions unambiguously. Do not fabricate either portion.
-        if any(p["start"] < end and (p["end"] is None or p["end"] > start) for p in pauses):
+        if any(p["start"] < end and ((pause_end := p["end"] if p["end"] is not None
+                                     else p.get("end_upper_bound")) is None or pause_end > start)
+               for p in pauses):
             continue
         windows.append({"layer": layer, "start": start, "end": end,
                         "precision": "logged_start" if kind == "burn_start" else "approximate_burn_marker"})

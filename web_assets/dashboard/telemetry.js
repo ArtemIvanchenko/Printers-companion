@@ -11,6 +11,7 @@ function _fmtTelDate(iso) {
 // Cache for all-time aggregated data so we don't re-fetch on every visit
 // Full session list cache (populated once by loadTelemetrySessions)
 let _telSessionList = [];
+let _telemetrySelectionGeneration = 0;
 
 function _setActiveCard(id) {
     document.querySelectorAll('#tel-session-cards .tel-card').forEach(c => c.classList.remove('active'));
@@ -28,6 +29,7 @@ async function loadTelemetrySessions(more = false) {
     const container = document.getElementById('tel-session-cards');
     if (!container || _telemetryListLoading) return;
     _telemetryListLoading = true;
+    const selectionGeneration = _telemetrySelectionGeneration;
     const notice = document.getElementById('telemetry-notice');
     notice.textContent = 'Загрузка списка сессий…';
     let next = document.getElementById('telemetry-load-more');
@@ -44,23 +46,29 @@ async function loadTelemetrySessions(more = false) {
         _telSessionList = more ? _telSessionList.concat(list) : list;
         if (!more) container.querySelectorAll('.tel-card:not(#tel-card-alltime)').forEach(c=>c.remove());
         for (const session of list) {
-            const card = document.createElement('div');
+            const card = document.createElement('button');
+            card.type = 'button';
             card.className = 'tel-card'; card.id = 'tel-card-' + session.session_id;
-            const date = document.createElement('div'); date.className = 'tel-card-date';
+            const date = document.createElement('span'); date.className = 'tel-card-date';
             date.textContent = _fmtTelDate(session.start_ts) || session.session_id;
-            const duration = document.createElement('div'); duration.className = 'tel-card-dur';
+            const duration = document.createElement('span'); duration.className = 'tel-card-dur';
             duration.textContent = session.duration_min == null ? 'Длительность не измерена' : (session.duration_min/60).toFixed(1) + ' ч';
             card.append(date, duration);
             card.onclick = () => loadTelemetryForSession(session.session_id);
             container.appendChild(card);
         }
         next.hidden = !page.has_more;
-        notice.textContent = page.total ? 'Сессий в списке: ' + _telSessionList.length + ' из ' + page.total : 'Нет сохранённой телеметрии.';
-        if (list.length && !_telCharts.currentSessionId && !more) await loadTelemetryForSession(list[0].session_id);
+        next.textContent = 'Ещё сессии';
+        next.onclick = () => loadTelemetrySessions(true);
+        if (selectionGeneration === _telemetrySelectionGeneration) {
+            notice.textContent = page.total ? 'Сессий в списке: ' + _telSessionList.length + ' из ' + page.total : 'Нет сохранённой телеметрии.';
+            if (list.length && !_telCharts.currentSessionId && !more) await loadTelemetryForSession(list[0].session_id);
+        }
     } catch(error) {
-        notice.textContent = 'Не удалось загрузить сессии: ' + error.message;
+        if (selectionGeneration === _telemetrySelectionGeneration) notice.textContent = 'Не удалось загрузить сессии: ' + error.message;
         next.hidden = false;
         next.textContent = 'Повторить';
+        next.onclick = () => loadTelemetrySessions(more);
     } finally {
         next.disabled = false;
         _telemetryListLoading = false;
@@ -91,14 +99,31 @@ function _updateLineChart(chart, time, series) {
     chart.update('none');
 }
 
+function _clearTelemetrySelection(message) {
+    document.getElementById('telemetry-notice').textContent = message;
+    document.getElementById('tel-subtitle').textContent = message;
+    document.getElementById('telemetry-health').replaceChildren();
+    for (const key of ['o2', 'temp', 'hum', 'press']) _updateLineChart(_telCharts[key], [], {});
+    if (_telCharts.burn) {
+        _telCharts.burn.data.labels = [];
+        _telCharts.burn.data.datasets[0].data = [];
+        _telCharts.burn.update('none');
+    }
+    for (const id of ['o2Chart', 'tempChart', 'humChart', 'pressChart']) {
+        document.getElementById(id)?.parentElement.classList.remove('alarm-active');
+    }
+}
+
 async function loadTelemetryForSession(sessionId) {
     if (!sessionId) return;
+    const generation = ++_telemetrySelectionGeneration;
     ensureTelemetryCharts();
     _telCharts.currentSessionId = sessionId;
     _setActiveCard('tel-card-' + sessionId);
+    _clearTelemetrySelection('Загрузка телеметрии…');
     try {
         const d = await _designFetch('/sessions/' + encodeURIComponent(sessionId) + '/telemetry');
-        if (_telCharts.currentSessionId !== sessionId) return;
+        if (generation !== _telemetrySelectionGeneration || _telCharts.currentSessionId !== sessionId) return;
         const tel  = d.telemetry || {};
         const time = tel.time || [];
         document.getElementById('telemetry-notice').textContent = time.length ? '' : 'В этой сессии нет сохранённой телеметрии.';
@@ -115,7 +140,9 @@ async function loadTelemetryForSession(sessionId) {
             _telCharts.burn.update('none');
         }
     } catch(e) {
+        if (generation !== _telemetrySelectionGeneration || _telCharts.currentSessionId !== sessionId) return;
         document.getElementById('telemetry-notice').textContent = 'Не удалось загрузить телеметрию: ' + e.message;
+        document.getElementById('tel-subtitle').textContent = 'Телеметрия не загружена';
     }
 }
 
@@ -146,17 +173,15 @@ function renderTelemetryHealth(health, telemetry) {
 }
 
 async function loadAllTimeTelemetry() {
+    const generation = ++_telemetrySelectionGeneration;
     ensureTelemetryCharts();
     _setActiveCard('tel-card-alltime');
     _telCharts.currentSessionId = null;
-    document.getElementById('tel-subtitle').textContent = 'Загрузка сводки…';
-    document.getElementById('telemetry-health').replaceChildren();
-    for (const id of ['o2Chart','tempChart','humChart','pressChart']) {
-        document.getElementById(id)?.parentElement.classList.remove('alarm-active');
-    }
+    _clearTelemetrySelection('Загрузка сводки…');
     try {
         // One bounded SQL projection instead of N full sensor-array responses.
         const page = await _designFetch('/dashboard/telemetry-sessions?limit=100');
+        if (generation !== _telemetrySelectionGeneration || _telCharts.currentSessionId !== null) return;
         const sessions = page.items.slice().reverse();
         const labels = sessions.map(s=>_fmtTelDate(s.start_ts) || s.session_id);
         for (const [key, group] of [['o2','oxygen'],['temp','temperature'],['hum','humidity'],['press','pressure']]) {
@@ -172,8 +197,11 @@ async function loadAllTimeTelemetry() {
         document.getElementById('tel-subtitle').textContent = sessions.length
             ? 'Последние ' + sessions.length + ' из ' + page.total + ' сессий · сохранённые средние; пропуски не заменяются нулями'
             : 'Нет сохранённой телеметрии';
+        document.getElementById('telemetry-notice').textContent = sessions.length ? '' : 'Нет сохранённой телеметрии.';
     } catch(error) {
+        if (generation !== _telemetrySelectionGeneration || _telCharts.currentSessionId !== null) return;
         document.getElementById('tel-subtitle').textContent = 'Ошибка загрузки сводки: ' + error.message;
+        document.getElementById('telemetry-notice').textContent = 'Ошибка загрузки сводки: ' + error.message;
     }
 }
 

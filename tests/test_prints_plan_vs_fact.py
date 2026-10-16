@@ -64,9 +64,18 @@ def _record(db, record_id: str, *, session_id=None, predicted_hours=None, cost=N
             "print_hours": predicted_hours,
             "cost_total_rub": cost,
             "layer_count": layer_count,
+            "input_revision": 1, "build_origin_source": "explicit", "build_origin_z_mm": 0,
         }
+        metadata["session_link_confirmed"] = True
         if machine_cycle_hours is not None:
-            metadata["prediction"]["machine_cycle_hours"] = machine_cycle_hours
+            metadata["prediction"].update({
+                "machine_cycle_hours": machine_cycle_hours,
+                "layer_overhead_source": "calibrated_max_base_floor",
+                "layer_cycle_model_version": "max_base_floor_v2",
+                "layer_overhead_ms": 0.0,
+                "minimum_layer_cycle_ms": 20_000.0,
+                "minimum_layer_cycle_status": "identified",
+            })
     db.add(PrintRecord(
         record_id=record_id, name=f"печать {record_id}", material="alsi10mg",
         session_id=session_id, metadata_json=metadata,
@@ -79,7 +88,174 @@ def _summary(record_id: str) -> dict:
     return next(r["summary"] for r in items if r["record_id"] == record_id)
 
 
+def _configuration_record(db, record_id="pr_configuration"):
+    """Capture a configured technical quote, without claiming real scan/time accuracy."""
+    from copy import deepcopy
+    from core.config.settings import get_settings
+    from core.versioning.constants import ANALYSIS_VERSION
+    from domain.services.estimation.inputs import prepare_prediction_inputs
+    from storage.repositories.prints_repo import PrintsRepository
+
+    repo = PrintsRepository(db)
+    repo.save_machine_params({
+        "hatch_speed_mm_s": 1000.0, "contour_speed_mm_s": 500.0,
+        "hatch_distance_mm": 0.1, "layer_thickness_mm": 0.1,
+        "laser_count": 1, "recoat_time_ms": 10000.0,
+        "powder_cost_rub_per_kg": 1200.0,
+    })
+    _record(db, record_id, predicted_hours=4.1, cost=12400)
+    repo.add_print_file({
+        "record_id": record_id, "object_uri": "s3://technical-fixture/body",
+        "file_name": "technical.stl", "file_type": "stl", "size_bytes": 1,
+        "checksum": "a" * 64,
+    })
+    prepared = prepare_prediction_inputs(repo, record_id, compute_node_id=get_settings().compute_node_id)
+    record = repo.get_print_record(record_id)
+    metadata = deepcopy(record["metadata_json"])
+    metadata["prediction"].update({
+        "input_revision": record["revision"],
+        "calculation_inputs": {"configuration_schema_version": 1},
+        "provenance": {"component": "print-estimate", "config_hash": stable_hash({
+            "schema_version": 1, "analysis_version": ANALYSIS_VERSION,
+            "material": prepared["material"], "printer_id": prepared["printer_id"],
+            "powder_cost": prepared["powder_cost"],
+            "params": {key: value for key, value in prepared["params"].items() if key != "updated_at"},
+        })},
+    })
+    repo.update_print_record(record_id, {"metadata_json": metadata})
+    db.commit()
+    return metadata["prediction"]
+
+
+class TestConfiguredQuoteFreshness:
+    @pytest.mark.parametrize("change", [
+        {"hatch_distance_mm": 0.15}, {"recoat_time_ms": 22000.0},
+        {"filter_cost_rub": 4500.0},
+        {"scan_model_by_mat": {"technical-candidate": {"beta": [1, 2, 3, 4, 5, 6]}}},
+    ])
+    def test_current_settings_are_checked_without_rewriting_historical_quote(self, db, change):
+        from storage.repositories.prints_repo import PrintsRepository
+
+        saved = _configuration_record(db)
+        before = client.get("/prints/pr_configuration").json()
+        assert before["prediction_configuration_is_current"] is True
+        PrintsRepository(db).save_machine_params(change)
+        db.commit()
+        card = client.get("/prints/pr_configuration").json()
+        listed = next(item for item in client.get("/prints").json()["items"]
+                      if item["record_id"] == "pr_configuration")
+        for projected in (card, listed):
+            assert projected["prediction_configuration_is_current"] is False
+            assert projected["prediction_is_current"] is True
+            assert projected["summary"] == before["summary"]
+            assert projected["metadata_json"]["prediction"] == saved
+
+    def test_saving_unchanged_settings_is_not_a_changed_recipe(self, db):
+        from storage.repositories.prints_repo import PrintsRepository
+
+        _configuration_record(db)
+        PrintsRepository(db).save_machine_params({"recoat_time_ms": 10000.0})
+        db.commit()
+        assert client.get("/prints/pr_configuration").json()["prediction_configuration_is_current"] is True
+
+    def test_default_preset_is_part_of_the_same_resolution_as_the_estimator(self, db):
+        from storage.repositories.prints_repo import PrintsRepository
+
+        _configuration_record(db)
+        PrintsRepository(db).create_preset({
+            "name": "Technical preset", "material": "alsi10mg", "is_default": True,
+            "hatch_distance_mm": 0.12,
+        })
+        db.commit()
+        assert client.get("/prints/pr_configuration").json()["prediction_configuration_is_current"] is False
+
+    def test_legacy_quote_is_not_given_todays_configuration(self, db, monkeypatch):
+        from storage.repositories.prints_repo import PrintsRepository
+
+        _record(db, "pr_legacy_configuration", predicted_hours=4.1)
+        monkeypatch.setattr(PrintsRepository, "get_machine_params",
+                            lambda *args: pytest.fail("legacy configuration guess"))
+        for projected in (client.get("/prints/pr_legacy_configuration").json(),
+                          next(item for item in client.get("/prints").json()["items"]
+                               if item["record_id"] == "pr_legacy_configuration")):
+            assert projected["prediction_configuration_is_current"] is None
+            assert projected["prediction_is_current"] is True
+
+    def test_patch_clears_old_configuration_claim_until_read_projection(self, db):
+        _configuration_record(db)
+        before = client.get("/prints/pr_configuration").json()
+        response = client.patch("/prints/pr_configuration", json={
+            "expected_revision": before["revision"], "powder_cost_rub_per_kg": 1800,
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["prediction_configuration_is_current"] is None
+        assert client.get("/prints/pr_configuration").json()["prediction_configuration_is_current"] is False
+
+    def test_catalogue_reads_configuration_in_a_batch_not_per_card(self, db):
+        from sqlalchemy import event
+        from storage.db.session import engine
+
+        for index in range(10):
+            _configuration_record(db, f"pr_configuration_{index}")
+        selects = []
+        def observed(connection, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().startswith("SELECT") and "machine_presets" in statement:
+                selects.append(statement)
+        event.listen(engine, "before_cursor_execute", observed)
+        try:
+            response = client.get("/prints?limit=10")
+        finally:
+            event.remove(engine, "before_cursor_execute", observed)
+        assert response.status_code == 200
+        assert all(item["prediction_configuration_is_current"] is True
+                   for item in response.json()["items"])
+        assert len(selects) == 1
+
+
 class TestPlanVsFactSummary:
+    def test_edit_response_replaces_previous_freshness_without_erasing_history(self, db):
+        from copy import deepcopy
+
+        _record(db, "pr_edit_freshness", predicted_hours=4.1, cost=12400)
+        row = db.get(PrintRecord, "pr_edit_freshness")
+        row.revision = 2  # Publication advances the input revision once.
+        db.commit()
+        saved = deepcopy(row.metadata_json["prediction"])
+        assert client.get("/prints/pr_edit_freshness").json()["prediction_is_current"] is True
+
+        response = client.patch("/prints/pr_edit_freshness", json={
+            "expected_revision": 2, "layer_thickness_mm": 0.08,
+        })
+        assert response.status_code == 200, response.text
+        edited = response.json()
+        assert edited["revision"] == 3
+        assert edited["prediction_is_current"] is False
+        assert edited["metadata_json"]["prediction"] == saved
+        assert client.get("/prints/pr_edit_freshness").json()["prediction_is_current"] is False
+
+    @pytest.mark.parametrize("input_revision", [1, None])
+    def test_unlinked_card_does_not_show_an_unverified_snapshot_as_current(self, db, input_revision):
+        from copy import deepcopy
+
+        _record(db, "pr_stale_unlinked", predicted_hours=4.1, cost=12400)
+        row = db.get(PrintRecord, "pr_stale_unlinked")
+        metadata = deepcopy(row.metadata_json)
+        metadata["prediction"]["input_revision"] = input_revision
+        row.metadata_json = metadata
+        row.revision = 5
+        db.commit()
+        saved = deepcopy(metadata["prediction"])
+
+        card = client.get("/prints/pr_stale_unlinked").json()
+        listed = next(item for item in client.get("/prints").json()["items"]
+                      if item["record_id"] == "pr_stale_unlinked")
+        for projected in (card, listed):
+            assert projected["prediction_is_current"] is False
+            assert projected["summary"]["predicted_hours"] is None
+            assert projected["summary"]["predicted_cost_rub"] is None
+            assert projected["summary"]["comparison_status"] == "stale_prediction"
+            assert projected["metadata_json"]["prediction"] == saved
+
     def test_machine_time_is_the_actual_not_the_wall_span(self, db):
         """The estimate models machine time, so the comparison must use it.
 
@@ -177,6 +353,7 @@ class TestPlanVsFactSummary:
 def _cycle_evidence(db, *, normal_hours=4.42, normal_layers=174, bad_manifest=False):
     """Independent published analysis fixture, not parameters from a quote."""
     from sqlalchemy import select
+    from core.versioning.constants import ANALYSIS_VERSION
     sid = "s_cycle"
     _session(db, sid, machine_min=264, duration_min=492)
     rows = db.scalars(select(LayerSnapshot).where(LayerSnapshot.session_id == sid)
@@ -192,6 +369,7 @@ def _cycle_evidence(db, *, normal_hours=4.42, normal_layers=174, bad_manifest=Fa
     session.context = {"timing_publication": manifest, "runtime_payload": {"group": {
         **group, "timing_publication_id": "other" if bad_manifest else "cycle-publication",
         "analysis_snapshot": {"schema_version": 1, "analysis_id": "analysis-independent",
+            "provenance": {"analysis_version": ANALYSIS_VERSION},
             "features": group["features"], "time_accounting": {
                 "status": "ok", "source": "calibrated", "normal_time_scope": "eligible_measured_layers_only",
                 "normal_unique_layer_seconds": normal_hours * 3600 if normal_hours is not None else None,
@@ -260,6 +438,41 @@ class TestPublishedNormalCycle:
         comparison.attach_plan_vs_fact(repo, [record])
         assert record["summary"]["actual_hours"] == 4.42
         assert len(calls) == 1
+
+    @pytest.mark.parametrize("problem", ["unconfirmed_session_link", "stale_prediction", "incomplete_geometry", "unconfirmed_build_origin"])
+    def test_comparison_requires_the_same_input_admission_as_geometry_diagnostics(self, db, problem):
+        from copy import deepcopy
+        _cycle_evidence(db)
+        row = db.get(PrintRecord, "pr_cycle")
+        metadata = deepcopy(row.metadata_json)
+        if problem == "unconfirmed_session_link":
+            metadata["session_link_confirmed"] = False
+        elif problem == "stale_prediction":
+            row.revision = 5
+        elif problem == "incomplete_geometry":
+            metadata["geometry_quality"] = {"status": "incomplete", "missing": ["supports"]}
+        else:
+            metadata["prediction"]["build_origin_source"] = "minimum_supplied_geometry_z"
+        row.metadata_json = metadata
+        db.commit()
+        summary = _summary("pr_cycle")
+        assert summary["comparison_status"] == problem
+        assert summary["actual_hours"] is None
+        assert summary["error_pct"] is None
+        assert summary["diagnostics"]["measured_cycle_hours"] > 4.4
+
+    def test_old_normal_analysis_is_diagnostic_not_current_ground_truth(self, db):
+        from copy import deepcopy
+        _cycle_evidence(db)
+        row = db.get(BuildSession, "s_cycle")
+        context = deepcopy(row.context)
+        context["runtime_payload"]["group"]["analysis_snapshot"]["provenance"]["analysis_version"] = "obsolete"
+        row.context = context
+        db.commit()
+        summary = _summary("pr_cycle")
+        assert summary["comparison_status"] == "normal_cycle_unavailable"
+        assert summary["actual_hours"] is None
+        assert summary["diagnostics"]["measured_cycle_hours"] > 4.4
 
     def test_catalogue_reads_count_before_local_comparison(self, db, monkeypatch):
         from domain.services.print_cards import cards, comparison

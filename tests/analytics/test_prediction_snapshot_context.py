@@ -29,8 +29,11 @@ def test_snapshot_exposes_machine_mode_recoat_geometry_and_cycle():
             "recoat_time_source": "calibrated",
             "machine_cycle_hours": 10.25,
             "layer_overhead_ms": 400.0,
+            "layer_overhead_source": "calibrated_max_base_floor",
+            "layer_cycle_model_version": "max_base_floor_v2",
             "layer_overhead_hours": 0.25,
             "minimum_layer_cycle_ms": 20_000.0,
+            "minimum_layer_cycle_status": "identified",
             "minimum_cycle_active_layers": 30,
             "laser_count": 2,
             "cost_total_rub": 100.0,
@@ -62,6 +65,7 @@ def test_snapshot_exposes_machine_mode_recoat_geometry_and_cycle():
     assert snapshot["laser_count"] == 2
     assert snapshot["recoat_time_source"] == "calibrated"
     assert snapshot["machine_cycle_hours"] == 10.25
+    assert snapshot["prediction_time_scope"] == "machine_cycle"
     assert snapshot["time_breakdown"]["machine_hours"] == 10.25
     assert snapshot["time_breakdown"]["minimum_layer_cycle_ms"] == 20_000.0
     assert snapshot["geometry_fingerprint"].startswith("files-sha256:")

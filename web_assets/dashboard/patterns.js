@@ -187,7 +187,8 @@ async function loadPatterns(force = false) {
     }
 }
 
-const _riskColor = g => g === 'high' ? '#ef4444' : g === 'medium' ? '#f59e0b' : '#10b981';
+const _riskColor = g => g === 'high' ? '#ef4444' : g === 'medium' ? '#f59e0b'
+    : g === 'low' ? '#10b981' : '#6b7280';
 
 async function loadDefectRisk() {
     try {
@@ -205,16 +206,20 @@ async function loadDefectRisk() {
             return;
         }
         list.innerHTML = d.sessions.slice(0, 12).map(s => {
-            const pct = Math.round(s.risk * 100);
-            const col = _riskColor(s.grade);
+            const known = typeof s.risk === 'number' && Number.isFinite(s.risk)
+                && s.risk >= 0 && s.risk <= 1;
+            const pct = known ? Math.round(s.risk * 100) : null;
+            const col = _riskColor(known ? s.grade : 'unknown');
             const factors = (s.top_factors || []).map(f => f.factor).slice(0, 2).join(', ');
+            const method = !known ? 'нет измерений' : s.in_sample && s.method !== 'heuristic'
+                ? 'известный исход' : s.method === 'heuristic' ? 'индекс факторов' : 'оценка модели';
             return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #232a3a;">
-                <div style="width:46px;text-align:right;color:${col};font-weight:700;">${pct}%</div>
+                <div style="width:46px;text-align:right;color:${col};font-weight:700;">${pct == null ? '—' : `${pct}%`}</div>
                 <div style="flex:1;">
                     <div style="height:6px;background:#232a3a;border-radius:3px;overflow:hidden;">
-                        <div style="height:100%;width:${pct}%;background:${col};"></div>
+                        <div style="height:100%;width:${pct ?? 0}%;background:${col};"></div>
                     </div>
-                    <div style="color:#6b7280;font-size:11px;margin-top:3px;">${s.session_id.slice(0,28)} · ${factors || '—'}</div>
+                    <div style="color:#6b7280;font-size:11px;margin-top:3px;">${_esc(String(s.session_id || '').slice(0,28))} · ${method} · ${_esc(factors || '—')}</div>
                 </div>
             </div>`;
         }).join('');

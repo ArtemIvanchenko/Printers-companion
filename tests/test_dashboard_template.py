@@ -90,7 +90,7 @@ def test_dashboard_does_not_mislabel_platform_position_as_liquid_level():
 
 def test_dashboard_protects_shared_print_cards_from_stale_edits():
     html = dashboard_source()
-    assert "expected_revision: _pcRecord.revision" in html
+    assert "expected_revision: record.revision" in html
     assert "new EventSource('/prints/events')" in html
     assert "Карточка изменена на другом ПК" in html
 
@@ -133,7 +133,8 @@ def test_quality_correction_sends_the_current_final_verdict_id():
     end = html.index("function _renderPcProcess(", start)
     source = html[start:end]
 
-    assert "find(item => item.is_final)" in source
+    assert "_finalQualityOutcome(outcomes)" in source
+    assert "find(item => item.is_final)" not in source
     assert "payload.supersedes_outcome_id = latestFinalOutcome.outcome_id" in source
 
 

@@ -28,6 +28,7 @@ def _summary(values_by_layer: dict[int, float], name_ru: str) -> dict[str, Any]:
         ]
     mean = sum(values) / len(values)
     std = math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+    slope = theil_sen_slope(values, layers) if len(values) >= 3 else None
     return {
         "name_ru": name_ru,
         "layers": len(values),
@@ -36,7 +37,7 @@ def _summary(values_by_layer: dict[int, float], name_ru: str) -> dict[str, Any]:
         "median_sec_per_layer": round(med, 4),
         "p95_sec_per_layer": round(ordered[round((len(ordered) - 1) * 0.95)], 4),
         "coefficient_of_variation": round(std / abs(mean), 4) if mean else None,
-        "theil_sen_sec_per_layer": round(theil_sen_slope(values), 6) if len(values) >= 3 else None,
+        "theil_sen_sec_per_layer": round(slope, 6) if slope is not None else None,
         "outlier_layers": outliers[:50],
     }
 
@@ -106,7 +107,7 @@ def compute_layer_phase_statistics(events: list[Any]) -> dict[str, Any]:
         "first_layer": min(valid),
         "last_layer": max(valid),
         "phases": phases,
-        "method_version": "layer-phases-0.2.0",
+        "method_version": "layer-phases-0.2.1",
         "source": "time_log layer_timing_summary / NEW_STATS",
     }
 

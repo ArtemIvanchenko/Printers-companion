@@ -1,8 +1,8 @@
 """Print-time estimation for SLM builds — PySLM vector engine only.
 
-The estimate hatches a sample of layers with PySLM and times the **real scan
-vectors** (hatch + contour + laser-off jumps and delays), then scales to the
-true layer count and divides across lasers. There is no longer a fast "Excel"
+The estimate hatches sample heights with PySLM and projects the geometric scan
+vectors (hatch + contour + laser-off jumps and delays) to physical layer
+centres, dividing scan time across lasers. There is no longer a fast "Excel"
 area formula: it systematically under-predicted (ignored jumps, supports and
 everything outside the single sliced part) and only misled the operator. When
 PySLM cannot build the trajectories for a file we raise ``EstimationError``
@@ -27,10 +27,10 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 from dataclasses import dataclass, field
 
 from analytics.prediction.contract import PredictionResult, PredictionSource
-from analytics.prediction.layer_engine import DEFAULT_JUMP_SPEED_MM_S
 from analytics.prediction.stl_slicer import EstimationError, SliceResult
 
 logger = logging.getLogger(__name__)
@@ -39,17 +39,12 @@ logger = logging.getLogger(__name__)
 # когда recoat_time_ms не задан в параметрах машины.
 _DEFAULT_RECOAT_MS = 9500
 
-# Фоллбэки параметров сканера для векторного расчёта, когда они не заданы
-# в параметрах машины (их следует задать через UI для точности).
-_DEFAULT_JUMP_DELAY_MS = 0.0
-
-
 @dataclass
 class PrintTimeEstimate:
     scan_hours: float           # laser-on time, divided across lasers (after correction)
     recoat_hours: float         # powder recoating, sequential regardless of lasers
-    print_hours: float          # scan + recoat = machine busy time (after correction)
-    total_days: float           # continuous printing, 24 h/day
+    print_hours: float          # scan + recoat subtotal; not necessarily the full cycle
+    total_days: float | None    # full continuous cycle, only when admitted
     method: str                 # "pyslm"
     raw_scan_hours: float = 0.0     # scan before the scan-only correction
     raw_recoat_hours: float = 0.0   # recoat is independently calibrated
@@ -101,16 +96,16 @@ def build_time_prediction(
     elif correction_factor != 1.0:
         source = PredictionSource.CALIBRATED
         explanation = (
-            f"Скан рассчитан по паспортным скоростям и скорректирован коэффициентом "
-            f"×{correction_factor:.3f}, выученным из истории предсказано/факт; "
+            f"Скан рассчитан по заданным скоростям с коэффициентом "
+            f"×{correction_factor:.3f} из настроек; "
             f"нанесение слоя — {recoat_note}."
         )
         sample_size = None  # число пар калибровки не передаётся на этот вызов
     else:
         source = PredictionSource.CALCULATED
         explanation = (
-            "Скан рассчитан по паспортным скоростям без калибровки (нет истории печатей "
-            f"этого режима); нанесение слоя — {recoat_note}."
+            "Скан рассчитан по заданным скоростям без поправочного множителя; "
+            f"нанесение слоя — {recoat_note}."
         )
         sample_size = None
 
@@ -207,7 +202,8 @@ def estimate_print_time(
     """Estimate machine time from real PySLM scan trajectories.
 
     Build direction is the STL's +Z axis (the slicer's layer-stacking axis);
-    ``slices`` already carries the layer count / height for that orientation.
+    ``slices`` carries the thickness and body height for that orientation; an
+    explicitly supplied build origin also determines preceding machine layers.
 
     Raises ``EstimationError`` when PySLM cannot build trajectories for the
     file — we never silently fall back to a less accurate formula.
@@ -216,30 +212,47 @@ def estimate_print_time(
     recoat_ms, recoat_source = resolve_recoat_ms(params, material)
     warnings: list[str] = list(slices.warnings)
 
-    if not contour_speed:
-        warnings.append("Скорость контуров не задана — контуры не учтены.")
     if stl_bytes is None:
         raise EstimationError(
             "Точный расчёт недоступен: нет геометрии STL для построения траекторий."
         )
+    mesh = slices.prepared_mesh
+    if mesh is None and slices.was_repaired:
+        raise EstimationError(
+            "Нет подготовленной починенной сетки; повторите slice_stl для исходного STL."
+        )
+    build_origin_z = params.get("build_origin_z_mm")
+    if build_origin_z is not None:
+        try:
+            build_origin_z = float(build_origin_z)
+        except (TypeError, ValueError) as exc:
+            raise EstimationError("build_origin_z_mm должен быть числом") from exc
+        if not math.isfinite(build_origin_z):
+            raise EstimationError("build_origin_z_mm должен быть конечным числом")
 
-    # Real vectors per sampled layer over the whole height, integrated — the
-    # old path hatched 10 sample sections and scaled the MEAN by layer count,
-    # which averaged away geometry variation with height.
+    # Use the same physical-layer projection and scan/cycle math as the plate
+    # path. A floor cannot be applied to integrated scan totals after summing.
     from analytics.prediction.layer_engine import (
+        _resolve_layer_cycle_model_for_mode,
         compute_layer_series,
+        machine_cycle_from_layers,
+        physics_scan_seconds_by_layer,
         resolve_scan_model,
-        scan_seconds_from_model,
+        scan_seconds_by_layer_from_model,
         scan_geometry_options,
     )
 
     try:
         import trimesh
 
-        mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", process=False)
+        if mesh is None:
+            # Compatibility for manually constructed/legacy SliceResult inputs.
+            mesh = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", process=False)
         geometry_options = scan_geometry_options(params)
-        series = compute_layer_series([mesh], hatch_distance, slices.layer_thickness_mm,
-                                      **geometry_options)
+        series = compute_layer_series(
+            [mesh], hatch_distance, slices.layer_thickness_mm,
+            build_origin_z_mm=build_origin_z, **geometry_options,
+        )
     except EstimationError:
         raise
     except Exception as exc:
@@ -247,35 +260,44 @@ def estimate_print_time(
             "Точный расчёт недоступен: не удалось построить траектории PySLM "
             f"({exc}). Проверьте STL (геометрия, ориентация, масштаб)."
         )
-    totals = series.totals(slices.layer_thickness_mm)
+    warnings.extend(series.warnings)
+    if build_origin_z is None:
+        warnings.append(
+            "Начало печати не подтверждено, поэтому слои считаются от минимального "
+            f"Z переданной геометрии: {series.z_min:.3f} мм. "
+            "Для подтверждённой координаты платформы укажите build_origin_z_mm."
+        )
+    layer_count = series.layer_count(slices.layer_thickness_mm)
+    if geometry_options["contours_enabled"] and not contour_speed:
+        contour_speed = hatch_speed
+        warnings.append("Скорость контуров не задана — использована скорость штриховки.")
 
     fitted = resolve_scan_model(params, material, slices.layer_thickness_mm)
     scan_source = "physics"
     if fitted is not None:
-        scan_seconds = scan_seconds_from_model(
-            totals, slices.layer_count, laser_count, fitted,
+        raw_scan_seconds_by_layer = scan_seconds_by_layer_from_model(
+            series, slices.layer_thickness_mm, laser_count, fitted,
         )
         scan_source = "fitted"
+        warnings.append(
+            "Модель прожига соответствует сохранённым настройкам; "
+            "это не подтверждение фактически исполненной стратегии слайсера."
+        )
     else:
-        jump_speed = params.get("jump_speed_mm_s") or DEFAULT_JUMP_SPEED_MM_S
-        jump_delay_s = (params.get("jump_delay_ms") or _DEFAULT_JUMP_DELAY_MS) / 1000.0
-        scan_seconds = totals["hatch_mm"] / hatch_speed
-        if contour_speed > 0:
-            scan_seconds += totals["contour_mm"] / contour_speed
-        scan_seconds += totals["open_mm"] / hatch_speed
-        scan_seconds += totals["jump_mm"] / jump_speed + totals["n_jumps"] * jump_delay_s
-        scan_seconds /= laser_count
+        raw_scan_seconds_by_layer = physics_scan_seconds_by_layer(
+            series, slices.layer_thickness_mm, params, material, laser_count,
+        )
         if not params.get("jump_speed_mm_s"):
             warnings.append("Скорость перескока не задана — взято значение по умолчанию.")
 
-    recoat_seconds = slices.layer_count * recoat_ms / 1000.0
+    recoat_seconds = layer_count * recoat_ms / 1000.0
     if recoat_source == "default":
         warnings.append(
             f"Время нанесения слоя не задано и не откалибровано по логам — используется "
             f"значение по умолчанию {recoat_ms / 1000:.1f} с/слой."
         )
 
-    raw_scan_hours = scan_seconds / 3600.0
+    raw_scan_hours = sum(raw_scan_seconds_by_layer) / 3600.0
     raw_recoat_hours = recoat_seconds / 3600.0
     raw_print_hours = raw_scan_hours + raw_recoat_hours
 
@@ -289,19 +311,58 @@ def estimate_print_time(
     recoat_hours = raw_recoat_hours
     print_hours = scan_hours + recoat_hours
 
+    cycle_model, layer_overhead_source = _resolve_layer_cycle_model_for_mode(
+        params, material, slices.layer_thickness_mm, fitted,
+    )
+    if cycle_model is not None and cycle_model.get("minimum_cycle_ms") is None:
+        lower = cycle_model.get("minimum_applicable_component_ms")
+        if (not isinstance(lower, (int, float)) or isinstance(lower, bool)
+                or not math.isfinite(lower) or lower < 0
+                or any(scan * factor * 1000 + recoat_ms < lower
+                       for scan in raw_scan_seconds_by_layer)):
+            cycle_model, layer_overhead_source = None, "outside_calibrated_range"
+            warnings.append(
+                "Есть слои короче проверенной области калибровки; "
+                "неизвестное минимальное время цикла не заменено постоянной добавкой."
+            )
+    cycle_seconds, _, minimum_cycle_active_layers = machine_cycle_from_layers(
+        raw_scan_seconds_by_layer, scan_correction_factor=factor,
+        recoat_ms=recoat_ms, cycle_model=cycle_model,
+    )
+    machine_cycle_hours = cycle_seconds / 3600.0 if cycle_model is not None else None
+    if cycle_model is None:
+        warnings.append(
+            "Нормальный полный цикл слоя пока не откалиброван по make_layer_ms; "
+            "прогноз содержит только прожиг и нанесение, полный цикл неизвестен."
+        )
+    prediction = build_time_prediction(
+        print_hours=machine_cycle_hours if machine_cycle_hours is not None else print_hours,
+        correction_factor=factor, scan_source=scan_source, recoat_source=recoat_source,
+        fitted_model=fitted if scan_source == "fitted" else None, warnings=warnings,
+    )
+    prediction.explanation += (
+        " Полный нормальный цикл учитывает откалиброванную модель контроллера в её проверенной области."
+        if machine_cycle_hours is not None else
+        " Оценена сумма прожига и нанесения; полный нормальный цикл неизвестен."
+    )
+
     return PrintTimeEstimate(
         scan_hours=scan_hours,
         recoat_hours=recoat_hours,
         print_hours=print_hours,
-        total_days=print_hours / 24.0,
+        total_days=machine_cycle_hours / 24.0 if machine_cycle_hours is not None else None,
         method="cohatch" + ("+fitted" if scan_source == "fitted" else ""),
         raw_scan_hours=raw_scan_hours,
         raw_recoat_hours=raw_recoat_hours,
         raw_print_hours=raw_print_hours,
         correction_factor=factor,
         breakdown={
-            "build_axis": "Z",  # построение вдоль Z, плита = z_min
-            "layer_count": slices.layer_count,
+            "build_axis": "Z",
+            "build_origin_z_mm": series.z_min,
+            "build_origin_source": (
+                "explicit" if build_origin_z is not None else "minimum_supplied_geometry_z"
+            ),
+            "layer_count": layer_count,
             "height_mm": round(slices.height_mm, 2),
             "avg_section_area_mm2": round(slices.avg_area_mm2, 1),
             "avg_section_perimeter_mm": round(slices.avg_perimeter_mm, 1),
@@ -315,16 +376,18 @@ def estimate_print_time(
             "recoat_time_ms": round(recoat_ms, 1),
             "recoat_time_source": recoat_source,
             "scan_source": scan_source,
+            "print_hours": print_hours,
+            "machine_cycle_hours": machine_cycle_hours,
+            "prediction_time_scope": "machine_cycle" if cycle_model is not None else "burn_plus_pour",
+            "layer_overhead_source": layer_overhead_source,
+            "layer_overhead_ms": cycle_model["base_overhead_ms"] if cycle_model is not None else None,
+            "layer_cycle_model_version": (cycle_model or {}).get("version"),
+            "minimum_layer_cycle_ms": (cycle_model or {}).get("minimum_cycle_ms"),
+            "minimum_layer_cycle_status": (cycle_model or {}).get("minimum_cycle_status", "unavailable"),
+            "minimum_cycle_active_layers": minimum_cycle_active_layers,
         },
         warnings=warnings,
-        prediction=build_time_prediction(
-            print_hours=print_hours,
-            correction_factor=factor,
-            scan_source=scan_source,
-            recoat_source=recoat_source,
-            fitted_model=fitted if scan_source == "fitted" else None,
-            warnings=warnings,
-        ),
+        prediction=prediction,
     )
 
 

@@ -5,15 +5,22 @@ from analytics.log_insights.clocks import iso
 from analytics.prediction.timing_evidence import summarize_timing_events
 from analytics.prediction.timing_validation import (
     MAX_BURN_MS, MAX_POUR_MS, MIN_BURN_MS, MIN_POUR_MS,
-    calibration_timing_payloads, finite_number, normal_phase_exclusions,
+    calibration_timing_payloads, finite_number, machine_cycle_prediction_hours, normal_phase_exclusions,
 )
 
 
-def time_accounting(events, pauses=(), cycle_model=None):
+def time_accounting(events, pauses=None, cycle_model=None):
+    # Timing-only publications do not retain pause events. An omitted pause
+    # stream is unknown; an explicitly supplied empty stream means none found.
+    pauses = tuple(pauses) if pauses is not None else None
+    open_pauses = sum(p["end"] is None or not p["resumed"] for p in pauses) if pauses is not None else None
+    confirmed_pause_seconds = (sum(p["end"] - p["start"] for p in pauses
+                                   if p["end"] is not None and p["resumed"])
+                               if pauses is not None else None)
     evidence = summarize_timing_events(events)
     model = cycle_model or {}
     base, floor = model.get("layer_overhead_ms"), model.get("minimum_layer_cycle_ms")
-    calibrated = finite_number(base) and finite_number(floor) and base >= 0 and floor >= 0
+    calibrated = machine_cycle_prediction_hours(model) is not None and finite_number(floor)
     totals = {key: 0.0 for key in ("laser_scan", "powder_recoat", "base_overhead",
                                   "minimum_cycle_wait", "unexplained_residual")}
     normal_seconds = 0.0
@@ -67,12 +74,16 @@ def time_accounting(events, pauses=(), cycle_model=None):
         "repeat_attempt_seconds": max(0.0, all_seconds - first_seconds),
         "repeat_attempt_count": evidence.repeated_attempt_rows,
         "ambiguous_layer_count": len(evidence.ambiguous_layers),
-        "explicit_pause_seconds": sum(p["end"] - p["start"] for p in pauses if p["end"] is not None),
-        "open_pause_count": sum(p["end"] is None for p in pauses),
+        "explicit_pause_seconds": confirmed_pause_seconds if open_pauses == 0 else None,
+        "confirmed_explicit_pause_seconds": confirmed_pause_seconds,
+        "open_pause_count": open_pauses,
         "largest_residuals": rows[:100],
         "limitations_ru": [
             "Компоненты складываются в записанное время всех попыток; время пауз и повторов показано отдельно и не прибавляется повторно.",
             "Необъяснённый остаток не объявляется паузой без события в журнале.",
+            "Общая длительность пауз неизвестна, если хотя бы один интервал не имеет явного возобновления.",
+            "Подтверждённый подытог включает только интервалы с явным возобновлением и не заполняет неизвестные длительности.",
+            "Без опубликованных сведений о паузах их длительность и число открытых интервалов неизвестны.",
             "Без калибровки минимального цикла нормальное полное время не определяется.",
             "Нормальная сумма относится только к допустимым измеренным слоям, не ко всей печати при пропусках.",
             "Выход длительности фазы за предварительный диапазон исключает слой из нормальной суммы, но не доказывает паузу или повреждение лога.",

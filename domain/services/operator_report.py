@@ -15,8 +15,8 @@ from profiles.signal_catalog import signal_display_name
 
 _SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 _CLASSIFICATION_RU = {
-    "REAL_PRINT": "Печать завершена",
-    "REAL_PRINT_WITH_RESUME": "Печать завершена после возобновления",
+    "REAL_PRINT": "Печать",
+    "REAL_PRINT_WITH_RESUME": "Печать с повторным запуском",
     "PRE_BURN_SESSION": "Подготовительный прожиг",
     "SERVICE_SESSION": "Сервисная сессия",
     "IDLE_DIAGNOSTIC": "Диагностическая сессия",
@@ -68,19 +68,23 @@ def _recommendation_for(*values: Any) -> str:
     return "Сопоставить участок с геометрией детали и журналом действий оператора."
 
 
-def _latest_final_outcome(outcomes: list[dict[str, Any]]) -> dict[str, Any] | None:
-    finals = [
-        row for row in outcomes
-        # Legacy report payloads predate the explicit flag; their accepted /
-        # rejected rows were already treated as final. A stored new row always
-        # carries True/False, so generic observations remain excluded.
-        if row.get("is_final", True) and row.get("result") in {"accepted", "rejected"}
-    ]
-    if not finals:
-        return None
-    # Repository order is newest first; sorting makes the pure function safe for
-    # callers that pass arbitrary order.
-    return max(finals, key=lambda row: (str(row.get("timestamp") or ""), str(row.get("outcome_id") or "")))
+def _latest_final_outcome(outcomes: list[dict[str, Any]], *, session_id=None,
+                          print_record=None) -> dict[str, Any] | None:
+    from domain.services.quality import final_outcome_heads
+
+    exact_card = (print_record or {}).get("record_id")
+    pool = [row for row in outcomes if row.get("print_record_id") == exact_card] if exact_card else outcomes
+    heads = final_outcome_heads(pool)
+    # This exact physical card's QC survives a corrected log association.
+    if session_id and not exact_card:
+        heads = [row for row in heads if row.get("session_id") == session_id]
+    if len(heads) == 1:
+        return heads[0]
+    # Presentation-only singleton payloads predate the strict stored flag.
+    # This compatibility never reaches ML and never guesses among old heads.
+    legacy = [row for row in outcomes if "is_final" not in row
+              and row.get("result") in {"accepted", "rejected"}]
+    return legacy[0] if len(legacy) == 1 and not any(row.get("is_final") is True for row in outcomes) else None
 
 
 def build_operator_report(
@@ -120,7 +124,7 @@ def build_operator_report(
         })
 
     dq_score = _number(data_quality.get("score"))
-    if dq_score is None:
+    if "score" not in data_quality:
         dq_score = _number(features.get("data_quality_score"))
     for issue in data_quality.get("issues") or []:
         add(
@@ -225,27 +229,43 @@ def build_operator_report(
 
     deviations.sort(key=lambda row: (-_SEVERITY_RANK[row["severity"]], row["code"]))
 
-    latest = _latest_final_outcome(outcomes)
+    latest = _latest_final_outcome(outcomes, session_id=session_id, print_record=print_record)
     classification = str(group.get("classification") or "INCOMPLETE_OR_UNKNOWN")
+    classification_label = _CLASSIFICATION_RU.get(classification, classification)
+    if (features.get("completion_status") == "finished"
+            and classification in {"REAL_PRINT", "REAL_PRINT_WITH_RESUME"}):
+        classification_label = "Печать завершена" + (
+            " (повторный запуск)" if classification == "REAL_PRINT_WITH_RESUME" else ""
+        )
+    telemetry_evidence = health.get("evidence") or {}
+    incomplete_measurements = (
+        telemetry_evidence.get("complete_available_stream") is False
+        or telemetry_evidence.get("sample_count") == 0
+    )
     classification_confidence = _number(group.get("confidence")) or 0.0
     if classification_confidence > 1:
         classification_confidence /= 100
     data_factor = (dq_score / 100) if dq_score is not None else 0.35
+    if incomplete_measurements:
+        data_factor = min(data_factor, 0.35)
     confidence_score = round(max(0.0, min(1.0, 0.65 * data_factor + 0.35 * classification_confidence)), 2)
     confidence_level = "высокая" if confidence_score >= 0.8 else "средняя" if confidence_score >= 0.55 else "низкая"
 
     if latest and latest.get("result") == "rejected":
         state_code, state_label, state_severity = "defect_confirmed", "Контролем подтверждён брак", "critical"
+    elif latest and latest.get("result") == "accepted":
+        if deviations:
+            state_code, state_label, state_severity = "accepted_with_observations", "Годность подтверждена, есть замечания по процессу", "medium"
+        else:
+            state_code, state_label, state_severity = "accepted", "Годность подтверждена контролем", "info"
     elif dq_score is not None and dq_score < 50:
         state_code, state_label, state_severity = "insufficient_data", "Недостаточно надёжных данных для уверенного вывода", "high"
-    elif latest and latest.get("result") == "accepted" and deviations:
-        state_code, state_label, state_severity = "accepted_with_observations", "Годность подтверждена, есть замечания по процессу", "medium"
+    elif (dq_score is None or incomplete_measurements) and not latest and classification in {"REAL_PRINT", "REAL_PRINT_WITH_RESUME"}:
+        state_code, state_label, state_severity = "insufficient_data", "Недостаточно надёжных данных для уверенного вывода", "high"
     elif any(_SEVERITY_RANK[row["severity"]] >= _SEVERITY_RANK["high"] for row in deviations):
         state_code, state_label, state_severity = "attention_required", "Требуется проверка отклонений", "high"
     elif deviations:
-        state_code, state_label, state_severity = "review_recommended", "Печать завершена, есть замечания", "medium"
-    elif latest and latest.get("result") == "accepted":
-        state_code, state_label, state_severity = "accepted", "Годность подтверждена контролем", "info"
+        state_code, state_label, state_severity = "review_recommended", "Есть замечания по процессу", "medium"
     elif classification in {"REAL_PRINT", "REAL_PRINT_WITH_RESUME"}:
         state_code, state_label, state_severity = "no_significant_deviations", "Существенных отклонений не обнаружено", "info"
     else:
@@ -259,6 +279,8 @@ def build_operator_report(
     if session_id is None:
         recommendations.append("Загрузить и привязать логи печати, чтобы рассчитать отклонения и уверенность анализа.")
     if not latest and classification in {"REAL_PRINT", "REAL_PRINT_WITH_RESUME"}:
+        if dq_score is None or incomplete_measurements:
+            recommendations.append("Проверить комплектность и доступность исходных измерений печати.")
         recommendations.append("После контроля детали зафиксировать итог «годная» или «брак» в карточке печати.")
     if not recommendations:
         recommendations.append("Дополнительных действий по данным автоматического анализа не требуется.")
@@ -297,7 +319,7 @@ def build_operator_report(
         "session_id": session_id,
         "classification": {
             "code": classification,
-            "label_ru": _CLASSIFICATION_RU.get(classification, classification),
+            "label_ru": classification_label,
         },
         "state": {"code": state_code, "label_ru": state_label, "severity": state_severity},
         "confidence": {
