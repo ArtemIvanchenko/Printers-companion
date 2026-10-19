@@ -69,6 +69,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install the application base runtime for release capture
+        run: python -m pip install -r requirements.base.txt
       - name: Capture and verify immutable operator images
         run: python scripts/maintenance/capture_desktop_images.py --context default --output "$RUNNER_TEMP/operator-images.json"
       - uses: actions/upload-artifact@v4
